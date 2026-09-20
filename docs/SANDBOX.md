@@ -93,10 +93,13 @@ artifact_reject(artifact_id, reason)
 Three things the Harness does that the proposer cannot influence:
 
 - **It names the destination.** The caller never supplies a host path; the file
-  lands in the durable workspace as `<artifact_id>_<basename>`.
-- **It re-hashes on arrival.** The receipt reports `sha256_at_proposal`,
-  `sha256_on_arrival` and `content_changed_since_proposal`, so a file edited
-  between proposal and decision is visible rather than silently promoted.
+  lands in the durable artifact store as `<artifact_id>_<basename>`, or in a
+  filespace root the decider named.
+- **It promotes the proposal blob, not the scratch file.** A proposal is
+  content-addressed when it is made, so the reviewed digest names immutable
+  bytes and those are what land. A scratch file edited after the proposal
+  cannot influence the result; the divergence is recorded as a fact about the
+  neuocyte.
 - **It enforces a type allowlist** and a size cap.
 
 The bytes also land in the content-addressed blob store, so a promoted artifact

@@ -313,15 +313,17 @@ MUTATIONS: list[Mutation] = [
              "assertion of safety once the hardening starts working.",
     ),
     Mutation(
-        "I34", "Promotion copies the reviewed bytes or refuses",
+        "I34", "Promotion materialises the reviewed blob, not the scratch file",
         "src/amoeba/harness_api.py",
-        '        if digest != row["sha256"]:',
-        '        if False:  # MUTANT: promote whatever is on disk now',
-        ["test_promotion_refuses_content_that_changed_after_it_was_proposed"],
-        layer="artifact_promote (the re-hash at time of copy)",
-        note="a time-of-check/time-of-use swap. The file stays writable by "
-             "the neuocyte between proposal and decision, so the digest has "
-             "to be re-checked when the bytes are actually read.",
+        "        data = mind.blobs.get(digest)",
+        '        data = sup.sandboxes.resolve_inside(  # MUTANT: read scratch\n'
+        '            sup.sandboxes.get(row["sandbox_id"]), row["path"]).read_bytes()',
+        ["test_promotion_promotes_the_reviewed_bytes_not_whatever_scratch_holds",
+         "test_promotion_materialises_the_reviewed_bytes_not_whatever_scratch_holds"],
+        layer="artifact_promote (where the promoted bytes come from)",
+        note="restores the time-of-check/time-of-use surface. Reading scratch "
+             "makes what lands depend on a file the neuocyte can still write, "
+             "which is exactly what sourcing from an immutable blob removes.",
     ),
     Mutation(
         "I35", "Concurrent sandboxes inherit no handles from each other",
@@ -560,18 +562,20 @@ MUTATIONS: list[Mutation] = [
              "copy dies with the scratch and 'safe to destroy' is false.",
     ),
     Mutation(
-        "I42b", "An undecided proposal lapses instead of claiming to await a decision",
+        "I42b", "Destroying a sandbox does not decide a proposal",
         "src/amoeba/harness_api.py",
-        '        lapsing = [dict(r) for r in mind.db.conn.execute(',
-        "        lapsing = []; _unused = (lambda *a: None)(  # MUTANT: never lapse\n"
-        "            [dict(r) for r in mind.db.conn.execute(",
-        ["test_an_undecided_proposal_lapses_rather_than_lying"],
-        layer="sandbox_destroy (the sweep of still-proposed artifacts)",
-        also=[('            " WHERE sandbox_id = ? AND status = \'proposed\'", (sandbox_id,))]',
-               '            " WHERE sandbox_id = ? AND status = \'proposed\'", (sandbox_id,))])')],
-        note="leaves rows saying 'proposed' for content that no longer exists "
-             "anywhere. Nothing crashes; the state simply asserts something "
-             "untrue, which is the failure mode worth a test.",
+        "        out = mgr.destroy(sandbox_id)",
+        '        mind.db.conn.execute(  # MUTANT: teardown decides\n'
+        '            "UPDATE artifacts SET status = \'lapsed\'"\n'
+        '            " WHERE sandbox_id = ? AND status = \'proposed\'", (sandbox_id,))\n'
+        '        mind.db.conn.commit()\n'
+        "        out = mgr.destroy(sandbox_id)",
+        ["test_a_proposal_stays_promotable_after_its_sandbox_is_destroyed",
+         "test_destroying_a_sandbox_decides_nothing"],
+        layer="sandbox_destroy (whether teardown touches proposal state)",
+        note="reintroduces lapsing by *adding* it back, because the claim is "
+             "now the absence of a coupling: sandbox lifetime driving a "
+             "decision is the thing being ruled out.",
     ),
     Mutation(
         "I43", "Sandboxed code cannot reach the other three stores",
@@ -594,13 +598,13 @@ MUTATIONS: list[Mutation] = [
         "src/amoeba/harness_api.py",
         "        digest = mind.blobs.put(data)",
         "        digest = sha256_hex(data)  # MUTANT: hash but do not preserve",
-        ["test_proposal_evidence_survives_even_without_a_decision",
-         "test_an_undecided_proposal_lapses_rather_than_lying"],
+        ["test_an_undecided_proposal_keeps_its_evidence_and_its_pending_status",
+         "test_a_proposal_stays_promotable_after_its_sandbox_is_destroyed"],
         layer="artifact_propose (content-addressing at propose time)",
-        note="the half that is easy to drop, because everything still works: "
-             "the digest is recorded, the lapse is recorded, and only the "
-             "bytes are missing. The record then describes content nobody can "
-             "ever see.",
+        note="now load-bearing rather than merely honest: without the "
+             "blob there is nothing to promote once the scratch is gone, "
+             "so the proposal state machine would be coupled to sandbox "
+             "lifetime again by the back door.",
     ),
     Mutation(
         "I37d", "A hard link is not a way to reach a file outside a root",

@@ -82,11 +82,17 @@ class EventKind:
     ARTIFACT_PROPOSED = "artifact.proposed"
     ARTIFACT_PROMOTED = "artifact.promoted"
     ARTIFACT_REJECTED = "artifact.rejected"
-    # A proposal whose compute sandbox was destroyed before anyone
-    # decided on it. Its bytes lived only in that scratch, so it can
-    # never be promoted; saying so is better than leaving a row that
-    # claims to be awaiting a decision.
+    # RETIRED. Proposals used to lapse when their compute sandbox was
+    # destroyed, because the scratch held the only promotable copy. Proposal
+    # bytes are now content-addressed when the proposal is made, so sandbox
+    # lifetime no longer touches the proposal state machine and nothing emits
+    # this any more. The constant stays so historical events still name a
+    # known kind; do not reuse it.
     ARTIFACT_LAPSED = "artifact.lapsed"
+    # The scratch copy changed after a proposal was made. The reviewed bytes
+    # are promoted regardless -- this records the divergence, which is a fact
+    # about the neuocyte rather than a reason to refuse.
+    ARTIFACT_SCRATCH_DIVERGED = "artifact.scratch_diverged"
 
     # host filesystem. FILE_SUPERSEDED carries the digest of the content that
     # was there before, which is what makes every write reversible.

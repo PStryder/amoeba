@@ -270,33 +270,28 @@ def build(sup: "Supervisor") -> dict[str, Any]:  # noqa: C901
                         reason: str = "", operation_id: str | None = None
                         ) -> dict[str, Any]:
         mgr = _sandbox_manager()
-        # Anything still merely *proposed* had its bytes only in this scratch.
-        # Destroying the sandbox is allowed to lose it -- it was never accepted
-        # -- but the row must stop claiming to be awaiting a decision.
-        lapsing = [dict(r) for r in mind.db.conn.execute(
-            "SELECT artifact_id, path, sha256 FROM artifacts"
-            " WHERE sandbox_id = ? AND status = 'proposed'", (sandbox_id,))]
+        # Sandbox lifetime is deliberately absent from the proposal state
+        # machine. A proposal's bytes are content-addressed when it is made, so
+        # destroying the scratch removes a copy, not *the* copy: the proposal
+        # stays pending and promotable by its digest. An earlier version lapsed
+        # proposals here, which was a workaround for a constraint that no
+        # longer exists.
+        still_pending = mind.db.conn.execute(
+            "SELECT COUNT(*) AS n FROM artifacts"
+            " WHERE sandbox_id = ? AND status = 'proposed'",
+            (sandbox_id,)).fetchone()["n"]
         out = mgr.destroy(sandbox_id)
 
         def body(m: Mutation) -> None:
             m.sql("UPDATE sandboxes SET status = 'destroyed', destroyed_at = ?"
                   " WHERE sandbox_id = ?", (time.time(), sandbox_id))
-            for art in lapsing:
-                m.sql("UPDATE artifacts SET status = 'lapsed', decided_by = ?,"
-                      " decided_at = ?, reason = ? WHERE artifact_id = ?",
-                      (actor, time.time(),
-                       "its compute sandbox was destroyed before a decision",
-                       art["artifact_id"]))
-                m.emit(EventKind.ARTIFACT_LAPSED, {
-                    "artifact_id": art["artifact_id"], "sandbox_id": sandbox_id,
-                    "path": art["path"], "actor": actor,
-                    "sha256": art["sha256"], "evidence_preserved": True,
-                    "note": ("never accepted, and the scratch copy is gone; the "
-                             "bytes that were proposed remain retrievable by "
-                             "this digest as evidence of the proposal")})
             m.emit(EventKind.SANDBOX_DESTROYED,
                    {"sandbox_id": sandbox_id, "actor": actor,
-                    "reason": reason, "artifacts_lapsed": len(lapsing)})
+                    "reason": reason,
+                    "proposals_still_pending": still_pending,
+                    "note": ("destroying scratch does not decide anything; any "
+                             "pending proposal remains promotable from its "
+                             "content-addressed bytes")})
 
         receipt, _ = mind.writer.apply(body, actor=actor, operation_id=operation_id,
                                        bump_version=False,
@@ -321,8 +316,13 @@ def build(sup: "Supervisor") -> dict[str, Any]:  # noqa: C901
         exactly the bytes that were offered". Without that, an abandoned
         proposal leaves a rationale describing content nobody can ever see.
 
-        Evidence is not acceptance. A lapsed proposal stays lapsed; recovering
-        its bytes later is a fresh Harness act, not a promotion.
+        Because those bytes are immutable and addressed by digest, they are
+        also what promotion materialises. The compute sandbox is where the file
+        was *made*, not where the promotable copy lives, so a proposal stays
+        pending and promotable long after its sandbox is gone.
+
+        Evidence is still not acceptance: a proposal that is never promoted
+        never becomes an artifact, however long its bytes are kept.
         """
         mgr = _sandbox_manager()
         # resolve_inside is the path check; read_file would additionally slurp
@@ -369,7 +369,7 @@ def build(sup: "Supervisor") -> dict[str, Any]:  # noqa: C901
     def artifact_promote(*, artifact_id: str, decided_by: str = "supervisor",
                          root: str | None = None, path: str | None = None,
                          operation_id: str | None = None) -> dict[str, Any]:
-        """The Harness copies a proposed artifact out of the sandbox.
+        """The Harness materialises a proposed artifact.
 
         Without ``root`` it lands in the internal artifact store under a name the
         Harness picks. With ``root`` it lands in a configured filespace root at
@@ -377,58 +377,60 @@ def build(sup: "Supervisor") -> dict[str, Any]:  # noqa: C901
         is a *decision*, made here, on a destination the person deciding named.
         The neuocyte that proposed the artifact never sees either.
 
-        The bytes are re-hashed on arrival so the receipt describes what landed
-        rather than what was promised, and anything already at the destination
-        is content-addressed first, so promoting over a file supersedes it
-        rather than destroying it.
+        **The source is the proposal blob, not the compute sandbox.** A
+        proposal is content-addressed when it is made, so the digest on the
+        record names immutable bytes: what gets promoted is what was reviewed,
+        by construction rather than by checking. Substitution is not detected,
+        it is impossible -- there is nothing mutable to substitute.
+
+        That also takes sandbox lifetime out of the proposal state machine
+        entirely. A proposal stays pending and promotable after its originating
+        sandbox is destroyed, because the sandbox was never where the
+        promotable copy lived.
+
+        Anything already at the destination is content-addressed first, so
+        promoting over a file supersedes it rather than destroying it.
         """
         row = mind.db.conn.execute(
             "SELECT * FROM artifacts WHERE artifact_id = ?", (artifact_id,)).fetchone()
         if row is None:
             raise NotFound("unknown artifact", artifact_id=artifact_id)
-        if row["status"] == "lapsed":
-            raise InvalidInput(
-                "this proposal lapsed when its compute sandbox was destroyed; "
-                "its content existed only in that scratch and is gone",
-                artifact_id=artifact_id, status=row["status"],
-                hint="a proposal must be decided before its work item finishes")
         if row["status"] != "proposed":
             raise InvalidInput("artifact is not awaiting a decision",
                                artifact_id=artifact_id, status=row["status"])
-        mgr = _sandbox_manager()
-        src = mgr.resolve_inside(mgr.get(row["sandbox_id"]), row["path"])
-        if not src.is_file():
-            raise NotFound("proposed file no longer exists", path=row["path"])
-        suffix = src.suffix.lower()
+        proposed_name = Path(row["path"]).name
+        suffix = Path(row["path"]).suffix.lower()
         if suffix and suffix not in PROMOTABLE_SUFFIXES:
             raise InvalidInput("file type is not promotable",
                                suffix=suffix, allowed=sorted(PROMOTABLE_SUFFIXES))
 
-        data = src.read_bytes()
-        digest = sha256_hex(data)
-        if digest != row["sha256"]:
-            # Fail closed. The rationale the Harness is acting on describes the
-            # bytes that were proposed; promoting different bytes under that
-            # approval is the whole shape of a time-of-check/time-of-use
-            # attack. Re-propose instead.
-            def rejected(m: Mutation) -> None:
-                m.sql("UPDATE artifacts SET status = 'rejected', decided_by = ?,"
-                      " decided_at = ?, reason = ? WHERE artifact_id = ?",
-                      (decided_by, time.time(),
-                       "content changed after proposal", artifact_id))
-                m.emit(EventKind.ARTIFACT_REJECTED, {
-                    "artifact_id": artifact_id, "decided_by": decided_by,
-                    "reason": "content changed between proposal and promotion",
-                    "sha256_at_proposal": row["sha256"],
-                    "sha256_on_arrival": digest})
-
-            mind.writer.apply(rejected, actor=decided_by, operation_id=operation_id,
-                              mutation_id=f"art-tamper:{artifact_id}")
+        digest = row["sha256"]
+        if not mind.blobs.exists(digest):
             raise IntegrityError(
-                "artifact content changed between proposal and promotion; "
-                "refusing to promote bytes the Harness did not review",
-                artifact_id=artifact_id, sha256_at_proposal=row["sha256"],
-                sha256_on_arrival=digest)
+                "the proposed content is missing from the blob store; a "
+                "committed reference to absent content is an integrity failure, "
+                "not a gap to work around",
+                artifact_id=artifact_id, sha256=digest)
+        # Verifies the digest as it reads, so the bytes about to be written are
+        # provably the ones that were proposed.
+        data = mind.blobs.get(digest)
+
+        # Observation, not a gate. If the scratch copy still exists and has
+        # since diverged, that is a fact about the neuocyte worth recording --
+        # but it cannot change what is promoted, because what is promoted is
+        # the reviewed blob. The sandbox usually no longer exists at all, which
+        # is the normal case rather than an error.
+        scratch_divergence = None
+        if sup.sandboxes is not None:
+            try:
+                sb = sup.sandboxes.get(row["sandbox_id"])
+                current = sup.sandboxes.resolve_inside(sb, row["path"])
+                if current.is_file():
+                    now = sha256_hex(current.read_bytes())
+                    if now != digest:
+                        scratch_divergence = now
+            except Exception:  # noqa: BLE001 - a gone sandbox is expected
+                scratch_divergence = None
 
         prior_sha = prior_bytes = None
         resolved = None
@@ -437,10 +439,10 @@ def build(sup: "Supervisor") -> dict[str, Any]:  # noqa: C901
             # and still refused if it escapes or the root is read-only.
             fs = _filespace()
             try:
-                resolved = fs.resolve(root, path or src.name, need_write=True)
+                resolved = fs.resolve(root, path or proposed_name, need_write=True)
             except InvalidInput as exc:
                 _deny(decided_by, exc.message,
-                      {"root": root, "path": (path or src.name)[:200],
+                      {"root": root, "path": (path or proposed_name)[:200],
                        "operation": "promote", "artifact_id": artifact_id})
                 raise
             if resolved.exists and resolved.path.is_file() \
@@ -454,9 +456,13 @@ def build(sup: "Supervisor") -> dict[str, Any]:  # noqa: C901
             store = sup.cfg.artifact_dir
             store.mkdir(parents=True, exist_ok=True)
             # The Harness names the destination: artifact id + original basename.
-            dest = store / f"{artifact_id}_{src.name}"
+            dest = store / f"{artifact_id}_{proposed_name}"
             dest.write_bytes(data)
-        blob = mind.blobs.put(data)
+        # Already content-addressed at proposal time; promotion reads that
+        # blob rather than creating one, so the digest is simply carried
+        # through. Re-putting identical bytes would be a no-op that implied
+        # promotion was the thing making them durable.
+        blob = digest
 
         def body(m: Mutation) -> None:
             m.register_blob(blob, len(data), "application/octet-stream", "artifact")
@@ -471,11 +477,20 @@ def build(sup: "Supervisor") -> dict[str, Any]:  # noqa: C901
                     "host_path": str(dest), "prior_sha256": prior_sha,
                     "prior_bytes": prior_bytes, "restorable": True,
                     "superseded_by": artifact_id})
+            if scratch_divergence:
+                m.emit(EventKind.ARTIFACT_SCRATCH_DIVERGED, {
+                    "artifact_id": artifact_id, "sandbox_id": row["sandbox_id"],
+                    "path": row["path"], "sha256_reviewed": digest,
+                    "sha256_in_scratch": scratch_divergence,
+                    "note": ("the scratch copy changed after the proposal was "
+                             "made; the reviewed bytes were promoted, and this "
+                             "is recorded because the change itself is a fact "
+                             "about the neuocyte")})
             m.emit(EventKind.ARTIFACT_PROMOTED, {
                 "artifact_id": artifact_id, "decided_by": decided_by,
                 "artifact_path": dest.name, "bytes": len(data),
-                "sha256_at_proposal": row["sha256"], "sha256_on_arrival": digest,
-                "content_changed_since_proposal": digest != row["sha256"],
+                "sha256": digest, "source": "proposal blob",
+                "scratch_diverged": bool(scratch_divergence),
                 "blob": blob, "root": root,
                 "path": resolved.relpath if resolved else None,
                 "host_path": str(dest)})
@@ -495,6 +510,8 @@ def build(sup: "Supervisor") -> dict[str, Any]:  # noqa: C901
                 "root": root, "path": resolved.relpath if resolved else None,
                 "bytes": len(data), "sha256": digest,
                 "content_verified": True, "blob": blob,
+                "source": "proposal blob",
+                "scratch_diverged": bool(scratch_divergence),
                 "overwrote": bool(prior_sha), "prior_sha256": prior_sha,
                 "receipt_id": receipt.receipt_id}
 

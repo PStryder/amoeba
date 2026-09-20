@@ -8,7 +8,8 @@ how a "safe to destroy" claim quietly becomes false:
 | **Filespace** | configured host roots | yours; outlives Amoeba | Harness only |
 | **Blob store** | `state_dir/blobs` | durable, content-addressed | Harness only |
 | **Compute sandbox** | `state_dir/sandbox/<id>` | one work item, then gone | code inside it |
-| **Artifact** (accepted work product) | a filespace root, or `state_dir/artifacts` | durable | Harness, on promotion |
+| **Artifact proposal** | blob store, by digest | durable; the promotable copy | Harness, at propose time |
+| **Accepted artifact** | a filespace root, or `state_dir/artifacts` | durable, authoritative | Harness, on promotion |
 
 Two invariants follow, and both are asserted here rather than described:
 
@@ -257,83 +258,109 @@ def test_destroying_a_sandbox_preserves_input_evidence_and_work_product(bstack):
         b"def accepted():\n    return 1\n")
 
 
-def test_an_undecided_proposal_lapses_rather_than_lying(bstack):
-    """Destroying the sandbox must leave two truths standing at once.
+def test_a_proposal_stays_promotable_after_its_sandbox_is_destroyed(bstack):
+    """Sandbox lifetime is absent from the proposal state machine.
 
-        scratch copy       GONE
-        proposal record    LAPSED / NOT ACCEPTED
-        proposal bytes     PRESERVED AS EVIDENCE
-        accepted artifact  DOES NOT EXIST
+    A proposal's bytes are content-addressed when it is made, so the compute
+    sandbox is where the file was *made*, not where the promotable copy lives.
+    Destroying scratch removes a copy, not *the* copy.
 
-    Losing the record would hide that a proposal was ever made. Losing the
-    bytes would leave a rationale describing content nobody can see. Keeping
-    the row as `proposed` would assert it still awaits a decision when it can
-    never be promoted. Only all four together are honest.
+    An earlier version lapsed proposals on destruction. That was a workaround
+    for a constraint that stopped existing the moment proposals became durable
+    evidence, and keeping it would have coupled a decision to an unrelated
+    lifetime.
     """
-    work_id, token = admit_lease(bstack, "propose and abandon", "nc_l")
+    work_id, token = admit_lease(bstack, "propose then finish", "nc_l")
     bstack.call("tool_invoke", neuocyte_id="nc_l", work_id=work_id,
                 fencing_token=token, name="write_file",
                 arguments={"path": "work/draft.py",
-                           "content": "# the draft nobody accepted\n"})
+                           "content": "# decided later\n"})
     pending = bstack.call("tool_invoke", neuocyte_id="nc_l", work_id=work_id,
                           fencing_token=token, name="propose_artifact",
                           arguments={"path": "work/draft.py",
-                                     "rationale": "maybe"})
+                                     "rationale": "worth keeping"})
     art_id = pending["result"]["artifact_id"]
-    proposed_digest = pending["result"]["sha256"]
+    digest = pending["result"]["sha256"]
     sandbox_id = bstack.call("artifact_list", limit=50)[0]["sandbox_id"]
     scratch = scratch_of(bstack, sandbox_id)
 
     bstack.call("complete_work", work_id=work_id, neuocyte_id="nc_l",
                 fencing_token=token, result={"finding": "done"})
 
-    # 1. scratch copy: GONE
+    # The laboratory is gone; the decision is still open.
     assert not scratch.exists()
-
-    # 2. proposal record: LAPSED, and it cannot be promoted
     rows = {a["artifact_id"]: a for a in bstack.call("artifact_list", limit=50)}
-    assert rows[art_id]["status"] == "lapsed", (
-        f"an abandoned proposal is still {rows[art_id]['status']!r}; it can "
-        "never be promoted, so saying it awaits a decision is false")
-    with pytest.raises(Exception) as exc:
-        bstack.call("artifact_promote", artifact_id=art_id, decided_by="pete")
-    assert "lapsed" in str(exc.value)
+    assert rows[art_id]["status"] == "proposed", (
+        f"the proposal became {rows[art_id]['status']!r} because its sandbox "
+        "was destroyed; sandbox lifetime must not touch this state machine")
 
-    # 3. proposal bytes: PRESERVED AS EVIDENCE, retrievable by digest
-    bstack.call("file_write", root="mine", path="recovered.py",
-                content="placeholder", actor="pete")
-    bstack.call("file_restore", root="mine", path="recovered.py",
-                sha256=proposed_digest, actor="pete")
-    assert (bstack.fsroot / "recovered.py").read_bytes() == (
-        b"# the draft nobody accepted\n"), (
-        "the exact bytes that were proposed are no longer recoverable")
-
-    # Recovering evidence is not acceptance: the record still says lapsed.
-    again = {a["artifact_id"]: a for a in bstack.call("artifact_list", limit=50)}
-    assert again[art_id]["status"] == "lapsed"
-
-    # 4. and the whole thing is in the record, with the digest.
-    events = [e for e in bstack.call("history", limit=600)
-              if e["kind"] == "artifact.lapsed"]
-    assert events, "no artifact.lapsed event"
-    payload = json.loads(events[-1]["payload_inline"])
-    assert payload["sha256"] == proposed_digest
-    assert payload["evidence_preserved"] is True
-
-    # The chain still verifies and references nothing that has gone missing.
-    integrity = bstack.call("verify_integrity", deep=True)
-    assert integrity["hash_chain_ok"] is True
-    assert not integrity.get("missing_content"), integrity.get("missing_content")
+    # And it can still be promoted, from the blob rather than from scratch.
+    out = bstack.call("artifact_promote", artifact_id=art_id,
+                      decided_by="pete", root="mine", path="late.py")
+    assert out["status"] == "promoted"
+    assert out["sha256"] == digest
+    assert out["source"] == "proposal blob"
+    assert (bstack.fsroot / "late.py").read_bytes() == b"# decided later\n"
 
 
-def test_proposal_evidence_survives_even_without_a_decision(bstack):
-    """Stated on its own, because it is the half I originally dropped.
+def test_promotion_materialises_the_reviewed_bytes_not_whatever_scratch_holds(bstack):
+    """Substitution is impossible rather than detected.
 
-    A proposal's bytes are content-addressed the moment it is made. That is
-    what lets the record say "never accepted" and "here is exactly what was
-    offered" at the same time, instead of only the first.
+    Promotion used to re-read the scratch file and refuse if it had changed --
+    fail-closed detection of a time-of-check/time-of-use swap. Sourcing from
+    the immutable proposal blob is stronger: the reviewed bytes are what land,
+    and a later change to scratch cannot influence the result at all.
+
+    The divergence is still *recorded*, because a neuocyte rewriting a file
+    after proposing it is a fact worth having, just not a reason to refuse.
     """
-    work_id, token = admit_lease(bstack, "evidence", "nc_e")
+    work_id, token = admit_lease(bstack, "propose then tamper", "nc_t")
+    bstack.call("tool_invoke", neuocyte_id="nc_t", work_id=work_id,
+                fencing_token=token, name="write_file",
+                arguments={"path": "work/checker.py",
+                           "content": "def check(x):\n    return x > 0\n"})
+    prop = bstack.call("tool_invoke", neuocyte_id="nc_t", work_id=work_id,
+                       fencing_token=token, name="propose_artifact",
+                       arguments={"path": "work/checker.py",
+                                  "rationale": "reviewed and sound"})
+    art_id = prop["result"]["artifact_id"]
+    reviewed = prop["result"]["sha256"]
+
+    # The swap a compromised or over-eager neuocyte would make.
+    bstack.call("tool_invoke", neuocyte_id="nc_t", work_id=work_id,
+                fencing_token=token, name="write_file",
+                arguments={"path": "work/checker.py",
+                           "content": "import os\nos.system('calc')\n"})
+
+    out = bstack.call("artifact_promote", artifact_id=art_id,
+                      decided_by="pete", root="mine", path="checker.py")
+    assert out["status"] == "promoted"
+    assert out["sha256"] == reviewed
+    assert out["scratch_diverged"] is True
+    landed = (bstack.fsroot / "checker.py").read_bytes()
+    assert landed == b"def check(x):\n    return x > 0\n", (
+        f"the substituted bytes were promoted: {landed!r}")
+    assert b"os.system" not in landed
+
+    kinds = [e["kind"] for e in bstack.call("history", limit=600)]
+    assert "artifact.scratch_diverged" in kinds, (
+        "the divergence was not recorded; it is a fact about the neuocyte "
+        "even though it changed nothing about the promotion")
+    bstack.call("cancel_work", work_id=work_id, reason="test")
+
+
+def test_an_undecided_proposal_keeps_its_evidence_and_its_pending_status(bstack):
+    """The three truths that must hold together after destruction.
+
+        scratch copy       GONE
+        proposal record    still PENDING, still promotable
+        proposal bytes     PRESERVED, and are what promotion would use
+
+    Losing any one of these makes the record say something untrue: that the
+    proposal was decided, that its content is unknowable, or that it is
+    promotable when it is not.
+    """
+    work_id, token = admit_lease(bstack, "evidence and status", "nc_e")
     bstack.call("tool_invoke", neuocyte_id="nc_e", work_id=work_id,
                 fencing_token=token, name="write_file",
                 arguments={"path": "work/p.py", "content": "proposed = True\n"})
@@ -341,39 +368,78 @@ def test_proposal_evidence_survives_even_without_a_decision(bstack):
                        fencing_token=token, name="propose_artifact",
                        arguments={"path": "work/p.py", "rationale": "r"})
     assert prop["result"]["evidence_preserved"] is True
-    assert "nothing has been placed in the artifact store" in prop["result"]["note"]
     digest = prop["result"]["sha256"]
 
-    # Before any decision at all, and with the sandbox still alive, the bytes
-    # are already durable.
-    bstack.call("cancel_work", work_id=work_id, reason="abandoned")
+    bstack.call("complete_work", work_id=work_id, neuocyte_id="nc_e",
+                fencing_token=token, result={"finding": "done"})
 
+    rows = {a["artifact_id"]: a for a in bstack.call("artifact_list", limit=50)}
+    assert rows[prop["result"]["artifact_id"]]["status"] == "proposed"
+
+    # The bytes are retrievable by digest independently of any decision.
     bstack.call("file_write", root="mine", path="evidence.py",
                 content="x", actor="pete")
     bstack.call("file_restore", root="mine", path="evidence.py",
                 sha256=digest, actor="pete")
     assert (bstack.fsroot / "evidence.py").read_bytes() == b"proposed = True\n"
 
+    integrity = bstack.call("verify_integrity", deep=True)
+    assert integrity["hash_chain_ok"] is True
+    assert not integrity.get("missing_content"), integrity.get("missing_content")
 
-def test_a_promoted_artifact_is_not_lapsed_by_the_same_teardown(bstack):
-    """Control: teardown must discriminate, not sweep everything."""
-    work_id, token = admit_lease(bstack, "promote then finish", "nc_k")
-    bstack.call("tool_invoke", neuocyte_id="nc_k", work_id=work_id,
+
+def test_rejecting_a_proposal_still_closes_it(bstack):
+    """Control: a decision still decides.
+
+    Removing sandbox-driven lapsing must not remove the ways a proposal is
+    genuinely resolved, or "pending" would become a state nothing ever leaves.
+    """
+    work_id, token = admit_lease(bstack, "propose then reject", "nc_r")
+    bstack.call("tool_invoke", neuocyte_id="nc_r", work_id=work_id,
                 fencing_token=token, name="write_file",
-                arguments={"path": "work/keep.py", "content": "keep = 1\n"})
-    prop = bstack.call("tool_invoke", neuocyte_id="nc_k", work_id=work_id,
+                arguments={"path": "work/no.py", "content": "no = 1\n"})
+    prop = bstack.call("tool_invoke", neuocyte_id="nc_r", work_id=work_id,
                        fencing_token=token, name="propose_artifact",
-                       arguments={"path": "work/keep.py", "rationale": "yes"})
+                       arguments={"path": "work/no.py", "rationale": "meh"})
     art_id = prop["result"]["artifact_id"]
-    bstack.call("artifact_promote", artifact_id=art_id, decided_by="pete",
-                root="mine", path="keep.py")
 
-    bstack.call("complete_work", work_id=work_id, neuocyte_id="nc_k",
-                fencing_token=token, result={"finding": "done"})
-
+    bstack.call("artifact_reject", artifact_id=art_id, reason="not reproducible")
     rows = {a["artifact_id"]: a for a in bstack.call("artifact_list", limit=50)}
-    assert rows[art_id]["status"] == "promoted"
-    assert (bstack.fsroot / "keep.py").read_bytes() == b"keep = 1\n"
+    assert rows[art_id]["status"] == "rejected"
+    with pytest.raises(Exception) as exc:
+        bstack.call("artifact_promote", artifact_id=art_id, decided_by="pete")
+    assert "not awaiting a decision" in str(exc.value)
+    bstack.call("cancel_work", work_id=work_id, reason="test")
+
+
+def test_destroying_a_sandbox_decides_nothing(bstack):
+    """Stated directly: teardown is not a verdict.
+
+    Destruction records how many proposals are still pending, and changes none
+    of them.
+    """
+    work_id, token = admit_lease(bstack, "teardown decides nothing", "nc_n")
+    bstack.call("tool_invoke", neuocyte_id="nc_n", work_id=work_id,
+                fencing_token=token, name="write_file",
+                arguments={"path": "work/a.py", "content": "a = 1\n"})
+    bstack.call("tool_invoke", neuocyte_id="nc_n", work_id=work_id,
+                fencing_token=token, name="propose_artifact",
+                arguments={"path": "work/a.py", "rationale": "one"})
+
+    before = [a["status"] for a in bstack.call("artifact_list", limit=50)]
+    bstack.call("complete_work", work_id=work_id, neuocyte_id="nc_n",
+                fencing_token=token, result={"finding": "done"})
+    after = [a["status"] for a in bstack.call("artifact_list", limit=50)]
+    assert before == after, f"teardown changed artifact statuses: {before} -> {after}"
+
+    kinds = [e["kind"] for e in bstack.call("history", limit=600)]
+    assert "artifact.lapsed" not in kinds, (
+        "lapsing is retired; sandbox lifetime must not touch proposal state")
+
+    events = [e for e in bstack.call("history", limit=600)
+              if e["kind"] == "sandbox.destroyed"]
+    payload = json.loads(events[-1]["payload_inline"])
+    assert payload["proposals_still_pending"] >= 1
 
 
 def test_the_four_stores_are_in_different_places(bstack):

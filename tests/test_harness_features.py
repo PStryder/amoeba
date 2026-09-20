@@ -188,6 +188,7 @@ def test_artifact_promotion_is_proposal_then_harness_decision(stack: LiveStack):
         assert promoted["status"] == "promoted"
         assert promoted["sha256"] == proposed["sha256"]
         assert promoted["content_verified"] is True
+        assert promoted["source"] == "proposal blob"
         after = set(store.glob("*"))
         assert len(after) == len(before) + 1
         landed = (after - before).pop()
@@ -219,24 +220,30 @@ def test_the_harness_can_refuse_a_promotion(stack: LiveStack):
 
 
 @pytest.mark.skipif(sys.platform != "win32", reason="AppContainer is Windows-only")
-def test_promotion_refuses_content_that_changed_after_it_was_proposed(stack: LiveStack):
-    """Promotion is hash-checked at the moment of copying, and fails closed.
+def test_promotion_promotes_the_reviewed_bytes_not_whatever_scratch_holds(
+        stack: LiveStack):
+    """Substitution is impossible, not merely detected.
 
-    There is a real gap between proposing an artifact and the Harness deciding
-    on it, and the file sits in a sandbox the neuocyte can still write to. The
-    reviewer approves a digest; what gets copied has to be that digest and not
-    whatever is on disk when the decision lands.
+    There is a real gap between proposing an artifact and deciding on it, and
+    the file sits in a sandbox the neuocyte can still write to. An earlier
+    version re-read that file and refused when it had changed -- fail-closed
+    detection of a time-of-check/time-of-use swap.
 
-    The failure condition is the point: nothing may reach durable storage. An
-    earlier version reported the change in its return value and copied the file
-    anyway, which is a note in a receipt nobody reads, not a control.
+    Sourcing from the immutable proposal blob is stronger: the reviewer
+    approved a digest, that digest names content-addressed bytes, and those are
+    what land. Nothing about the scratch file can influence the result.
+
+    The divergence is still recorded, because a neuocyte rewriting a file after
+    proposing it is a fact worth having -- just not a reason to refuse, now
+    that refusing would throw away a promotion that is provably correct.
     """
     if not _sandbox_ok(stack):
         pytest.skip("sandbox unavailable")
     sid = stack.call("sandbox_create", owner="wk_1")["sandbox_id"]
     try:
+        reviewed_text = "def check(x):\n    return x > 0\n"
         stack.call("sandbox_write", sandbox_id=sid, path="work/checker.py",
-                   content="def check(x):\n    return x > 0\n")
+                   content=reviewed_text)
         art = stack.call("artifact_propose", sandbox_id=sid, path="work/checker.py",
                          rationale="reviewed and sound", proposed_by="wk_1")
 
@@ -244,20 +251,23 @@ def test_promotion_refuses_content_that_changed_after_it_was_proposed(stack: Liv
         stack.call("sandbox_write", sandbox_id=sid, path="work/checker.py",
                    content="import os\nos.system('calc')\n")
 
+        out = stack.call("artifact_promote", artifact_id=art["artifact_id"],
+                         decided_by="supervisor")
+        assert out["status"] == "promoted"
+        assert out["sha256"] == art["sha256"], "a different digest was promoted"
+        assert out["source"] == "proposal blob"
+        assert out["scratch_diverged"] is True
+
         store = Path(stack.cfg.artifact_dir)
-        before = set(store.glob("*")) if store.exists() else set()
+        landed = [f for f in store.glob("*") if art["artifact_id"] in f.name]
+        assert len(landed) == 1, landed
+        content = landed[0].read_text(encoding="utf-8")
+        assert content == reviewed_text, f"substituted bytes landed: {content!r}"
+        assert "os.system" not in content
 
-        with pytest.raises(Exception):
-            stack.call("artifact_promote", artifact_id=art["artifact_id"],
-                       decided_by="supervisor")
-
-        assert set(store.glob("*")) == before, (
-            "substituted content reached durable storage")
-        listing = stack.call("artifact_list", status="rejected")
-        assert any(a["artifact_id"] == art["artifact_id"] for a in listing), (
-            "the artifact was neither promoted nor recorded as rejected")
         kinds = [e["kind"] for e in stack.call("history", limit=400)]
-        assert "artifact.rejected" in kinds
+        assert "artifact.scratch_diverged" in kinds, (
+            "the divergence was not recorded")
     finally:
         stack.call("sandbox_destroy", sandbox_id=sid)
 

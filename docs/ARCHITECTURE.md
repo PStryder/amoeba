@@ -265,11 +265,20 @@ as stronger than it is.
 → `test_the_audit_does_not_claim_protection_it_does_not_have`,
 `test_audit_reports_exposure_instead_of_asserting_safety`
 
-**I34. The Harness promotes the bytes it reviewed, or none.** Content is
-re-hashed at the moment of copying; if it differs from the digest that was
-proposed, the artifact is rejected and nothing reaches the workspace. Reporting
-the change while copying anyway is a note in a receipt, not a control.
-→ `test_promotion_refuses_content_that_changed_after_it_was_proposed`
+**I34. The Harness promotes the bytes it reviewed, by construction.**
+Promotion materialises the *proposal blob* — content-addressed and immutable —
+so the reviewed digest names the bytes that land. Substitution is not detected,
+it is impossible: there is nothing mutable in the path from decision to file. A
+later change to the scratch copy is recorded, because a neuocyte rewriting a
+file after proposing it is a fact worth having, but it cannot influence the
+result.
+
+An earlier version re-read the scratch file and refused on mismatch. That was
+fail-closed detection, and it was the best available while the scratch held the
+only promotable copy; it is strictly weaker than making the substitution
+impossible.
+→ `test_promotion_promotes_the_reviewed_bytes_not_whatever_scratch_holds`,
+`test_promotion_materialises_the_reviewed_bytes_not_whatever_scratch_holds`
 
 **I35. Concurrent sandboxes share no handles.** Process creation names exactly
 the two handles a container may inherit. Without that, `bInheritHandles=True`
@@ -375,24 +384,26 @@ was copied out by the Harness at promotion.
 → `test_destroying_a_sandbox_preserves_input_evidence_and_work_product`,
 `test_the_four_stores_are_in_different_places`
 
-**I42b. Destroying a sandbox leaves four truths standing at once.**
+**I42b. Sandbox lifetime is absent from the proposal state machine.**
+Destroying a compute sandbox removes a copy, not *the* copy: a proposal's bytes
+are content-addressed when it is made, so it stays pending and promotable by
+its digest afterwards.
 
 | | after destruction |
 |---|---|
 | scratch copy | gone |
-| proposal record | lapsed / never accepted |
-| proposal bytes | preserved as evidence, retrievable by digest |
-| accepted artifact | does not exist |
+| proposal record | still pending, still promotable |
+| proposal bytes | preserved, and are what promotion uses |
+| accepted artifact | only if someone promotes it |
 
-A proposal's bytes are content-addressed the moment it is made, so the record
-can say *both* "this was never accepted" *and* "here are exactly the bytes that
-were offered". Keeping only the first leaves a rationale describing content
-nobody can ever see; keeping the row as `proposed` asserts it still awaits a
-decision when it can never be promoted. Recovering the evidence later is a
-fresh Harness act, not a promotion — the record stays lapsed.
-→ `test_an_undecided_proposal_lapses_rather_than_lying`,
-`test_proposal_evidence_survives_even_without_a_decision`,
-`test_a_promoted_artifact_is_not_lapsed_by_the_same_teardown`
+Proposals used to *lapse* on destruction. That was a workaround for a
+constraint that stopped existing the moment proposals became durable evidence,
+and keeping it would have coupled a decision to an unrelated lifetime.
+Destruction decides nothing; only `artifact_promote` and `artifact_reject` do.
+→ `test_a_proposal_stays_promotable_after_its_sandbox_is_destroyed`,
+`test_destroying_a_sandbox_decides_nothing`,
+`test_an_undecided_proposal_keeps_its_evidence_and_its_pending_status`,
+`test_rejecting_a_proposal_still_closes_it`
 
 **I43. Code inside a compute sandbox cannot directly mutate Filespace, the
 blob store, or another work item's state.** Movement across that boundary is
