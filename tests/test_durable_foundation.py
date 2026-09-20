@@ -361,3 +361,116 @@ def test_concurrent_heartbeats_do_not_commit_someone_elses_transaction(mind):
     assert verify_chain(mind.db.conn)[0] is True
     assert mind.db.conn.execute(
         "SELECT COUNT(*) AS n FROM memory_items").fetchone()["n"] == 25
+
+
+# ---------------------------------------------------------------------------
+# Invariant tests written at the layer that owns the guarantee.
+#
+# Each of these exists because a mutation of the guarantee left the previously
+# named test green: the old test passed for a different reason than its name
+# claimed. scripts/verify_invariants.py re-checks that by removing each
+# guarantee and requiring these to fail.
+# ---------------------------------------------------------------------------
+def test_writer_itself_refuses_to_reapply_a_mutation_id(mind):
+    """I7 at the StateWriter layer.
+
+    test_duplicate_commit_is_idempotent goes through WorkRepo.complete, which
+    carries its *own* receipt_for short-circuit -- so it stayed green with the
+    writer's idempotency check removed. The guarantee belongs to the writer, so
+    it is asserted against the writer directly.
+    """
+    calls: list[int] = []
+
+    def body(m):
+        calls.append(1)
+        m.sql("INSERT INTO memory_items(memory_id, kind, claim, confidence, status,"
+              " version, created_by, created_at, updated_at, state_version)"
+              " VALUES ('mem_idem','belief','once',0.5,'active',1,'t',0,0,1)")
+        m.emit("test.idempotent", {"n": len(calls)})
+
+    first, _ = mind.writer.apply(body, actor="t", mutation_id="same-key")
+    second, _ = mind.writer.apply(body, actor="t", mutation_id="same-key")
+
+    assert calls == [1], "the body ran twice for one mutation id"
+    assert second.receipt_id == first.receipt_id
+    assert second.replayed is True
+    assert mind.db.conn.execute(
+        "SELECT COUNT(*) AS n FROM events WHERE kind = 'test.idempotent'"
+    ).fetchone()["n"] == 1
+    assert mind.db.conn.execute(
+        "SELECT COUNT(*) AS n FROM memory_items WHERE memory_id = 'mem_idem'"
+    ).fetchone()["n"] == 1
+
+
+def test_each_lease_advances_the_fencing_token(mind):
+    """I8 at the lease layer.
+
+    test_stale_worker_result_is_fenced expires the lease first, and
+    expire_leases bumps the token too -- so it stayed green with the bump
+    removed from lease(). Leasing is what must advance the token, so lease it
+    twice with no expiry in between.
+    """
+    work_id, _ = mind.work.admit(objective="o", work_class="user", origin_actor="ego")
+    first = mind.work.lease(neuocyte_id="nc1")
+    assert first["work_id"] == work_id
+    token_a = first["fencing_token"]
+
+    # Hand it back without expiring, then lease again.
+    mind.work.fail(work_id=work_id, neuocyte_id="nc1", fencing_token=token_a,
+                   failure="gave up", requeue=True)
+    second = mind.work.lease(neuocyte_id="nc2")
+    token_b = second["fencing_token"]
+
+    assert token_b > token_a, "a fresh lease did not advance the fencing token"
+    with pytest.raises(Fenced):
+        mind.work.complete(work_id=work_id, neuocyte_id="nc1",
+                           fencing_token=token_a, result={"stale": True})
+    mind.work.complete(work_id=work_id, neuocyte_id="nc2", fencing_token=token_b,
+                       result={"fresh": True})
+    assert mind.work.get_work(work_id)["result"] == {"fresh": True}
+
+
+def test_a_broken_chain_link_is_detected_not_just_a_tampered_payload(mind):
+    """I5, the half the existing test did not cover.
+
+    test_hash_chain_detects_tampering rewrites a payload, which the recomputed
+    event hash catches. It stayed green with the prev_hash link check removed,
+    because that check defends a different attack: removing or reordering
+    events while leaving each one internally consistent.
+    """
+    for i in range(5):
+        mind.writer.apply(lambda m, i=i: m.emit("chain.test", {"i": i}), actor="t")
+    assert verify_chain(mind.db.conn)[0] is True
+
+    # Excise a middle event. Every surviving row still hashes correctly on its
+    # own; only the prev_hash linkage reveals the hole.
+    row = mind.db.conn.execute(
+        "SELECT seq, event_id FROM events WHERE kind = 'chain.test'"
+        " ORDER BY seq LIMIT 1 OFFSET 2").fetchone()
+    mind.db.conn.execute("DELETE FROM events WHERE seq = ?", (row["seq"],))
+    mind.db.conn.commit()
+
+    ok, bad = verify_chain(mind.db.conn)
+    assert ok is False, "excising an event left the chain looking intact"
+    assert bad is not None
+
+
+def test_durability_pragma_is_set_where_durability_is_configured(cfg):
+    """I6 at the layer the guarantee actually lives.
+
+    test_acknowledged_mutation_survives_restart proves data survives a *clean*
+    close and reopen. It cannot observe fsync, and stayed green with
+    synchronous=OFF -- so it does not express crash durability. That property
+    is configured by a pragma, so it is asserted where it is configured.
+    """
+    from amoeba.store.db import Database
+
+    db = Database(cfg.db_path)
+    try:
+        mode = db.conn.execute("PRAGMA synchronous").fetchone()[0]
+        # 2 == FULL. Anything lower does not fsync on commit.
+        assert mode == 2, f"synchronous is {mode}, not FULL; commits may not fsync"
+        journal = db.conn.execute("PRAGMA journal_mode").fetchone()[0]
+        assert journal.lower() == "wal"
+    finally:
+        db.close()

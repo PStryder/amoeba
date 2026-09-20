@@ -73,6 +73,15 @@ def test_reclaim_only_unreferenced_and_superseded(mind):
     assert s2 not in reclaimable      # referenced
     assert s3 not in reclaimable      # newest is always kept available
 
+    # The guard itself, at the layer that owns it: releasing a snapshot that is
+    # still referenced must be refused. Without this the test stayed green with
+    # the refcount check removed, because reclaimable_snapshots() filters by
+    # refcount separately and was doing all the work.
+    with pytest.raises(ResourceExhausted):
+        mind.work.mark_snapshot_released(snapshot_id=s2, actor="supervisor",
+                                         reason="still referenced")
+    assert mind.work.get_snapshot(s2)["status"] == "published"
+
     mind.work.mark_snapshot_released(snapshot_id=s1, actor="supervisor",
                                      reason="unreferenced")
     assert mind.work.get_snapshot(s1)["status"] == "released"

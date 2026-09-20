@@ -72,23 +72,34 @@ referencing them commits. An orphan blob is recoverable garbage; a committed
 reference to missing content is an integrity failure and is reported as one.
 → `test_missing_blob_is_detected_not_glossed_over`
 
-**I5. Hash chaining detects mutation, not administrators.** Every integrity
-report states this caveat explicitly.
-→ `test_hash_chain_detects_tampering`, `test_hash_chain_caveat_is_stated`
+**I5. Hash chaining detects mutation, not administrators.** Two distinct
+attacks, so two tests: rewriting an event's payload (caught by the recomputed
+hash) and excising or reordering events while leaving each internally
+consistent (caught only by the `prev_hash` linkage). Every integrity report
+states the administrator caveat explicitly.
+→ `test_hash_chain_detects_tampering`,
+`test_a_broken_chain_link_is_detected_not_just_a_tampered_payload`,
+`test_hash_chain_caveat_is_stated`
 
-**I6. Acknowledged means durable.** A receipt is returned only after commit; it
-survives restart.
-→ `test_acknowledged_mutation_survives_restart`
+**I6. Acknowledged means durable.** A receipt is returned only after commit.
+Two separate properties, tested separately because one test cannot show both:
+the data survives a clean close and reopen, and commits are configured to fsync
+(`synchronous=FULL`). Crash durability itself is not demonstrated here — that
+needs a power cut, not a test.
+→ `test_acknowledged_mutation_survives_restart`,
+`test_durability_pragma_is_set_where_durability_is_configured`
 
 ### Work and neuocytes
 
 **I7. At-least-once with idempotent commits.** Replaying a `mutation_id`
 returns the original receipt and does not re-apply.
-→ `test_duplicate_commit_is_idempotent`
+→ `test_writer_itself_refuses_to_reapply_a_mutation_id` (the writer, which owns
+the guarantee), `test_duplicate_commit_is_idempotent` (through the work queue)
 
 **I8. Fencing.** Every lease bumps a fencing token. A result presenting a
 superseded token is rejected, not committed.
-→ `test_stale_worker_result_is_fenced`
+→ `test_each_lease_advances_the_fencing_token` (the lease, which owns the
+bump), `test_stale_worker_result_is_fenced` (rejection after expiry)
 
 **I9. Neuocyte death is always safe.** Killing every neuocyte loses no state and no
 work; leases expire, tokens advance, items requeue.
@@ -160,7 +171,9 @@ receipt-free; consequential changes go through the writer.
 parsed out of generated text, validated against a declared schema, checked
 against role permissions, and reported. No tool in the registry can reach a
 shell, the network, or the filesystem outside the state directory.
-→ `tools.py`, `tests/test_tools.py`
+→ `test_role_permissions_are_enforced`,
+`test_no_registered_tool_can_reach_a_shell_or_the_network`,
+`test_the_tool_execution_loop_is_not_wired_and_the_docs_say_so`
 
 *Wiring status:* the registry is implemented and tested, but **no production
 code path calls `ToolRegistry.execute`**. `ego_converse` parses tool requests,
@@ -174,7 +187,8 @@ is not the same as "the harness executes it".
 **I24. No overclaiming.** `physical_overlap_verified` and
 `prefix_reuse_verified` are false until evidence exists. Batching is never
 reported as overlap. A simulated backend labels every result it produces.
-→ `test_capability_flags_do_not_overclaim`,
+→ `test_capability_flags_do_not_overclaim` (real backend),
+`test_health_reports_capabilities_without_conflating_them` (simulated backend),
 `test_simulated_backend_is_labelled_on_every_cognitive_result`
 
 **I25. Health stays answerable.** Status and health respond while inference is
@@ -310,3 +324,52 @@ Three properties that took a real bug each to arrive at:
   a cached work client meant that once health moved to the probe pool, no
   shutdown was ever sent and every child had to be force-killed after a
   timeout. → visible as a 3x slower test suite before the fix.
+
+---
+
+## How these invariants are verified
+
+**Every important architectural claim needs at least one test whose failure
+condition directly expresses that claim, at the layer where the guarantee
+lives.** A passing test is weak evidence; a test that *fails when the guarantee
+is removed* is the real thing.
+
+`scripts/verify_invariants.py` applies one targeted mutation per invariant —
+a minimal edit that negates precisely that claim, at the layer that owns it —
+runs only the tests named for it, and **requires them to fail**. Source is
+always restored.
+
+```powershell
+.\.venv\Scripts\python.exe scripts\verify_invariants.py          # all
+.\.venv\Scripts\python.exe scripts\verify_invariants.py --only I7,I8
+```
+
+Current result: **21 of 21 defended, 0 weak.**
+
+### What the first run found
+
+Six of twenty-one tests passed with their guarantee removed. Every one was
+passing for a different reason than its name claimed:
+
+| Claim | Why the test did not express it |
+|---|---|
+| I7 idempotency | The test went through `WorkRepo.complete`, which carries its *own* `receipt_for` short-circuit, so the writer's check could be deleted entirely. Now asserted against `StateWriter` directly. |
+| I8 fencing | The test expired the lease first, and `expire_leases` *also* bumps the token — so the bump in `lease()` was never exercised. Now two consecutive leases with no expiry between them. |
+| I16 refcount | The test only checked `reclaimable_snapshots()`, which filters by refcount separately. The guard inside `mark_snapshot_released` was untouched. Now asserted. |
+| I6 durability | A clean close and reopen cannot observe `fsync`; the test stayed green with `synchronous=OFF`. The claim was overstated and is now split: logical persistence *and* the pragma, asserted where it is configured. Crash durability needs a power cut, not a test. |
+| I24 no-overclaiming | The named test asserts the *real* backend; the simulated one was covered by a differently-named test that was not listed. |
+| I5 hash chain | Not a weak test. The claim is defended **twice** — `chain_hash` folds the predecessor into every event hash, *and* `prev_hash` is compared directly — so removing either leaves the other catching excision. Negating it requires both, which the harness now does. The redundancy is deliberate and is noted in `events.py` so nobody "simplifies" one away. |
+
+### Guarding the guard
+
+`tests/test_invariants_are_defended.py` enforces the bookkeeping in CI:
+
+- every invariant names at least one test that **exists** (a renamed test
+  silently orphans its claim);
+- every mutation anchor still **matches its source** — a drifted anchor turns
+  into a `SKIP`, and a skipped mutation proves nothing while looking fine;
+- every invariant is either mutation-verified or **explicitly exempt** with a
+  recorded reason, so an omission cannot masquerade as coverage.
+
+Invariants needing a GPU, a live process stack, or a power cut are out of scope
+for source mutation and are listed as exemptions by name.

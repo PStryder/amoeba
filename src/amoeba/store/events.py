@@ -176,6 +176,14 @@ def verify_chain(conn: sqlite3.Connection, *, start_seq: int = 0) -> tuple[bool,
 
     This detects ordinary mutation and reordering. It is NOT protection against
     an administrator who rewrites rows and recomputes every hash.
+
+    The two checks below are deliberately redundant. ``chain_hash`` already
+    folds the predecessor's hash into each event, so the recomputed comparison
+    catches excision and reordering on its own; the explicit ``prev_hash``
+    comparison catches the same thing one row earlier and names the offending
+    event more precisely. Deleting either leaves the other working -- which is
+    the point, and is why a mutation of one alone does not make the invariant
+    tests fail (see scripts/verify_invariants.py, I5).
     """
     prev = GENESIS_HASH
     if start_seq > 0:
