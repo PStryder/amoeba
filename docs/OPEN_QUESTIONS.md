@@ -5,6 +5,16 @@ system can fail.
 
 ## Unresolved design questions
 
+**Does board-mediated collaboration make the swarm better or just louder?**
+The machinery to answer this now exists — `board_access="none"` produces
+naive workers, and `board_corroboration` separates replication from echo — but
+the experiment has not been run. It is entirely possible that shared context
+spreads Ego's mistakes faster than it spreads its insight.
+
+**What should a trimmed context keep?** `trim` keeps a verbatim head and tail
+because those are defensible without a model in the loop. Whether the middle is
+the least valuable part of a cognitive context is an assumption, not a finding.
+
 **Is a 4B model good enough for both roles?**
 Qwen3-4B-Instruct-2507 follows the structured formats Ego, Id and workers need,
 and produces coherent short answers. Whether it can do *genuine* synthesis or a
@@ -50,13 +60,18 @@ or evict idle sessions on a timer, which is not implemented.
 
 **Context overflow.** `n_ctx` is a shared pool. A long Ego context plus several
 forked workers can exhaust it; `llama_decode` returns 1 and the engine raises
-`resource_exhausted`. There is no automatic eviction, compaction or context
-trimming. A mind left running long enough will hit this.
+`resource_exhausted`. There is now a homeostasis path that trims and reborns a
+role context at critical pressure
+([HOMEOSTASIS](HOMEOSTASIS.md)), which buys headroom but does not remove the
+ceiling: trimming drops a span of live context, and a mind whose *useful*
+working set genuinely exceeds the pool will still hit the wall. Compaction is
+not implemented.
 
-**Snapshot growth.** Ego's context grows monotonically within a run. Nothing
-trims it and nothing summarises it — deliberately, since summarising is a
-different behaviour from snapshotting. Long-running Ego will eventually
-overflow.
+**Snapshot growth.** Ego's context grows monotonically within a run until
+rejuvenation trims it. Summarisation is still refused, deliberately: it is a
+different behaviour from reconstitution, not a better version of it. The
+open question is whether verbatim head+tail is the right thing to keep, which
+is an empirical question nobody has answered here.
 
 **Positional consistency.** A fork copies positions `[0, prefix_len)` and the
 worker continues from `prefix_len`. Nothing currently shifts positions, so

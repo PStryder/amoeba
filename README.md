@@ -619,6 +619,9 @@ The architecture deliberately attempts to establish these invariants before addi
 | [Architecture](docs/ARCHITECTURE.md) | process topology, 26 named invariants, data model, recovery |
 | [Runtime findings](docs/RUNTIME.md) | what was measured on real hardware, and what was not |
 | [Benchmarks](docs/BENCHMARKS.md) | concurrency curve, prefix-sharing evidence, raw data in `bench/out/` |
+| [Blackboard](docs/BLACKBOARD.md) | how neuocytes collaborate, and how independent replication is told from echo |
+| [Sandbox](docs/SANDBOX.md) | OS-enforced scratch compute, and exactly what it can still reach |
+| [Homeostasis](docs/HOMEOSTASIS.md) | keeping contexts healthy; Id requests, the Harness performs |
 | [MCP contract](docs/MCP_CONTRACT.md) | the cognitive verbs, and what of MCP is *not* implemented |
 | [Open questions](docs/OPEN_QUESTIONS.md) | unresolved design questions and known failure modes |
 
@@ -640,6 +643,20 @@ Two results worth pulling forward, because they constrain the design:
   decode by up to 1.94x, fully recovered on retirement — which makes retirement
   a throughput mechanism, not hygiene. See
   [BENCHMARKS §1-2](docs/BENCHMARKS.md#1-the-scaling-curve-where-batching-stops-paying).
+
+- **Neuocytes have somewhere to compute without hands on the host.** Scratch
+  workspaces are Windows AppContainers with zero capabilities: network blocked
+  in the kernel, user profile and project source unreadable, stdlib-only
+  interpreter, Job Object resource caps. Artifacts leave only by proposal, and
+  the Harness names the destination and re-hashes on arrival. The one thing
+  still readable is world-readable `C:\Windows`, which an AppContainer needs
+  to start; that is stated rather than glossed. See [SANDBOX](docs/SANDBOX.md).
+- **Agreement on the blackboard is only evidence when it is independent.**
+  Every read is recorded and every post snapshots what its author had already
+  seen, so `board_corroboration` can split support into independent replication
+  and socially propagated echo. Work can be admitted `board_access="none"` to
+  produce a board-naive worker by construction. See
+  [BLACKBOARD](docs/BLACKBOARD.md).
 
 Genuinely overlapping independent inference execution — item 3 in the
 concurrency list above — is **not** achieved and is not claimed anywhere in

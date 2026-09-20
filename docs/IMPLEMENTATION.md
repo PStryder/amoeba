@@ -39,6 +39,15 @@ Read this before trusting anything below it.
 | Fork agrees with exact recomputation | **Implemented, measured with a caveat** | same top-1, KL < 0.007; **not** bit-identical — see [RUNTIME §3](RUNTIME.md#3-fork-vs-exact-recomputation) |
 | Cross-worker / Ego-worker cache isolation | **Implemented, tested** | `test_worker_tails_are_private` |
 | Tool-call schema + permission validation | **Implemented, tested** | `tests/test_tools.py` |
+| Cognitive blackboard: posts, threads, relations, receipts | **Implemented, tested** | `tests/test_blackboard.py` |
+| Independent replication vs socially propagated agreement | **Implemented, tested** | every read recorded; `board_corroboration` splits the two |
+| Board-naive workers (`board_access="none"`) | **Implemented, tested** | `test_a_naive_worker_posts_without_having_read_the_board` |
+| Sandboxed compute (OS-enforced AppContainer) | **Implemented, tested** | 29 boundary tests; network + host FS blocked |
+| Artifact promotion by Harness decision | **Implemented, tested** | proposal -> re-hash -> receipt |
+| Context homeostasis: measure, retire, checkpoint, rebirth | **Implemented, tested** | `tests/test_homeostasis.py` |
+| Context trim (verbatim head+tail) | **Implemented, tested** | dropped span recorded, reconstructible from checkpoint |
+| Context summarisation | **Refused by design** | a different behaviour from reconstitution; raises `capability_unsupported` |
+| Context compaction | **Not implemented** | `trim` drops a span; nothing merges or rewrites |
 | Continuous batching (several sequences, one fused kernel) | **Implemented, measured** | 13x aggregate at 64 sessions; knee at n≈32 |
 | Unified-KV occupancy tax (idle sessions slow others) | **Measured, unmitigated** | 1.94x slowdown at 77% pool, fully reversible |
 | **Independent overlapping GPU execution** | **NOT attempted, NOT claimed** | engine serialises by design; Nsight Systems absent, Nsight Compute serialises kernels |

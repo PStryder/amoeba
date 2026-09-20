@@ -164,6 +164,11 @@ CREATE TABLE IF NOT EXISTS work_items (
   budget_tokens     INTEGER,
   deadline          REAL,
   maintenance_depth INTEGER NOT NULL DEFAULT 0,
+  -- none | read | read_write. 'none' makes the worker board-naive by
+  -- construction, which is what turns agreement between two workers into
+  -- evidence of independent replication rather than an echo.
+  board_access      TEXT NOT NULL DEFAULT 'read_write',
+  sandbox_allowed   INTEGER NOT NULL DEFAULT 0,
   result_blob       TEXT,
   failure           TEXT,
   created_at        REAL NOT NULL,
@@ -249,6 +254,123 @@ CREATE TABLE IF NOT EXISTS disagreements (
   created_at      REAL NOT NULL,
   state_version   INTEGER NOT NULL
 );
+
+-- ------------------------------------------------------------------
+-- Cognitive blackboard: neuocyte-to-neuocyte communication.
+--
+-- This is NOT authoritative Mind State. A post is something a worker said,
+-- not something the organism believes. Promotion into memory_items is a
+-- separate, receipted act.
+--
+-- board_reads exists for one reason: to tell independent replication apart
+-- from socially propagated agreement. Two workers reaching the same finding
+-- means something very different depending on whether the second had read the
+-- first, so every read is recorded with a timestamp and every post snapshots
+-- what its author had already seen.
+-- ------------------------------------------------------------------
+CREATE TABLE IF NOT EXISTS board_posts (
+  post_id          TEXT PRIMARY KEY,
+  -- Wall-clock is NOT a usable cursor here: time.time() on this platform has
+  -- ~0.5ms granularity and returns identical values for consecutive calls, so
+  -- a "since <timestamp>" poll silently drops posts written in the same tick.
+  -- seq is assigned under the writer's transaction lock and is strictly
+  -- increasing, so it is the cursor workers should page on.
+  seq              INTEGER NOT NULL DEFAULT 0,
+  thread_id        TEXT NOT NULL,
+  author           TEXT NOT NULL,
+  author_kind      TEXT NOT NULL,          -- ego | id | worker | operator
+  author_incarnation INTEGER,
+  work_id          TEXT,
+  operation_id     TEXT,
+  post_type        TEXT NOT NULL,          -- finding|question|hypothesis|challenge|request|answer|note|retraction
+  title            TEXT,
+  body             TEXT NOT NULL,
+  confidence       REAL,
+  snapshot_id      TEXT,
+  model_generation TEXT,
+  status           TEXT NOT NULL DEFAULT 'open',   -- open|resolved|retracted|superseded
+  supersedes       TEXT,
+  -- independence bookkeeping, written at post time and never edited
+  informed_by      TEXT NOT NULL DEFAULT '[]',     -- post_ids this author had read BEFORE posting
+  read_count_before INTEGER NOT NULL DEFAULT 0,
+  board_naive      INTEGER NOT NULL DEFAULT 1,     -- 1 = author had read nothing at all
+  created_at       REAL NOT NULL,
+  state_version    INTEGER NOT NULL
+);
+CREATE UNIQUE INDEX IF NOT EXISTS ix_board_seq ON board_posts(seq);
+CREATE INDEX IF NOT EXISTS ix_board_thread ON board_posts(thread_id, seq);
+CREATE INDEX IF NOT EXISTS ix_board_type   ON board_posts(post_type, created_at);
+CREATE INDEX IF NOT EXISTS ix_board_author ON board_posts(author, created_at);
+CREATE INDEX IF NOT EXISTS ix_board_work   ON board_posts(work_id);
+
+CREATE TABLE IF NOT EXISTS board_evidence (
+  id          INTEGER PRIMARY KEY AUTOINCREMENT,
+  post_id     TEXT NOT NULL REFERENCES board_posts(post_id),
+  event_id    TEXT,
+  event_seq   INTEGER,
+  blob_sha256 TEXT,
+  memory_id   TEXT,
+  artifact_id TEXT,
+  note        TEXT
+);
+CREATE INDEX IF NOT EXISTS ix_board_ev ON board_evidence(post_id);
+
+CREATE TABLE IF NOT EXISTS board_relations (
+  id        INTEGER PRIMARY KEY AUTOINCREMENT,
+  from_post TEXT NOT NULL REFERENCES board_posts(post_id),
+  to_post   TEXT NOT NULL REFERENCES board_posts(post_id),
+  relation  TEXT NOT NULL,   -- reply_to|challenges|supports|refines|duplicates|answers
+  created_at REAL NOT NULL,
+  UNIQUE(from_post, to_post, relation)
+);
+CREATE INDEX IF NOT EXISTS ix_board_rel_from ON board_relations(from_post);
+CREATE INDEX IF NOT EXISTS ix_board_rel_to   ON board_relations(to_post);
+
+CREATE TABLE IF NOT EXISTS board_reads (
+  id        INTEGER PRIMARY KEY AUTOINCREMENT,
+  post_id   TEXT NOT NULL REFERENCES board_posts(post_id),
+  reader    TEXT NOT NULL,
+  work_id   TEXT,
+  read_at   REAL NOT NULL,
+  query     TEXT
+);
+CREATE INDEX IF NOT EXISTS ix_board_reads_reader ON board_reads(reader, read_at);
+CREATE INDEX IF NOT EXISTS ix_board_reads_post   ON board_reads(post_id);
+
+-- ------------------------------------------------------------------
+-- Sandboxed compute: scratch workspaces and promotion proposals.
+-- ------------------------------------------------------------------
+CREATE TABLE IF NOT EXISTS sandboxes (
+  sandbox_id    TEXT PRIMARY KEY,
+  owner         TEXT NOT NULL,
+  work_id       TEXT,
+  container_sid TEXT,
+  root          TEXT NOT NULL,
+  limits        TEXT,
+  status        TEXT NOT NULL,          -- active | destroyed
+  created_at    REAL NOT NULL,
+  destroyed_at  REAL,
+  state_version INTEGER NOT NULL
+);
+
+CREATE TABLE IF NOT EXISTS artifacts (
+  artifact_id   TEXT PRIMARY KEY,
+  sandbox_id    TEXT,
+  proposed_by   TEXT NOT NULL,
+  work_id       TEXT,
+  path          TEXT NOT NULL,          -- path within the workspace
+  sha256        TEXT NOT NULL,
+  bytes         INTEGER NOT NULL,
+  media_type    TEXT,
+  rationale     TEXT,
+  status        TEXT NOT NULL,          -- proposed | promoted | rejected
+  decided_by    TEXT,
+  decided_at    REAL,
+  reason        TEXT,
+  created_at    REAL NOT NULL,
+  state_version INTEGER NOT NULL
+);
+CREATE INDEX IF NOT EXISTS ix_artifact_status ON artifacts(status, created_at);
 
 CREATE TABLE IF NOT EXISTS conversations (
   conversation_id TEXT PRIMARY KEY,

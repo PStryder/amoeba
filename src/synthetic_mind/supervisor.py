@@ -28,8 +28,10 @@ from .errors import (
 )
 from .ids import new_id
 from .logging_setup import get_logger, setup_logging
+from .homeostasis import ContextHomeostasis, HomeostasisConfig
 from .mind import Mind
 from .rpc import RpcClient, RpcServer, read_or_create_token, wait_for_port
+from .sandbox import SandboxManager
 from .store.events import read_events
 from .store.writer import Mutation
 
@@ -122,6 +124,11 @@ class Supervisor:
         self._server: RpcServer | None = None
         self._last_snapshot_publish = 0.0
         self._unreachable_since: dict[str, float] = {}
+        self.sandboxes: SandboxManager | None = None
+        self.homeostasis = ContextHomeostasis(
+            HomeostasisConfig(**{k: getattr(cfg.homeostasis, k)
+                                 for k in HomeostasisConfig.__slots__}),
+            mind=None, inference=lambda: self.client("inference"))
 
     # ------------------------------------------------------------------
     # child processes
@@ -189,6 +196,15 @@ class Supervisor:
     def start(self) -> None:
         self.lock.acquire()
         self.mind = Mind(self.cfg)
+        self.homeostasis.mind = self.mind
+        if self.cfg.sandbox.enabled:
+            self.sandboxes = SandboxManager(self.cfg.sandbox_dir)
+            ok, detail = self.sandboxes.available()
+            if not ok:
+                self.log.warning("sandboxing unavailable: %s", detail)
+                self.sandboxes = None
+            else:
+                self.log.info("sandbox isolation: windows_appcontainer")
         recovery = self.mind.recover()
         self.log.info("recovery: %s", recovery["summary"])
 
@@ -226,6 +242,10 @@ class Supervisor:
                 self.log.exception("failed stopping %s", name)
         for wid in list(self.workers):
             self._kill_worker(wid, reason="supervisor shutdown")
+        if self.sandboxes is not None:
+            killed = self.sandboxes.destroy_all()
+            if killed:
+                self.log.info("destroyed %d sandboxes on shutdown", len(killed))
         if self._server is not None:
             self._server.shutdown()
         if self.mind is not None:
@@ -287,6 +307,20 @@ class Supervisor:
             if work_class is not None:
                 self._dispatch_worker(work_class)
             self._reclaim_snapshots()
+            self._homeostasis_tick()
+
+    def _homeostasis_tick(self) -> None:
+        """Context pressure is checked on a slow cadence, not every second."""
+        now = time.time()
+        if now - getattr(self, "_last_homeo", 0.0) < 15.0:
+            return
+        self._last_homeo = now
+        try:
+            out = self.homeostasis.tick()
+            if out and out.get("performed"):
+                self.log.warning("auto-rejuvenated %s: %s", out["role"], out["reason"])
+        except Exception:  # noqa: BLE001
+            self.log.exception("homeostasis tick failed")
 
     def _reap_workers(self) -> None:
         for wid, info in list(self.workers.items()):
@@ -450,9 +484,11 @@ class Supervisor:
 
     # ------------------------------------------------------------------
     def methods(self) -> dict[str, Any]:
-        from . import supervisor_api
+        from . import harness_api, supervisor_api
 
-        return supervisor_api.build(self)
+        methods = supervisor_api.build(self)
+        methods.update(harness_api.build(self))
+        return methods
 
 
 def _kill_tree(pid: int) -> None:

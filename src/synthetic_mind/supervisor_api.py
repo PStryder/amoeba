@@ -283,7 +283,9 @@ def build(sup: "Supervisor") -> dict[str, Any]:
                    operation_id: str | None = None, priority: int = 0,
                    budget_tokens: int | None = None, wall_seconds: float | None = None,
                    maintenance_depth: int = 0, snapshot_id: str | None = None,
-                   depends_on: Sequence[str] | None = None) -> dict[str, Any]:
+                   depends_on: Sequence[str] | None = None,
+                   board_access: str = "read_write",
+                   sandbox_allowed: bool = False) -> dict[str, Any]:
         decision = sup.arbiter.admit(
             work_class=work_class, snapshot=sup.resource_snapshot(),
             requested_budget_tokens=budget_tokens, requested_wall_seconds=wall_seconds,
@@ -305,9 +307,11 @@ def build(sup: "Supervisor") -> dict[str, Any]:
             operation_id=operation_id, priority=priority, snapshot_id=snapshot_id,
             model_generation=gen, budget_tokens=decision.granted_budget_tokens,
             deadline=decision.granted_deadline, maintenance_depth=maintenance_depth,
-            depends_on=depends_on,
+            depends_on=depends_on, board_access=board_access,
+            sandbox_allowed=sandbox_allowed,
         )
         return {"admitted": True, "work_id": work_id, "receipt_id": receipt.receipt_id,
+                "board_access": board_access, "sandbox_allowed": sandbox_allowed,
                 "granted_budget_tokens": decision.granted_budget_tokens,
                 "deadline": decision.granted_deadline,
                 "state_version": receipt.result_version}
@@ -606,6 +610,16 @@ def build(sup: "Supervisor") -> dict[str, Any]:
         except Exception as exc:  # noqa: BLE001
             base["id"] = {"unreachable": repr(exc)}
         base["integrity"] = mind.verify_integrity(deep=False)
+        try:
+            base["context"] = sup.homeostasis.assess()
+        except Exception as exc:  # noqa: BLE001
+            base["context"] = {"unavailable": repr(exc)}
+        base["board"] = mind.board.stats()
+        try:
+            base["sandbox"] = (sup.sandboxes.capabilities() if sup.sandboxes
+                               else {"sandbox_available": False})
+        except Exception as exc:  # noqa: BLE001
+            base["sandbox"] = {"error": repr(exc)}
         return base
 
     def id_audit(*, conclusion_id: str | None = None, operation_id: str | None = None,

@@ -1,0 +1,441 @@
+"""The cognitive blackboard: how neuocytes talk to each other.
+
+**The board is communication, not Mind State.** A post is something a worker
+*said*. A memory item is something the organism *believes*. Nothing crosses
+that line implicitly: promoting a post into maintained memory is a separate,
+receipted act performed by the Harness, and the post keeps its own identity
+afterwards.
+
+## Why every read is recorded
+
+Two neuocytes reaching the same finding is either the most valuable signal the
+swarm produces or the least, and which one depends entirely on a fact that is
+invisible after the fact: *had the second one already read the first?*
+
+- Neither had read the other -> **independent replication**. Two separate
+  routes to the same answer.
+- The second had read the first -> **socially propagated agreement**. It may
+  still be correct, but it is one observation wearing two coats, and counting
+  it twice is how a swarm talks itself into a confident mistake.
+
+So `record_read` is called on every retrieval, and every post snapshots
+`informed_by`: the exact set of posts its author had read *before* it was
+written. That snapshot is immutable. :meth:`independence` then answers the
+question directly rather than guessing from timestamps later.
+
+`board_naive` is the strongest form of the signal: the author had read nothing
+at all from the board before posting.
+"""
+
+from __future__ import annotations
+
+import json
+import time
+from typing import Any, Iterable, Sequence
+
+from ..errors import InvalidInput, NotFound
+from ..ids import new_id
+from .blobs import BlobStore
+from .db import Database
+from .events import EventKind
+from .writer import Mutation, Receipt, StateWriter
+
+POST_TYPES = (
+    "finding", "question", "hypothesis", "challenge", "request", "answer",
+    "note", "retraction",
+)
+RELATIONS = ("reply_to", "challenges", "supports", "refines", "duplicates", "answers")
+AUTHOR_KINDS = ("ego", "id", "worker", "operator")
+POST_STATUSES = ("open", "resolved", "retracted", "superseded")
+
+
+class BoardRepo:
+    def __init__(self, db: Database, blobs: BlobStore, writer: StateWriter) -> None:
+        self.db = db
+        self.conn = db.conn
+        self.blobs = blobs
+        self.writer = writer
+
+    # ------------------------------------------------------------------
+    # reading (which is itself recorded)
+    # ------------------------------------------------------------------
+    def read(
+        self,
+        *,
+        reader: str,
+        thread_id: str | None = None,
+        post_types: Sequence[str] | None = None,
+        query: str | None = None,
+        since_seq: int | None = None,
+        since: float | None = None,
+        limit: int = 20,
+        work_id: str | None = None,
+        record: bool = True,
+    ) -> list[dict[str, Any]]:
+        """Fetch posts and, by default, record that ``reader`` saw them.
+
+        ``record=False`` exists for the Harness and for audit paths, which must
+        be able to inspect the board without contaminating the independence
+        record of any worker. It is never used on behalf of a neuocyte.
+        """
+        clauses = ["status != 'retracted'"]
+        params: list[Any] = []
+        if thread_id:
+            clauses.append("thread_id = ?")
+            params.append(thread_id)
+        if post_types:
+            bad = set(post_types) - set(POST_TYPES)
+            if bad:
+                raise InvalidInput("unknown post type", unknown=sorted(bad),
+                                   allowed=list(POST_TYPES))
+            clauses.append("post_type IN (%s)" % ",".join("?" * len(post_types)))
+            params.extend(post_types)
+        if since_seq is not None:
+            clauses.append("seq > ?")
+            params.append(int(since_seq))
+        if since is not None:
+            # Approximate by construction; see the seq column comment.
+            clauses.append("created_at > ?")
+            params.append(float(since))
+        if query:
+            clauses.append("(title LIKE ? OR body LIKE ?)")
+            like = f"%{query}%"
+            params.extend([like, like])
+        params.append(int(limit))
+        rows = self.conn.execute(
+            "SELECT * FROM board_posts WHERE %s ORDER BY seq DESC LIMIT ?"
+            % " AND ".join(clauses), params,
+        ).fetchall()
+        posts = [self._hydrate(r) for r in rows]
+        if record and posts:
+            self.record_read(reader=reader, post_ids=[p["post_id"] for p in posts],
+                             work_id=work_id, query=query)
+        return posts
+
+    def get_post(self, post_id: str, *, reader: str | None = None,
+                 work_id: str | None = None) -> dict[str, Any]:
+        row = self.conn.execute(
+            "SELECT * FROM board_posts WHERE post_id = ?", (post_id,)).fetchone()
+        if row is None:
+            raise NotFound("unknown board post", post_id=post_id)
+        if reader:
+            self.record_read(reader=reader, post_ids=[post_id], work_id=work_id)
+        return self._hydrate(row)
+
+    def _hydrate(self, row: Any) -> dict[str, Any]:
+        item = dict(row)
+        item["informed_by"] = json.loads(item.get("informed_by") or "[]")
+        item["board_naive"] = bool(item.get("board_naive", 0))
+        item["evidence"] = [
+            dict(r) for r in self.conn.execute(
+                "SELECT event_id, event_seq, blob_sha256, memory_id, artifact_id, note"
+                " FROM board_evidence WHERE post_id = ? ORDER BY id", (item["post_id"],))
+        ]
+        item["relations"] = [
+            dict(r) for r in self.conn.execute(
+                "SELECT to_post, relation FROM board_relations WHERE from_post = ?",
+                (item["post_id"],))
+        ]
+        item["replies"] = [
+            dict(r) for r in self.conn.execute(
+                "SELECT from_post, relation FROM board_relations WHERE to_post = ?",
+                (item["post_id"],))
+        ]
+        return item
+
+    def record_read(self, *, reader: str, post_ids: Sequence[str],
+                    work_id: str | None = None, query: str | None = None) -> int:
+        """Append read receipts. Cheap, frequent, and not version-bumping.
+
+        Reads are evidence about influence, not state changes, so they do not
+        take the writer's transaction path. They are still durable.
+        """
+        if not post_ids:
+            return 0
+        now = time.time()
+        with self.writer.tx_lock:
+            self.conn.executemany(
+                "INSERT INTO board_reads(post_id, reader, work_id, read_at, query)"
+                " VALUES (?,?,?,?,?)",
+                [(pid, reader, work_id, now, query) for pid in post_ids],
+            )
+            self.conn.commit()
+        return len(post_ids)
+
+    def posts_read_by(self, reader: str, *, at_or_before: float | None = None
+                      ) -> list[str]:
+        """Posts this reader had seen by a given moment.
+
+        The comparison is ``<=``, not ``<``, and that choice matters. Wall-clock
+        granularity here is ~0.5ms and consecutive readings are usually
+        identical, so a read and the post it informed routinely share a
+        timestamp. With ``<`` those reads vanish and the post is wrongly marked
+        board-naive.
+
+        The bias is deliberate and one-directional: an ambiguous timestamp is
+        resolved as *influence*. Over-attributing influence costs a true
+        replication being called social agreement. Under-attributing it would
+        let an echo be counted as independent corroboration, which is exactly
+        how a swarm convinces itself of something on one observation.
+        """
+        sql = "SELECT DISTINCT post_id FROM board_reads WHERE reader = ?"
+        params: list[Any] = [reader]
+        if at_or_before is not None:
+            sql += " AND read_at <= ?"
+            params.append(at_or_before)
+        return [r["post_id"] for r in self.conn.execute(sql, params)]
+
+    # ------------------------------------------------------------------
+    # posting
+    # ------------------------------------------------------------------
+    def post(
+        self,
+        *,
+        author: str,
+        author_kind: str,
+        post_type: str,
+        body: str,
+        title: str | None = None,
+        thread_id: str | None = None,
+        work_id: str | None = None,
+        operation_id: str | None = None,
+        confidence: float | None = None,
+        evidence: Iterable[dict[str, Any]] = (),
+        relations: Iterable[dict[str, str]] = (),
+        snapshot_id: str | None = None,
+        model_generation: str | None = None,
+        author_incarnation: int | None = None,
+        supersedes: str | None = None,
+        mutation_id: str | None = None,
+    ) -> tuple[str, Receipt]:
+        """Publish a post, snapshotting what its author had already read.
+
+        The ``informed_by`` snapshot is taken here, at post time, from the
+        durable read log. It is never recomputed later, because "what had this
+        author seen by then" stops being answerable once more reads accumulate.
+        """
+        if post_type not in POST_TYPES:
+            raise InvalidInput("unknown post type", post_type=post_type,
+                               allowed=list(POST_TYPES))
+        if author_kind not in AUTHOR_KINDS:
+            raise InvalidInput("unknown author kind", author_kind=author_kind,
+                               allowed=list(AUTHOR_KINDS))
+        if not body or not body.strip():
+            raise InvalidInput("post body must be non-empty")
+        if confidence is not None and not 0.0 <= float(confidence) <= 1.0:
+            raise InvalidInput("confidence must be in [0, 1]", confidence=confidence)
+        relations = list(relations)
+        for rel in relations:
+            if rel.get("relation") not in RELATIONS:
+                raise InvalidInput("unknown relation", relation=rel.get("relation"),
+                                   allowed=list(RELATIONS))
+
+        post_id = new_id("post")
+        thread = thread_id or post_id
+        evidence = list(evidence)
+        now = time.time()
+        informed_by = sorted(self.posts_read_by(author, at_or_before=now))
+
+        def body_fn(m: Mutation) -> None:
+            row = m.sql("SELECT COALESCE(MAX(seq), 0) AS s FROM board_posts").fetchone()
+            seq = int(row["s"]) + 1
+            if supersedes:
+                prev = m.sql("SELECT post_id FROM board_posts WHERE post_id = ?",
+                             (supersedes,)).fetchone()
+                if prev is None:
+                    raise NotFound("post to supersede does not exist", post_id=supersedes)
+                m.sql("UPDATE board_posts SET status = 'superseded' WHERE post_id = ?",
+                      (supersedes,))
+            m.sql(
+                "INSERT INTO board_posts(post_id, seq, thread_id, author, author_kind,"
+                " author_incarnation, work_id, operation_id, post_type, title, body,"
+                " confidence, snapshot_id, model_generation, status, supersedes,"
+                " informed_by, read_count_before, board_naive, created_at, state_version)"
+                " VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
+                (post_id, seq, thread, author, author_kind, author_incarnation, work_id,
+                 operation_id, post_type, title, body, confidence, snapshot_id,
+                 model_generation, "open", supersedes, json.dumps(informed_by),
+                 len(informed_by), 1 if not informed_by else 0, now, m.prior_version + 1),
+            )
+            for ev in evidence:
+                m.sql(
+                    "INSERT INTO board_evidence(post_id, event_id, event_seq, blob_sha256,"
+                    " memory_id, artifact_id, note) VALUES (?,?,?,?,?,?,?)",
+                    (post_id, ev.get("event_id"), ev.get("event_seq"),
+                     ev.get("blob_sha256"), ev.get("memory_id"), ev.get("artifact_id"),
+                     ev.get("note")),
+                )
+            for rel in relations:
+                m.sql(
+                    "INSERT OR IGNORE INTO board_relations(from_post, to_post, relation,"
+                    " created_at) VALUES (?,?,?,?)",
+                    (post_id, rel["to_post"], rel["relation"], now),
+                )
+            m.emit(EventKind.BOARD_POSTED, {
+                "post_id": post_id, "seq": seq, "thread_id": thread, "author": author,
+                "post_type": post_type, "title": title, "work_id": work_id,
+                "confidence": confidence, "read_count_before": len(informed_by),
+                "board_naive": not informed_by, "evidence_count": len(evidence),
+                "relations": [r["relation"] for r in relations],
+            })
+
+        receipt, _ = self.writer.apply(
+            body_fn, actor=author, operation_id=operation_id,
+            mutation_id=mutation_id or f"board-post:{post_id}",
+        )
+        return post_id, receipt
+
+    def relate(self, *, from_post: str, to_post: str, relation: str, actor: str
+               ) -> Receipt:
+        if relation not in RELATIONS:
+            raise InvalidInput("unknown relation", relation=relation,
+                               allowed=list(RELATIONS))
+
+        def body(m: Mutation) -> None:
+            for pid in (from_post, to_post):
+                if m.sql("SELECT 1 FROM board_posts WHERE post_id = ?", (pid,)).fetchone() is None:
+                    raise NotFound("unknown board post", post_id=pid)
+            m.sql(
+                "INSERT OR IGNORE INTO board_relations(from_post, to_post, relation,"
+                " created_at) VALUES (?,?,?,?)", (from_post, to_post, relation, time.time()))
+            m.emit(EventKind.BOARD_RELATED,
+                   {"from_post": from_post, "to_post": to_post, "relation": relation})
+
+        receipt, _ = self.writer.apply(
+            body, actor=actor, bump_version=False,
+            mutation_id=f"board-rel:{from_post}:{to_post}:{relation}")
+        return receipt
+
+    def set_status(self, *, post_id: str, status: str, actor: str,
+                   reason: str | None = None) -> Receipt:
+        if status not in POST_STATUSES:
+            raise InvalidInput("unknown status", status=status,
+                               allowed=list(POST_STATUSES))
+
+        def body(m: Mutation) -> None:
+            row = m.sql("SELECT status FROM board_posts WHERE post_id = ?",
+                        (post_id,)).fetchone()
+            if row is None:
+                raise NotFound("unknown board post", post_id=post_id)
+            m.sql("UPDATE board_posts SET status = ? WHERE post_id = ?", (status, post_id))
+            m.emit(EventKind.BOARD_STATUS_CHANGED,
+                   {"post_id": post_id, "from": row["status"], "to": status,
+                    "reason": reason})
+
+        receipt, _ = self.writer.apply(
+            body, actor=actor, mutation_id=f"board-status:{post_id}:{status}",
+            bump_version=False)
+        return receipt
+
+    # ------------------------------------------------------------------
+    # the point of all the bookkeeping
+    # ------------------------------------------------------------------
+    def independence(self, post_a: str, post_b: str) -> dict[str, Any]:
+        """Were these two posts arrived at independently?
+
+        Answered from the immutable ``informed_by`` snapshots plus the read
+        log, never inferred from wording similarity.
+        """
+        a = self.get_post(post_a)
+        b = self.get_post(post_b)
+        earlier, later = (a, b) if a["created_at"] <= b["created_at"] else (b, a)
+
+        later_saw_earlier = earlier["post_id"] in later["informed_by"]
+        # Belt and braces: the read log is the ground truth if a snapshot is
+        # ever absent (e.g. a post written before this bookkeeping existed).
+        if not later_saw_earlier:
+            row = self.conn.execute(
+                "SELECT 1 FROM board_reads WHERE post_id = ? AND reader = ?"
+                " AND read_at <= ? LIMIT 1",
+                (earlier["post_id"], later["author"], later["created_at"]),
+            ).fetchone()
+            later_saw_earlier = row is not None
+
+        same_author = a["author"] == b["author"]
+        if same_author:
+            verdict = "same_author"
+        elif later_saw_earlier:
+            verdict = "socially_informed"
+        else:
+            verdict = "independent"
+
+        return {
+            "post_a": post_a, "post_b": post_b,
+            "earlier_post": earlier["post_id"], "later_post": later["post_id"],
+            "later_author_had_read_earlier": later_saw_earlier,
+            "later_author_board_naive": later["board_naive"],
+            "same_author": same_author,
+            "verdict": verdict,
+            "explanation": {
+                "independent": "neither author had read the other's post; agreement "
+                               "here is replication",
+                "socially_informed": "the later author had already read the earlier "
+                                     "post; agreement is not independent evidence",
+                "same_author": "both posts have the same author; not corroboration "
+                               "at all",
+            }[verdict],
+        }
+
+    def corroboration(self, post_id: str) -> dict[str, Any]:
+        """Who agrees with this post, and how much of that agreement is real?"""
+        post = self.get_post(post_id)
+        supporters = [
+            dict(r) for r in self.conn.execute(
+                "SELECT from_post FROM board_relations WHERE to_post = ?"
+                " AND relation = 'supports'", (post_id,))
+        ]
+        challengers = [
+            dict(r) for r in self.conn.execute(
+                "SELECT from_post FROM board_relations WHERE to_post = ?"
+                " AND relation = 'challenges'", (post_id,))
+        ]
+        independent, informed = [], []
+        for s in supporters:
+            verdict = self.independence(post_id, s["from_post"])["verdict"]
+            (independent if verdict == "independent" else informed).append(s["from_post"])
+        return {
+            "post_id": post_id,
+            "author": post["author"],
+            "supporting_posts": [s["from_post"] for s in supporters],
+            "independent_support": independent,
+            "socially_informed_support": informed,
+            "challenges": [c["from_post"] for c in challengers],
+            "independent_support_count": len(independent),
+            "note": ("only independent_support counts as corroboration; "
+                     "socially informed support is one observation restated"),
+        }
+
+    # ------------------------------------------------------------------
+    def thread(self, thread_id: str, *, limit: int = 200) -> list[dict[str, Any]]:
+        rows = self.conn.execute(
+            "SELECT * FROM board_posts WHERE thread_id = ? ORDER BY seq ASC LIMIT ?",
+            (thread_id, limit)).fetchall()
+        return [self._hydrate(r) for r in rows]
+
+    def latest_seq(self) -> int:
+        """The cursor a worker should remember to poll for new posts."""
+        row = self.conn.execute(
+            "SELECT COALESCE(MAX(seq), 0) AS s FROM board_posts").fetchone()
+        return int(row["s"])
+
+    def stats(self) -> dict[str, Any]:
+        by_type = {r["post_type"]: r["n"] for r in self.conn.execute(
+            "SELECT post_type, COUNT(*) AS n FROM board_posts GROUP BY post_type")}
+        by_status = {r["status"]: r["n"] for r in self.conn.execute(
+            "SELECT status, COUNT(*) AS n FROM board_posts GROUP BY status")}
+        naive = self.conn.execute(
+            "SELECT COUNT(*) AS n FROM board_posts WHERE board_naive = 1").fetchone()["n"]
+        total = sum(by_type.values())
+        return {
+            "posts": total, "by_type": by_type, "by_status": by_status,
+            "threads": self.conn.execute(
+                "SELECT COUNT(DISTINCT thread_id) AS n FROM board_posts").fetchone()["n"],
+            "reads": self.conn.execute(
+                "SELECT COUNT(*) AS n FROM board_reads").fetchone()["n"],
+            "relations": self.conn.execute(
+                "SELECT COUNT(*) AS n FROM board_relations").fetchone()["n"],
+            "board_naive_posts": naive,
+            "board_naive_fraction": (naive / total) if total else 0.0,
+            "latest_seq": self.latest_seq(),
+            "note": "the board is communication, not maintained memory",
+        }

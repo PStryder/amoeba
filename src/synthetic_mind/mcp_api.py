@@ -43,12 +43,16 @@ audit, disagreements, maintenance).
 You are a client and a cognitive peer, not a component of this mind. Its state
 outlives your connection.
 
-Two invariants worth knowing before you read results:
+Three invariants worth knowing before you read results:
   * Raw history is evidence, not memory. `ego_recall` searches MAINTAINED
     interpretations with confidence and supporting/opposing evidence. Raw events
     are reached through `id_audit`.
   * `id_audit` resolves an Ego conclusion through the recorded evidence. It does
     not ask Ego to defend itself, so its verdict is independent of Ego's account.
+  * The blackboard is communication between workers, not belief. Agreement on it
+    only counts as corroboration when the agreeing parties had not read each
+    other -- `board_corroboration` tells you which kind you are looking at. Your
+    own reads are recorded too.
 
 Check `limitations` on every response. If the backend is simulated, every
 response says so explicitly."""
@@ -294,6 +298,84 @@ def build_server(cfg: Config):  # noqa: C901
         """
         return facade.envelope(facade.call("id_maintenance", objective=objective,
                                            scope=scope, budget_tokens=budget_tokens))
+
+    # ---------------- cognitive blackboard ----------------
+    @mcp.tool(title="Board: read")
+    @guarded
+    def board_read(
+        query: Annotated[str, Field(description="Substring to match in posts.",
+                                    max_length=1000)] = "",
+        post_types: Annotated[list[str] | None, Field(
+            description="finding | question | hypothesis | challenge | request | "
+                        "answer | note | retraction")] = None,
+        since_seq: Annotated[int | None, Field(
+            description="Cursor from a previous read; returns only newer posts.")] = None,
+        limit: Annotated[int, Field(ge=1, le=100)] = 20,
+    ) -> dict[str, Any]:
+        """Read the swarm's working discussion.
+
+        This is communication between neuocytes, NOT the mind's beliefs. A post
+        is something a worker said; `ego_recall` is what the organism holds to
+        be true.
+
+        Reading is recorded against you. If you then post something that agrees
+        with what you read, that agreement is marked socially informed rather
+        than independent -- which is the point, not a side effect.
+
+        Keep the returned `cursor` and pass it as `since_seq` next time.
+        """
+        return facade.envelope(facade.call(
+            "board_read", reader="mcp_client", query=query, post_types=post_types,
+            since_seq=since_seq, limit=limit, record=True))
+
+    @mcp.tool(title="Board: post")
+    @guarded
+    def board_post(
+        body: Annotated[str, Field(description="What you want to contribute.",
+                                   max_length=8000)],
+        post_type: Annotated[
+            Literal["finding", "question", "hypothesis", "challenge", "note"],
+            Field(description="What kind of contribution this is.")] = "note",
+        title: Annotated[str | None, Field(max_length=200)] = None,
+        thread_id: Annotated[str | None, Field(
+            description="Reply into an existing thread.")] = None,
+        replies_to: Annotated[str | None, Field(
+            description="Post id this responds to.")] = None,
+        relation: Annotated[
+            Literal["reply_to", "challenges", "supports", "refines", "answers"],
+            Field(description="How it relates to replies_to.")] = "reply_to",
+        confidence: Annotated[float | None, Field(ge=0.0, le=1.0)] = None,
+    ) -> dict[str, Any]:
+        """Contribute to the swarm's discussion as a cognitive peer.
+
+        You are a participant here, not an authority: posting does not change
+        what the mind believes. Promotion of a post into maintained memory is a
+        separate act performed by the Harness.
+
+        Whatever you had already read is recorded against this post, so a later
+        reader can tell whether you reached this independently.
+        """
+        relations = ([{"to_post": replies_to, "relation": relation}]
+                     if replies_to else [])
+        return facade.envelope(facade.call(
+            "board_post", author="mcp_client", author_kind="operator",
+            post_type=post_type, body=body, title=title, thread_id=thread_id,
+            relations=relations, confidence=confidence))
+
+    @mcp.tool(title="Board: how real is this agreement?")
+    @guarded
+    def board_corroboration(
+        post_id: Annotated[str, Field(description="Post to examine.", max_length=64)],
+    ) -> dict[str, Any]:
+        """Separate independent replication from socially propagated agreement.
+
+        Several workers agreeing means very different things depending on
+        whether they had read each other. This splits the support into
+        `independent_support` (separate routes to the same answer) and
+        `socially_informed_support` (one observation restated), and lists any
+        challenges. Only the first is corroboration.
+        """
+        return facade.envelope(facade.call("board_corroboration", post_id=post_id))
 
     # ---------------- provenance ----------------
     @mcp.tool(title="Provenance: resolve an operation")

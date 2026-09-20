@@ -19,6 +19,9 @@ from .events import EventKind
 from .writer import Mutation, Receipt, StateWriter
 
 WORK_CLASSES = ("user", "maintenance")
+BOARD_ACCESS = ("none", "read", "read_write")
+"""'none' produces a board-naive worker. Two naive workers agreeing is
+independent replication; agreement after reading is not."""
 TERMINAL_WORK = ("done", "failed", "cancelled")
 
 
@@ -46,11 +49,16 @@ class WorkRepo:
         deadline: float | None = None,
         maintenance_depth: int = 0,
         depends_on: Sequence[str] | None = None,
+        board_access: str = "read_write",
+        sandbox_allowed: bool = False,
         mutation_id: str | None = None,
     ) -> tuple[str, Receipt]:
         if work_class not in WORK_CLASSES:
             raise InvalidInput("unknown work class", work_class=work_class,
                                allowed=list(WORK_CLASSES))
+        if board_access not in BOARD_ACCESS:
+            raise InvalidInput("unknown board access mode", board_access=board_access,
+                               allowed=list(BOARD_ACCESS))
         work_id = new_id("work")
 
         def body(m: Mutation) -> None:
@@ -59,16 +67,18 @@ class WorkRepo:
                 "INSERT INTO work_items(work_id, objective, work_class, origin_actor,"
                 " operation_id, priority, depends_on, snapshot_id, model_generation,"
                 " pinned_state_ver, status, attempt, fencing_token, budget_tokens, deadline,"
-                " maintenance_depth, created_at, updated_at)"
-                " VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
+                " maintenance_depth, board_access, sandbox_allowed, created_at, updated_at)"
+                " VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
                 (work_id, objective, work_class, origin_actor, operation_id, priority,
                  json.dumps(list(depends_on or [])), snapshot_id, model_generation,
                  m.prior_version, "queued", 0, 0, budget_tokens, deadline,
-                 maintenance_depth, now, now),
+                 maintenance_depth, board_access, 1 if sandbox_allowed else 0,
+                 now, now),
             )
             m.emit(EventKind.WORK_ADMITTED, {
                 "work_id": work_id, "work_class": work_class, "objective": objective,
                 "priority": priority, "snapshot_id": snapshot_id,
+                "board_access": board_access, "sandbox_allowed": sandbox_allowed,
                 "maintenance_depth": maintenance_depth, "budget_tokens": budget_tokens,
             })
 

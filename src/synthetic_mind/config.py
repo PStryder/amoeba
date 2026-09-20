@@ -15,6 +15,19 @@ from typing import Any
 
 
 @dataclass(slots=True)
+class HomeostasisSettings:
+    elevated: float = 0.55
+    high: float = 0.70
+    critical: float = 0.85
+    role_context_high: float = 0.75
+    keep_head_tokens: int = 512
+    keep_tail_fraction: float = 0.45
+    min_seconds_between_rejuvenations: float = 120.0
+    max_rejuvenations_per_hour: int = 12
+    auto_rejuvenate: bool = True
+
+
+@dataclass(slots=True)
 class BackendConfig:
     kind: str = "deterministic"          # deterministic | llama_cpp
     lib_path: str = ""                   # absolute path to llama.dll (llama_cpp)
@@ -53,6 +66,19 @@ class ArbiterConfig:
 
 
 @dataclass(slots=True)
+class SandboxConfig:
+    enabled: bool = True
+    wall_seconds: float = 60.0
+    cpu_seconds: float = 60.0
+    memory_bytes: int = 1024 * 1024 * 1024
+    max_processes: int = 8
+    max_output_bytes: int = 262144
+    max_scratch_bytes: int = 268435456
+    max_artifact_bytes: int = 16777216
+    max_concurrent: int = 4
+
+
+@dataclass(slots=True)
 class RoleConfig:
     max_context_tokens: int = 6144
     max_turns_resident: int = 40
@@ -72,6 +98,8 @@ class Config:
     log_level: str = "INFO"
     backend: BackendConfig = field(default_factory=BackendConfig)
     arbiter: ArbiterConfig = field(default_factory=ArbiterConfig)
+    sandbox: SandboxConfig = field(default_factory=SandboxConfig)
+    homeostasis: "HomeostasisSettings" = field(default_factory=lambda: HomeostasisSettings())
     ego: RoleConfig = field(default_factory=RoleConfig)
     id: RoleConfig = field(default_factory=RoleConfig)
     source_path: Path | None = None
@@ -90,6 +118,15 @@ class Config:
         return self.state_dir / "logs"
 
     @property
+    def sandbox_dir(self) -> Path:
+        return self.state_dir / "sandbox"
+
+    @property
+    def workspace_dir(self) -> Path:
+        """Durable workspace: where promoted artifacts land."""
+        return self.state_dir / "workspace"
+
+    @property
     def ready_path(self) -> Path:
         return self.state_dir / "supervisor.ready"
 
@@ -102,7 +139,8 @@ class Config:
         return self.state_dir / "supervisor.lock"
 
     def ensure_dirs(self) -> None:
-        for p in (self.state_dir, self.blob_dir, self.log_dir):
+        for p in (self.state_dir, self.blob_dir, self.log_dir,
+                  self.sandbox_dir, self.workspace_dir):
             p.mkdir(parents=True, exist_ok=True)
 
     def to_dict(self) -> dict[str, Any]:
@@ -148,5 +186,9 @@ def load_config(path: str | os.PathLike[str] | None = None) -> Config:
         _apply(cfg.ego, raw["ego"], "ego")
     if "id" in raw:
         _apply(cfg.id, raw["id"], "id")
+    if "sandbox" in raw:
+        _apply(cfg.sandbox, raw["sandbox"], "sandbox")
+    if "homeostasis" in raw:
+        _apply(cfg.homeostasis, raw["homeostasis"], "homeostasis")
     cfg.ensure_dirs()
     return cfg

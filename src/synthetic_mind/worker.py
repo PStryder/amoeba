@@ -42,11 +42,22 @@ WORKER_INSTRUCTION = """You are a bounded worker forked from the mind's Ego cont
 You inherited the context above. Do one narrow task and stop.
 
 Task: {objective}
-
+{board}
 Reply with exactly three lines:
 FINDING: <one sentence, the thing you actually determined>
 CONFIDENCE: <a number between 0 and 1>
 EVIDENCE: <what in the context above supports it, or "none in context">"""
+
+BOARD_BLOCK = """
+What other neuocytes have already posted about this:
+{posts}
+"""
+
+NO_BOARD_BLOCK = """
+You have deliberately NOT been shown what other workers found. Answer from the
+context and the task alone, so that agreement with another worker means
+something.
+"""
 
 MAINTENANCE_INSTRUCTION = """You are a bounded maintenance worker for a synthetic mind.
 You were NOT given Ego's private context: you get a narrow task and references to
@@ -156,7 +167,9 @@ class Worker:
             )
 
         instantiation = self._instantiate_from_snapshot(snapshot, caps=caps)
-        prompt = WORKER_INSTRUCTION.format(objective=item["objective"])
+        board_block, board_seen = self._board_context(item)
+        prompt = WORKER_INSTRUCTION.format(objective=item["objective"],
+                                           board=board_block)
         rendered = self.inf.call(
             "apply_chat_template",
             messages=[{"role": "user", "content": prompt}], add_assistant=True,
@@ -167,9 +180,13 @@ class Worker:
                             max_tokens=min(budget, 256), temperature=0.0,
                             deadline=deadline)
         parsed = _parse_finding(out["text"])
+        post_id = self._publish_finding(item, parsed, out)
         return {
             "kind": "ego_derived_finding",
             "objective": item["objective"],
+            "board_access": item.get("board_access", "read_write"),
+            "board_posts_seen": board_seen,
+            "board_post_id": post_id,
             "snapshot_id": self.snapshot_id,
             "snapshot_version": snapshot["version"],
             "model_generation": self.model_generation,
@@ -185,6 +202,53 @@ class Worker:
             "is_simulated": out.get("is_simulated", False),
             "worker_id": self.worker_id,
         }
+
+    def _board_context(self, item: dict[str, Any]) -> tuple[str, list[str]]:
+        """Show the worker the board only if its work item permits it.
+
+        A work item admitted with ``board_access="none"`` produces a
+        board-naive worker on purpose. That is what makes later agreement
+        between two workers evidence of independent replication rather than one
+        of them having read the other. Reading is recorded against this worker
+        the moment it happens.
+        """
+        access = item.get("board_access", "read_write")
+        if access == "none":
+            return NO_BOARD_BLOCK, []
+        try:
+            res = self.sup.call("board_read", reader=self.worker_id,
+                                work_id=item["work_id"], limit=6,
+                                post_types=["finding", "hypothesis", "challenge"])
+        except Exception:  # noqa: BLE001
+            self.log.debug("board read failed", exc_info=True)
+            return NO_BOARD_BLOCK, []
+        posts = res.get("posts", [])
+        if not posts:
+            return NO_BOARD_BLOCK, []
+        rendered = "\n".join(
+            f"- [{p['post_id']}] ({p['post_type']}, {p['author']}) {p['body'][:180]}"
+            for p in posts)
+        return BOARD_BLOCK.format(posts=rendered), [p["post_id"] for p in posts]
+
+    def _publish_finding(self, item: dict[str, Any], parsed: dict[str, Any],
+                         out: dict[str, Any]) -> str | None:
+        """Publish to the board if permitted. The board is communication; the
+        durable finding is committed separately through complete_work."""
+        if item.get("board_access") != "read_write":
+            return None
+        try:
+            res = self.sup.call(
+                "board_post", author=self.worker_id, author_kind="worker",
+                post_type="finding", body=parsed["finding"],
+                title=item["objective"][:120], work_id=item["work_id"],
+                confidence=parsed["confidence"],
+                model_generation=self.model_generation,
+                snapshot_id=self.snapshot_id,
+                evidence=[{"note": parsed["evidence"]}] if parsed.get("evidence") else [])
+            return res.get("post_id")
+        except Exception:  # noqa: BLE001
+            self.log.debug("board post failed", exc_info=True)
+            return None
 
     def _instantiate_from_snapshot(self, snapshot: dict[str, Any],
                                    *, caps: dict[str, Any]) -> dict[str, Any]:

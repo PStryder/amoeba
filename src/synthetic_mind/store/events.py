@@ -68,6 +68,30 @@ class EventKind:
     DISAGREEMENT_OPENED = "disagreement.opened"
     DISAGREEMENT_RESOLVED = "disagreement.resolved"
 
+    # cognitive blackboard (communication, not Mind State)
+    BOARD_POSTED = "board.posted"
+    BOARD_RELATED = "board.related"
+    BOARD_STATUS_CHANGED = "board.status_changed"
+    BOARD_PROMOTED = "board.promoted_to_memory"
+
+    # sandboxed compute
+    SANDBOX_CREATED = "sandbox.created"
+    SANDBOX_RUN = "sandbox.run"
+    SANDBOX_DESTROYED = "sandbox.destroyed"
+    SANDBOX_DENIED = "sandbox.denied"
+    ARTIFACT_PROPOSED = "artifact.proposed"
+    ARTIFACT_PROMOTED = "artifact.promoted"
+    ARTIFACT_REJECTED = "artifact.rejected"
+
+    # context homeostasis
+    CONTEXT_MEASURED = "context.measured"
+    CONTEXT_PRESSURE = "context.pressure"
+    SESSION_RETIRED = "session.retired"
+    SESSION_REBORN = "session.reborn"
+    REJUVENATION_REQUESTED = "rejuvenation.requested"
+    REJUVENATION_PERFORMED = "rejuvenation.performed"
+    REJUVENATION_REFUSED = "rejuvenation.refused"
+
     # arbiter / side channel
     RESOURCE_DECISION = "resource.decision"
     SIDE_CHANNEL_SIGNAL = "side_channel.signal"

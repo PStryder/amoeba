@@ -19,6 +19,7 @@ from .logging_setup import get_logger
 from .store.blobs import BlobStore
 from .store.db import Database
 from .store.events import EventKind, missing_content, read_events, resolve_provenance, verify_chain
+from .store.board_repo import BoardRepo
 from .store.memory_repo import MemoryRepo
 from .store.work_repo import WorkRepo
 from .store.writer import Mutation, StateWriter
@@ -36,6 +37,7 @@ class Mind:
         self.writer = StateWriter(self.db, self.blobs, run_id=self.run_id)
         self.memory = MemoryRepo(self.db, self.blobs, self.writer)
         self.work = WorkRepo(self.db, self.blobs, self.writer)
+        self.board = BoardRepo(self.db, self.blobs, self.writer)
 
     # ------------------------------------------------------------------
     def close(self) -> None:
@@ -66,6 +68,8 @@ class Mind:
                 " UNION ALL SELECT 'conclusions', COUNT(*) FROM conclusions"
                 " UNION ALL SELECT 'work_items', COUNT(*) FROM work_items"
                 " UNION ALL SELECT 'snapshots', COUNT(*) FROM snapshots"
+                " UNION ALL SELECT 'board_posts', COUNT(*) FROM board_posts"
+                " UNION ALL SELECT 'artifacts', COUNT(*) FROM artifacts"
             )
         }
         return {
@@ -205,4 +209,5 @@ class Mind:
             "event_count": self.db.conn.execute(
                 "SELECT COUNT(*) AS n FROM events"
             ).fetchone()["n"],
+            "board": self.board.stats(),
         }

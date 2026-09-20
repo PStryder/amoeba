@@ -119,8 +119,37 @@ class InferenceService:
             "state_seq_size": lambda session_id: b.state_seq_size(session_id),
             "vram_free": lambda: b.vram_free(),
             "session_tokens": self.session_tokens,
+            "context_report": self.context_report,
             "stats": lambda: dict(self._stats),
             "shutdown": self.shutdown,
+        }
+
+    def context_report(self) -> dict[str, Any]:
+        """Measured KV occupancy. Homeostasis never estimates this."""
+        report = getattr(self.backend, "load_report", {}) or {}
+        capacity = int(report.get("n_ctx_total") or self.cfg.backend.n_ctx)
+        sessions = []
+        used = 0
+        try:
+            for s in self.backend.active_sessions():
+                n = int(s.get("n_past", 0))
+                # A forked prefix is shared, so counting it against every owner
+                # would overstate the pool. Charge the shared prefix once, to
+                # the session that is not a fork.
+                private = n - int(s.get("prefix_len", 0) or 0)
+                used += private if s.get("snapshot_id") else n
+                sessions.append({**s, "private_tokens": private,
+                                 "budget_tokens": capacity})
+        except Exception as exc:  # noqa: BLE001
+            return {"pool_tokens_used": 0, "pool_capacity": capacity,
+                    "sessions": [], "detail": f"backend error: {exc!r}"}
+        return {
+            "pool_tokens_used": used,
+            "pool_capacity": capacity,
+            "occupancy": used / max(capacity, 1),
+            "sessions": sessions,
+            "detail": ("shared forked prefixes counted once; a fork's private "
+                       "tail is charged to the fork"),
         }
 
     def health(self) -> dict[str, Any]:
