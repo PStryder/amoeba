@@ -147,11 +147,13 @@ class InferenceService:
         try:
             for s in self.backend.active_sessions():
                 n = int(s.get("n_past", 0))
-                # A forked prefix is shared, so counting it against every owner
-                # would overstate the pool. Charge the shared prefix once, to
-                # the session that is not a fork.
+                # A forked prefix is physically shared, so charging it to
+                # every owner would overstate the pool. A RECOMPUTED prefix is
+                # not shared -- it occupies its own cells -- so keying off
+                # snapshot_id would under-report occupancy for exactly the
+                # sessions restored after an inference restart.
                 private = n - int(s.get("prefix_len", 0) or 0)
-                used += private if s.get("snapshot_id") else n
+                used += private if s.get("shares_prefix") else n
                 sessions.append({**s, "private_tokens": private,
                                  "budget_tokens": capacity})
         except Exception as exc:  # noqa: BLE001
@@ -162,8 +164,9 @@ class InferenceService:
             "pool_capacity": capacity,
             "occupancy": used / max(capacity, 1),
             "sessions": sessions,
-            "detail": ("shared forked prefixes counted once; a fork's private "
-                       "tail is charged to the fork"),
+            "detail": ("physically shared prefixes counted once; a fork's private "
+                       "tail is charged to the fork; recomputed prefixes are "
+                       "charged in full because they are not shared"),
         }
 
     def health(self) -> dict[str, Any]:

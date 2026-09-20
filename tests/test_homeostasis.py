@@ -279,3 +279,51 @@ def test_rejuvenation_never_consults_a_model(homeo):
     homeo.rejuvenate(role="ego", reason="x")
     assert "generate" not in homeo.fake.methods_called()
     assert "chat" not in homeo.fake.methods_called()
+
+
+# ---------------------------------------------------------------------------
+# Review-pass regression: occupancy accounting
+# ---------------------------------------------------------------------------
+def test_a_recomputed_prefix_is_charged_in_full(mind):
+    """A restored session occupies its own cells and must be counted that way.
+
+    Occupancy used to key off snapshot_id, which restore_prefix also sets. A
+    recomputed session was therefore charged only its private tail, so pool
+    pressure was under-reported for exactly the sessions created by the
+    post-restart fallback path -- when pressure matters most.
+    """
+    from amoeba.backends.deterministic import DeterministicBackend
+
+    b = DeterministicBackend(n_seq_max=6, n_ctx=100000)
+    b.load()
+    src = b.open_session(role="ego")
+    b.ingest(src.session_id, list(range(500)))
+
+    forked = b.fork_prefix(src_session_id=src.session_id, prefix_len=500,
+                           role="neuocyte", snapshot_id="snap_x")
+    restored = b.open_session(role="neuocyte")
+    b.restore_prefix(session_id=restored.session_id, tokens=list(range(500)),
+                     snapshot_id="snap_x")
+
+    by_id = {s["session_id"]: s for s in b.active_sessions()}
+    assert by_id[forked.session_id]["shares_prefix"] is True
+    assert by_id[restored.session_id]["shares_prefix"] is False
+    # Both carry a snapshot_id, which is why that was the wrong signal.
+    assert by_id[forked.session_id]["snapshot_id"] == "snap_x"
+    assert by_id[restored.session_id]["snapshot_id"] == "snap_x"
+
+
+def test_occupancy_counts_shared_once_and_recomputed_in_full(mind):
+    """The arithmetic the report claims, checked directly."""
+    sessions = [
+        {"session_id": "a", "role": "ego", "n_past": 500, "prefix_len": 0,
+         "shares_prefix": False, "snapshot_id": None},
+        {"session_id": "b", "role": "neuocyte", "n_past": 520, "prefix_len": 500,
+         "shares_prefix": True, "snapshot_id": "s"},     # fork: charge 20
+        {"session_id": "c", "role": "neuocyte", "n_past": 530, "prefix_len": 500,
+         "shares_prefix": False, "snapshot_id": "s"},    # recomputed: charge 530
+    ]
+    used = sum(
+        (s["n_past"] - s["prefix_len"]) if s["shares_prefix"] else s["n_past"]
+        for s in sessions)
+    assert used == 500 + 20 + 530

@@ -275,8 +275,11 @@ def build(sup: "Supervisor") -> dict[str, Any]:  # noqa: C901
         that the Harness can later act on.
         """
         mgr = _sandbox_manager()
-        info = mgr.read_file(sandbox_id, path, max_bytes=1)   # validates the path
+        # resolve_inside is the path check; read_file would additionally slurp
+        # the whole file just to validate, and this one is read again below.
         target = mgr.resolve_inside(mgr.get(sandbox_id), path)
+        if not target.is_file():
+            raise NotFound("no such file in sandbox", path=path)
         size = target.stat().st_size
         if size > MAX_PROMOTED_BYTES:
             raise ResourceExhausted("artifact too large to promote", bytes=size,

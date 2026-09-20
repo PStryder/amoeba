@@ -150,6 +150,7 @@ class DeterministicBackend:
     def active_sessions(self) -> list[dict[str, Any]]:
         return [{"session_id": s.session_id, "role": s.role, "seq_id": s.seq_id,
                  "n_past": s.n_past, "prefix_len": s.prefix_len,
+                 "shares_prefix": s.shares_prefix,
                  "snapshot_id": s.snapshot_id} for s in self._sessions.values()]
 
     def request_cancel(self, session_id: str) -> bool:
@@ -184,6 +185,7 @@ class DeterministicBackend:
             # never be mistaken for it mutating the source.
             dst.tokens = list(src.tokens[:prefix_len])
             dst.prefix_len = prefix_len
+            dst.shares_prefix = True
             dst.snapshot_id = snapshot_id
             return dst
 
@@ -192,6 +194,7 @@ class DeterministicBackend:
         sess = self.get_session(session_id)
         sess.tokens = list(tokens)
         sess.prefix_len = len(tokens)
+        sess.shares_prefix = False      # recomputed, not shared
         sess.snapshot_id = snapshot_id
         return sess.n_past
 

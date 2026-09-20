@@ -96,8 +96,16 @@ class Facade:
         import anyio
 
         try:
+            # abandon_on_cancel=True is load-bearing. The default is False,
+            # which defers cancellation until the worker thread finishes -- so
+            # the await never raises, the handler below never runs, and the
+            # whole automatic-cancellation path is silently inert. Abandoning
+            # the thread is the right trade here: the blocking RPC is left to
+            # finish in the background while we tell the supervisor to cancel
+            # the operation it belongs to.
             return await anyio.to_thread.run_sync(
-                lambda: self.call(method, idempotency_key=idempotency_key, **params))
+                lambda: self.call(method, idempotency_key=idempotency_key, **params),
+                abandon_on_cancel=True)
         except anyio.get_cancelled_exc_class():
             # Shielded: the cancel itself must survive the cancellation that
             # triggered it, or the work carries on unattended.

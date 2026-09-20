@@ -214,3 +214,42 @@ def test_ego_converse_records_tool_requests_without_executing_them(stack):
                       idempotency_key="tool-report-1")
     assert "tool_requests" in turn["result"]
     assert isinstance(turn["result"]["tool_requests"], list)
+
+
+def test_the_tool_execution_loop_is_not_wired_and_the_docs_say_so():
+    """Guard against silently re-claiming a capability that is not connected.
+
+    The registry validates and can execute, but no production path calls
+    ToolRegistry.execute: a model's tool request is parsed, reported and
+    ignored. If that changes, this test should fail and the docs should be
+    updated in the same commit rather than drifting.
+    """
+    import pathlib
+
+    src = pathlib.Path(__file__).resolve().parents[1] / "src" / "amoeba"
+    callers = []
+    for py in src.rglob("*.py"):
+        if py.name == "tools.py":
+            continue
+        text = py.read_text(encoding="utf-8")
+        if "build_default_registry" in text or "ToolRegistry(" in text:
+            callers.append(py.name)
+    assert callers == [], (
+        f"the tool registry is now used by {callers}; wire the execution loop "
+        "and update docs/IMPLEMENTATION.md and ARCHITECTURE I23")
+
+    docs = pathlib.Path(__file__).resolve().parents[1] / "docs"
+    impl = (docs / "IMPLEMENTATION.md").read_text(encoding="utf-8")
+    assert "Not wired" in impl, "the capability table must say it is not wired"
+    # Normalise whitespace: the claim is prose and wraps across lines.
+    arch = " ".join((docs / "ARCHITECTURE.md").read_text(encoding="utf-8").split())
+    assert "no production code path calls `ToolRegistry.execute`" in arch
+
+
+def test_ego_converse_reports_tool_requests_as_unexecuted(stack):
+    """The limitation is load-bearing: a client must not assume tools ran."""
+    turn = stack.call("ego_converse", message="anything",
+                      idempotency_key="tool-not-run")
+    assert isinstance(turn["result"]["tool_requests"], list)
+    if turn["result"]["tool_requests"]:
+        assert any("does not execute tools" in lim for lim in turn["limitations"])

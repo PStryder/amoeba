@@ -10,6 +10,12 @@ both must go through the supervisor's single writer for any consequential
 change, and both receive a receipt in return.
 
 Id's private context is never published as a snapshot. Only Ego's is.
+
+Signals between the two are relayed by the supervisor rather than sent
+peer-to-peer: each role exposes a ``signal`` method, and the supervisor's
+``side_channel`` verb delivers to it. A direct peer connection was written and
+removed during review, because it was never called and its presence implied a
+path that did not exist.
 """
 
 from __future__ import annotations
@@ -60,7 +66,6 @@ class RoleProcess:
                              name=f"{self.role}->supervisor")
         self.inf = RpcClient(cfg.supervisor_host, cfg.inference_port, self.token,
                              name=f"{self.role}->inference")
-        self.peer: RpcClient | None = None
         self.session_id: str | None = None
         self.model_generation = ""
         self.capabilities: dict[str, Any] = {}
@@ -89,22 +94,6 @@ class RoleProcess:
                       self.capabilities.get("backend_kind"),
                       self.capabilities.get("is_simulated"))
         self._prime_context()
-
-    def peer_client(self) -> RpcClient:
-        """Narrow side channel to the other half.
-
-        Carries fast transient signals only: urgency, audit requests,
-        disagreement notices, resource alerts. Anything consequential is
-        committed through the supervisor's writer and returns a receipt; a
-        signal on this channel is never itself a state change.
-        """
-        if self.peer is None:
-            peer_port = self.cfg.id_port if self.role == "ego" else self.cfg.ego_port
-            self.peer = RpcClient(self.cfg.supervisor_host, peer_port, self.token,
-                                  timeout=20.0, name=f"{self.role}->peer")
-        if not self.peer.connected:
-            self.peer.connect(retries=3, delay=0.3)
-        return self.peer
 
     def _system_text(self) -> str:
         extra = self.role_cfg.system_prompt

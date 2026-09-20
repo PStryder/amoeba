@@ -199,7 +199,6 @@ class SandboxManager:
         self.log = get_logger("sandbox")
         self._lock = threading.RLock()
         self._sandboxes: dict[str, Sandbox] = {}
-        self._jobs: dict[str, Any] = {}
         self.root.mkdir(parents=True, exist_ok=True)
 
     # -- capability -----------------------------------------------------
@@ -322,10 +321,9 @@ class SandboxManager:
             sb = self._sandboxes.get(sandbox_id)
             if sb is None:
                 return {"sandbox_id": sandbox_id, "already_gone": True}
-            job = self._jobs.pop(sandbox_id, None)
-            if job:
-                # KILL_ON_JOB_CLOSE means closing the handle takes the tree.
-                k32.CloseHandle(job)
+            # No job handle to close here: a Job Object is created per run
+            # and closed in _spawn's finally, where KILL_ON_JOB_CLOSE takes any
+            # surviving process with it. Nothing outlives a run.
             try:
                 userenv.DeleteAppContainerProfile(ctypes.c_wchar_p(sb.container_name))
             except Exception:  # noqa: BLE001

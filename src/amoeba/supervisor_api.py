@@ -767,8 +767,12 @@ def build(sup: "Supervisor") -> dict[str, Any]:
                     sup._kill_neuocyte(owner, reason=f"operation cancelled: {reason}")
                     killed.append(owner)
 
-            # Ask whichever role is running this operation to stop generating.
-            for role in ("ego", "id"):
+            # Only the role that OWNS this operation. Cancelling both would
+            # stop an unrelated in-flight audit whenever a conversation was
+            # cancelled -- the operation row records its actor, so there is no
+            # need to guess.
+            owning = op["actor"] if op["actor"] in ("ego", "id") else None
+            for role in ([owning] if owning else []):
                 agent = next((a for a in mind.work.live_agents(role=role)), None)
                 handle = (agent or {}).get("session_handle")
                 if not handle:

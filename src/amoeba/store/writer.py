@@ -245,8 +245,11 @@ class StateWriter:
         )
         mut.expect_version(expect_version)
 
-        # Blob writes happen inside body() and are already fsynced when we
-        # reach the transaction below.
+        # body() runs inside the transaction and writes its blobs there, each
+        # fsynced as it goes. They therefore land before COMMIT, which is what
+        # the invariant needs: no committed event can reference bytes that are
+        # not on disk. A failure after a blob write leaves an orphan blob,
+        # which is recoverable garbage rather than a dangling reference.
         try:
             self.conn.execute("BEGIN IMMEDIATE")
             result = body(mut)

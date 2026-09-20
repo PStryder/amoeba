@@ -71,6 +71,12 @@ class SessionState:
     seq_id: int
     tokens: list[int] = field(default_factory=list)
     prefix_len: int = 0
+    # True only when the prefix is PHYSICALLY SHARED with another sequence
+    # (fork_prefix). A recomputed prefix occupies its own cells, so counting it
+    # as shared would under-report pool occupancy -- and the recomputed path is
+    # exactly the fallback used after an inference restart, when pressure is
+    # most likely to matter.
+    shares_prefix: bool = False
     snapshot_id: str | None = None
     ref_id: str | None = None
     created_at: float = 0.0
@@ -487,6 +493,7 @@ class LlamaEngine:
             {
                 "session_id": s.session_id, "role": s.role, "seq_id": s.seq_id,
                 "n_past": s.n_past, "prefix_len": s.prefix_len,
+                "shares_prefix": s.shares_prefix,
                 "snapshot_id": s.snapshot_id, "tokens_generated": s.tokens_generated,
             }
             for s in self._sessions.values()
@@ -498,6 +505,7 @@ class LlamaEngine:
             self.ffi.lib.llama_memory_seq_rm(self.mem, sess.seq_id, -1, -1)
             sess.tokens.clear()
             sess.prefix_len = 0
+            sess.shares_prefix = False
             sess.snapshot_id = None
             sess.logits = None
 
@@ -544,6 +552,7 @@ class LlamaEngine:
             self.ffi.lib.llama_memory_seq_cp(self.mem, src.seq_id, dst.seq_id, 0, prefix_len)
             dst.tokens = list(src.tokens[:prefix_len])
             dst.prefix_len = prefix_len
+            dst.shares_prefix = True
             dst.snapshot_id = snapshot_id
             # A fork of a FULL prefix inherits the source's head position, so
             # the source's last logits row is the correct continuation point.
@@ -569,8 +578,11 @@ class LlamaEngine:
             self.ffi.lib.llama_memory_seq_rm(self.mem, sess.seq_id, -1, -1)
             sess.tokens.clear()
             sess.prefix_len = 0
+            sess.shares_prefix = False
             self.ingest(session_id, list(tokens), compute_logits=False)
             sess.prefix_len = len(tokens)
+            # Recomputed, NOT shared: these cells belong to this sequence.
+            sess.shares_prefix = False
             sess.snapshot_id = snapshot_id
             return sess.n_past
 
@@ -746,7 +758,19 @@ class LlamaEngine:
         self._require()
         with self._lock:
             sess = self.get_session(session_id)
-            sess.cancel_requested = False
+            if sess.cancel_requested:
+                # A cancel that arrived BEFORE this call must be honoured, not
+                # cleared. The realistic sequence is ingest_text (a prefill,
+                # which is the long part and is not interruptible) followed by
+                # generate; a cancel landing during the prefill would otherwise
+                # be silently discarded here, which is precisely the case the
+                # cancellation feature exists for.
+                sess.cancel_requested = False
+                return GenerationResult(
+                    session_id=session_id, text="", tokens=[],
+                    finish_reason="cancelled", prompt_tokens=sess.n_past,
+                    completion_tokens=0, time_to_first_token=0.0,
+                    total_seconds=0.0)
             rng = random.Random(seed)
             t0 = time.perf_counter()
             ttft = 0.0
@@ -758,6 +782,8 @@ class LlamaEngine:
 
             for step in range(max_tokens):
                 if sess.cancel_requested:
+                    # Consume the flag, so the session is usable again.
+                    sess.cancel_requested = False
                     finish = "cancelled"
                     break
                 logits = self._session_logits(sess)
@@ -824,6 +850,8 @@ class LlamaEngine:
             active = []
             for req in requests:
                 sess = self.get_session(req["session_id"])
+                if sess.cancel_requested:
+                    sess.cancel_requested = False
                 active.append({
                     "sess": sess,
                     "rng": random.Random(req.get("seed", seed)),
@@ -838,6 +866,10 @@ class LlamaEngine:
             while any(not a["done"] for a in active) and step < max_tokens:
                 for a in active:
                     if not a["done"] and a["sess"].cancel_requested:
+                        # Consume it here too: an unconsumed flag would make
+                        # every later batched step for this session cancel
+                        # immediately.
+                        a["sess"].cancel_requested = False
                         a["finish"] = "cancelled"
                         a["done"] = True
                 pending = [a for a in active if not a["done"]]

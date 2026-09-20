@@ -4,8 +4,10 @@ from __future__ import annotations
 
 import os
 import sys
+import tempfile
 import threading
 import time
+from pathlib import Path
 
 import pytest
 
@@ -210,44 +212,80 @@ def test_mcp_client_cancellation_reaches_the_supervisor(stack: LiveStack):
     assert result["already_terminal"] is True
 
 
-@pytest.mark.timeout(300)
-def test_aborting_an_mcp_call_cancels_the_operation(stack: LiveStack):
-    """Cancel the *await* itself, the way an MCP client disconnect does."""
+def test_call_cancellable_issues_a_cancel_when_the_await_is_cancelled():
+    """The facade's actual contract, tested directly.
+
+    Driving this through a real MCP client meant cancelling `call_tool` from
+    the client side, which tears down the SDK's stream and raises
+    BrokenResourceError in teardown -- that exercises the SDK, not this code.
+    What matters here is narrow and checkable: when the awaited call is
+    cancelled, the facade must issue cancel_operation for the same idempotency
+    key, and must do so from a shielded scope so the cleanup is not itself
+    cancelled.
+    """
     import anyio
 
-    key = "mcp-abort-key"
+    from amoeba.config import Config
+    from amoeba.mcp_api import Facade
+
+    cfg = Config()
+    cfg.state_dir = Path(tempfile.mkdtemp())
+    cfg.ensure_dirs()
+    facade = Facade(cfg)
+
+    calls: list[tuple[str, dict]] = []
+    started = threading.Event()
+
+    def fake_call(method: str, **params):
+        calls.append((method, params))
+        if method == "cancel_operation":
+            return {"cancelled": True}
+        started.set()
+        time.sleep(3)                       # a long in-flight call
+        return {"never": "reached"}
+
+    facade.call = fake_call                 # type: ignore[assignment]
 
     async def run() -> None:
-        from mcp import ClientSession, StdioServerParameters
-        from mcp.client.stdio import stdio_client
-
-        env = dict(os.environ)
-        env["PYTHONPATH"] = os.pathsep.join([str(ROOT / "src"),
-                                             env.get("PYTHONPATH", "")])
-        env["AMOEBA_STDERR_LOG"] = "0"
-        params = StdioServerParameters(
-            command=PYTHON,
-            args=["-m", "amoeba.mcp_api", "--config", str(stack.cfg.source_path)],
-            env=env, cwd=str(ROOT),
-        )
-        async with stdio_client(params) as (read, write):
-            async with ClientSession(read, write) as session:
-                await session.initialize()
-                with anyio.move_on_after(0.02):
-                    await session.call_tool(
-                        "ego_converse", {"message": "abort me",
-                                         "idempotency_key": key})
+        with anyio.move_on_after(0.75):
+            await facade.call_cancellable("ego_converse",
+                                          idempotency_key="key-under-test",
+                                          message="hello")
 
     anyio.run(run)
-    time.sleep(2)
-    # Either the turn completed before the abort landed, or the abort cancelled
-    # it. Both are legitimate; what must NOT happen is an operation left
-    # running with nobody waiting for it.
-    out = stack.call("cancel_operation", idempotency_key=key,
-                     reason="test sweep")
-    if out["operation_id"] is not None:
-        op = stack.call("get_operation", operation_id=out["operation_id"])
-        assert op["status"] in ("completed", "cancelled", "failed"), op["status"]
+
+    methods = [m for m, _ in calls]
+    assert "ego_converse" in methods
+    assert "cancel_operation" in methods, f"no cancel was issued: {methods}"
+    cancel = next(p for m, p in calls if m == "cancel_operation")
+    assert cancel["idempotency_key"] == "key-under-test"
+    assert cancel["actor"] == "mcp_client"
+    assert "client cancelled" in cancel["reason"]
+
+
+def test_call_cancellable_still_propagates_the_cancellation():
+    """Cleanup must not swallow the cancellation: the task has to end."""
+    import anyio
+
+    from amoeba.config import Config
+    from amoeba.mcp_api import Facade
+
+    cfg = Config()
+    cfg.state_dir = Path(tempfile.mkdtemp())
+    cfg.ensure_dirs()
+    facade = Facade(cfg)
+    facade.call = lambda method, **kw: (  # type: ignore[assignment]
+        {"ok": True} if method == "cancel_operation" else time.sleep(3))
+
+    finished = []
+
+    async def run() -> None:
+        with anyio.move_on_after(0.5):
+            await facade.call_cancellable("ego_converse", idempotency_key="k")
+            finished.append("returned normally")
+
+    anyio.run(run)
+    assert finished == [], "a cancelled call must not return a value"
 
 
 def test_the_mind_survives_a_cancelled_client(stack: LiveStack):
@@ -259,3 +297,55 @@ def test_the_mind_survives_a_cancelled_client(stack: LiveStack):
     after = stack.call("health")
     assert after["status"] == "alive"
     assert {k: v["pid"] for k, v in after["children"].items()} == pids
+
+
+# ---------------------------------------------------------------------------
+# Review-pass regressions
+# ---------------------------------------------------------------------------
+def test_a_cancel_arriving_before_generate_is_honoured_not_discarded():
+    """The realistic race: cancel lands during the prefill.
+
+    A turn is ingest_text (a long, uninterruptible prefill) then generate.
+    A cancel arriving during the prefill sets the flag; generate used to clear
+    it on entry and carry on, silently discarding exactly the cancellation this
+    feature exists to deliver.
+    """
+    b = DeterministicBackend(n_seq_max=4)
+    b.load()
+    sess = b.open_session(role="ego")
+    b.ingest(sess.session_id, b.tokenize("a long prompt"))
+    b.request_cancel(sess.session_id)          # arrives before generate starts
+    out = b.generate(sess.session_id, max_tokens=64)
+    assert out.finish_reason == "cancelled"
+    assert out.completion_tokens == 0
+
+
+def test_a_consumed_cancel_does_not_persist():
+    """A session cancelled once must be usable again, in either decode mode."""
+    b = DeterministicBackend(n_seq_max=4)
+    b.load()
+    sess = b.open_session(role="ego")
+    b.ingest(sess.session_id, b.tokenize("hello"))
+    b.request_cancel(sess.session_id)
+    assert b.generate(sess.session_id, max_tokens=8).finish_reason == "cancelled"
+    assert b.get_session(sess.session_id).cancel_requested is False
+    assert b.generate(sess.session_id, max_tokens=8).finish_reason != "cancelled"
+
+
+def test_cancelling_one_role_does_not_stop_the_other(stack: LiveStack):
+    """Blast radius. Cancelling an Ego operation must not stop Id.
+
+    cancel_operation used to ask both roles to stop generating regardless of
+    which owned the operation, so cancelling a conversation would abort an
+    unrelated audit that happened to be in flight.
+    """
+    turn = stack.call("open_operation", kind="ego_converse", actor="ego",
+                      request={"message": "x"})
+    out = stack.call("cancel_operation", operation_id=turn["operation_id"])
+    stopped = {g["role"] for g in out["generations_stopped"]}
+    assert "id" not in stopped, f"cancelling an ego operation stopped Id: {stopped}"
+
+    id_op = stack.call("open_operation", kind="id_audit", actor="id",
+                       request={"focus": "y"})
+    out2 = stack.call("cancel_operation", operation_id=id_op["operation_id"])
+    assert "ego" not in {g["role"] for g in out2["generations_stopped"]}

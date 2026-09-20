@@ -39,7 +39,10 @@ runtime behaviour this design rests on.
 Five long-lived processes (supervisor, inference, Ego, Id) plus short-lived
 neuocytes and a short-lived MCP facade. Each is restartable independently.
 
-`Ego <-> Id` is a direct narrow RPC side channel for transient signals only.
+`Ego <-> Id` signals are **relayed by the supervisor** (`side_channel` ->
+each role's `signal` method), not sent peer-to-peer. One authority sees every
+signal, at the cost of a hop. Either design is defensible; this is the one that
+is built and tested.
 
 ---
 
@@ -153,10 +156,18 @@ disagreement; Ego's claim is not rewritten.
 receipt-free; consequential changes go through the writer.
 → `test_side_channel_signal_changes_no_state`
 
-**I23. Tools pass through the harness.** A model can request a tool call; the
-harness parses it, validates it against a schema, checks role permissions,
-executes it and records the outcome.
-→ `tools.py`, `test_tool_*`
+**I23. A model can request a tool call; it cannot perform one.** Requests are
+parsed out of generated text, validated against a declared schema, checked
+against role permissions, and reported. No tool in the registry can reach a
+shell, the network, or the filesystem outside the state directory.
+→ `tools.py`, `tests/test_tools.py`
+
+*Wiring status:* the registry is implemented and tested, but **no production
+code path calls `ToolRegistry.execute`**. `ego_converse` parses tool requests,
+returns them in `tool_requests`, and says so in its `limitations`. So the
+enforcement is real and the execution loop is not built — a model's request is
+recorded and ignored, which is the safe direction to be incomplete in, but it
+is not the same as "the harness executes it".
 
 ### Reporting
 

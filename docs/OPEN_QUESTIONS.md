@@ -112,6 +112,17 @@ the state directory. That stops another local process without filesystem access
 to the token; it is not a security boundary against a user who can read the
 state directory. There is no TLS and no remote transport.
 
+## Built but not connected
+
+**The tool execution loop.** `ToolRegistry` validates schemas, enforces role
+permissions, bounds arguments and executes handlers, with 22 tests covering it.
+Nothing in the running system calls it. A model that emits a `<tool_call>` block
+has the request parsed, validated on demand and reported in `tool_requests`;
+it is never run, and the response says so. Closing this means a multi-turn loop
+in the role process: request -> harness executes -> result appended to context
+-> generation resumes. That is real work, not a wiring task, and it was not
+done.
+
 ## Not implemented
 
 - Remote MCP transport (a separate, separately secured concern).
