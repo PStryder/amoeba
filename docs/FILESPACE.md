@@ -144,6 +144,45 @@ removed.
 turning it on really does open the door; there is a test that pins that too, so
 the flag cannot quietly stop meaning anything.
 
+### Other reparse types
+
+Probed rather than assumed. File symlinks (tag `0xa000000c`) and directory
+symlinks carry a different tag from junctions (`0xa0000003`), and unlike
+junctions they *do* report `is_symlink() == True` — but all three are caught
+the same way, by resolving fully and re-checking containment. No reparse type
+tested resolved *inside* the root while the OS opened something outside, which
+is the combination that would be a real breach.
+
+## One file, one identity
+
+Separate from containment, and it took its own experiment to find.
+
+NTFS is case-insensitive and keeps 8.3 aliases, so these are all one file:
+
+```
+report.md   REPORT.MD   Report.Md   REPORT~1.MD
+```
+
+Nothing escapes — each lands on exactly the right file. The bug was that the
+identity key came from *how the caller spelled it*, so each spelling kept its
+own version history:
+
+```
+file_write(path="report.md",  content="v1")
+file_write(path="REPORT.MD",  content="v2")   ← supersedes v1 on disk
+file_versions(path="report.md")               ← did NOT list the v1 snapshot
+```
+
+The v1 bytes were still in the blob store. They just were not *findable* from
+the name anyone would actually use — and "recoverable" and "discoverable" are
+not the same guarantee. The second is the one that matters when someone is
+trying to undo something.
+
+The key is now taken from the resolved on-disk path: `resolve()` returns the
+true spelling for a file that exists and leaves a new path as given, which is
+what both cases want. A new file keeps the spelling it was created with; an
+existing one is always reported under the name it actually has.
+
 ## Residual risk, stated plainly
 
 **Resolution and the subsequent open are not atomic.** A link swapped in

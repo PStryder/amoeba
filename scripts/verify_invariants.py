@@ -503,6 +503,19 @@ MUTATIONS: list[Mutation] = [
              "record has another name the root does not cover.",
     ),
     Mutation(
+        "I37e", "One file has one identity key, whatever the caller called it",
+        "src/amoeba/filespace.py",
+        "            canonical = final.relative_to(root_path).as_posix()",
+        '            canonical = "/".join(parts)  # MUTANT: caller spelling',
+        ["test_case_variants_resolve_to_one_identity",
+         "test_version_history_is_not_split_by_how_the_path_was_spelled"],
+        layer="Filespace.resolve (where the identity key is derived)",
+        note="not a containment failure: the path lands on exactly the right "
+             "file. The damage is to the audit trail, where two spellings "
+             "produce two version histories and a supersession under one is "
+             "invisible from the other.",
+    ),
+    Mutation(
         "I38", "Prior content is preserved before an overwrite",
         "src/amoeba/harness_api.py",
         "            if sup.cfg.filespace.snapshot_before_overwrite:\n"

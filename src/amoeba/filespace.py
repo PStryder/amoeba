@@ -270,7 +270,26 @@ class Filespace:
                     "reachable outside this root",
                     root=root_name, path=relpath, link_count=links)
 
-        return ResolvedPath(root_name=root_name, relpath="/".join(parts),
+        # The identity key comes from the *resolved* path, not from how the
+        # caller spelled it. NTFS is case-insensitive and keeps 8.3 aliases, so
+        # `REPORT.MD`, `report.md` and `REPORT~1.MD` are one file that would
+        # otherwise produce three separate version histories -- meaning a
+        # supersession made under one spelling is invisible from another. The
+        # content would still be in the blob store; it just would not be
+        # findable, which is the half of "no write destroys" that matters when
+        # someone is trying to get an earlier version back.
+        #
+        # `resolve()` returns the true on-disk spelling for a file that exists
+        # and leaves a new path as given, which is what both cases want.
+        try:
+            canonical = final.relative_to(root_path).as_posix()
+        except ValueError:                      # pragma: no cover - guarded above
+            canonical = "/".join(parts)
+        if not canonical or canonical == ".":
+            raise FilespaceDenied("path must name a file inside the root",
+                                  root=root_name, path=relpath)
+
+        return ResolvedPath(root_name=root_name, relpath=canonical,
                             path=final, writable=root.mode == "read_write",
                             exists=exists)
 

@@ -319,6 +319,18 @@ Files with more than one name are refused, and listings mark them.
 `test_a_hard_linked_file_is_listed_but_marked_inaccessible`,
 `test_a_write_replaces_the_directory_entry_rather_than_the_file_record`
 
+**I37e. One file has one identity, whatever the caller called it.** NTFS is
+case-insensitive and keeps 8.3 aliases, so `report.md`, `REPORT.MD` and
+`REPORT~1.MD` are one file. The identity key is taken from the resolved
+on-disk path rather than the caller's spelling, because otherwise each
+spelling keeps its own version history and a supersession made under one is
+invisible from another — the prior bytes stay in the blob store but stop being
+*findable*, which is the half of I38 that matters when someone is trying to
+undo something.
+→ `test_case_variants_resolve_to_one_identity`,
+`test_an_8_3_short_name_resolves_to_the_long_name`,
+`test_version_history_is_not_split_by_how_the_path_was_spelled`
+
 **I38. No write destroys.** Prior content is content-addressed into the blob
 store before any overwrite, delete or promotion-over, and the digest goes in
 the event log, so every version is recoverable. Restoring is itself a write, so

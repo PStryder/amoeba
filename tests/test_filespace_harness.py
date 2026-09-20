@@ -278,3 +278,34 @@ def test_a_neuocyte_has_no_tool_that_reaches_the_host_filesystem(fstack):
             assert "root" not in props, f"{tool['name']} lets a model name a root"
     finally:
         fstack.call("cancel_work", work_id=work["work_id"], reason="test")
+
+
+def test_version_history_is_not_split_by_how_the_path_was_spelled(fstack):
+    """The consequence of the identity rule, at the layer where it bites.
+
+    NTFS treats `report.md` and `REPORT.MD` as one file. If each spelling kept
+    its own history, a supersession made under one would be invisible from the
+    other: the prior bytes are still in the blob store, but nobody looking
+    under the name they actually use can find them. "Recoverable" and
+    "discoverable" are not the same guarantee, and the second is the one that
+    matters when someone is trying to undo something.
+    """
+    fstack.call("file_write", root="out", path="report.md",
+                content="v1\n", actor="pete")
+    second = fstack.call("file_write", root="out", path="REPORT.MD",
+                         content="v2\n", actor="nc_1")
+    assert second["overwrote"] is True, (
+        "the differently-spelled write created a second file instead of "
+        "overwriting; NTFS should have treated these as one")
+
+    for spelling in ("report.md", "REPORT.MD", "Report.Md"):
+        versions = fstack.call("file_versions", root="out", path=spelling)
+        digests = {v["sha256"] for v in versions}
+        assert second["prior_sha256"] in digests, (
+            f"the v1 supersession is invisible when the path is spelled "
+            f"{spelling!r}: {versions}")
+
+    # And restoring works through any spelling.
+    fstack.call("file_restore", root="out", path="REPORT.MD",
+                sha256=second["prior_sha256"], actor="pete")
+    assert (fstack.out / "report.md").read_bytes() == b"v1\n"

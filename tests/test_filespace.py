@@ -383,3 +383,90 @@ def test_capabilities_state_the_hard_link_policy(fs):
     assert "refused" in fs.capabilities()["hard_links"]
     fs.cfg.allow_multiply_linked = True
     assert "ALLOWED" in fs.capabilities()["hard_links"]
+
+
+# ---------------------------------------------------------------------------
+# Identity: NTFS says these are one file, so the records must agree.
+#
+# A different failure from containment. Nothing escapes here -- the path lands
+# on exactly the right file. The bug is that the same file reached by two
+# spellings produced two version histories, so a supersession made under one
+# name was invisible from the other. The bytes were still in the blob store;
+# they just were not findable, which is the half of "no write destroys" that
+# matters when someone is trying to get an earlier version back.
+# ---------------------------------------------------------------------------
+@pytest.mark.skipif(sys.platform != "win32", reason="NTFS case rules")
+def test_case_variants_resolve_to_one_identity(fs):
+    lower = fs.resolve("out", "report.md", need_write=True)
+    fs.write_bytes(lower, b"v1\n")
+    upper = fs.resolve("out", "REPORT.MD", need_write=True)
+
+    assert os.path.samefile(lower.path, upper.path), (
+        "premise: NTFS should treat these as one file")
+    assert lower.relpath == upper.relpath, (
+        f"one file, two identity keys: {lower.relpath!r} vs {upper.relpath!r}; "
+        "version history would split across the two spellings")
+
+
+@pytest.mark.skipif(sys.platform != "win32", reason="8.3 aliases are NTFS")
+def test_an_8_3_short_name_resolves_to_the_long_name(fs):
+    """PROGRA~1-style aliasing must not create a second identity."""
+    import ctypes
+
+    target = fs.rw / "a_very_long_file_name_indeed.txt"
+    target.write_bytes(b"content\n")
+    buf = ctypes.create_unicode_buffer(1024)
+    n = ctypes.WinDLL("kernel32", use_last_error=True).GetShortPathNameW(
+        str(target), buf, 1024)
+    if not n:
+        pytest.skip("no short path available")
+    alias = Path(buf.value).name
+    if alias == target.name:
+        pytest.skip("8.3 aliases are disabled on this volume")
+
+    resolved = fs.resolve("out", alias)
+    assert resolved.path.name == target.name
+    assert resolved.relpath == target.name, (
+        f"8.3 alias kept its own identity key {resolved.relpath!r}")
+
+
+def test_the_identity_key_comes_from_disk_not_from_the_caller(fs):
+    """Stated directly, because it is the rule the two tests above rely on.
+
+    A new file keeps the spelling it was created with; an existing one is
+    reported under the name it actually has.
+    """
+    created = fs.resolve("out", "MixedCase.txt", need_write=True)
+    fs.write_bytes(created, b"x")
+    assert created.relpath == "MixedCase.txt"
+    if sys.platform == "win32":
+        assert fs.resolve("out", "mixedcase.txt").relpath == "MixedCase.txt"
+
+
+@pytest.mark.skipif(sys.platform != "win32", reason="requires symlink privilege")
+def test_a_file_symlink_out_of_the_root_is_refused(fs):
+    """A file symlink is a different reparse tag from a junction (0xa000000c
+    vs 0xa0000003) and, unlike a junction, `is_symlink()` reports it. Both are
+    caught the same way -- by resolving and re-checking containment -- but that
+    is asserted rather than assumed."""
+    link = fs.rw / "flink.txt"
+    r = subprocess.run(["cmd", "/c", "mklink", str(link),
+                        str(fs.outside / "secret.txt")],
+                       capture_output=True, text=True)
+    if r.returncode != 0:
+        pytest.skip("could not create a file symlink (needs privilege)")
+    with pytest.raises(FilespaceDenied) as exc:
+        fs.resolve("out", "flink.txt")
+    assert "escapes its filespace root" in exc.value.message
+
+
+@pytest.mark.skipif(sys.platform != "win32", reason="requires symlink privilege")
+def test_a_directory_symlink_out_of_the_root_is_refused(fs):
+    link = fs.rw / "dlink"
+    r = subprocess.run(["cmd", "/c", "mklink", "/D", str(link), str(fs.outside)],
+                       capture_output=True, text=True)
+    if r.returncode != 0:
+        pytest.skip("could not create a directory symlink (needs privilege)")
+    with pytest.raises(FilespaceDenied) as exc:
+        fs.resolve("out", "dlink/secret.txt")
+    assert "escapes its filespace root" in exc.value.message
