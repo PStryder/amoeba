@@ -323,6 +323,31 @@ MUTATIONS: list[Mutation] = [
              "the neuocyte between proposal and decision, so the digest has "
              "to be re-checked when the bytes are actually read.",
     ),
+    Mutation(
+        "I35", "Concurrent sandboxes inherit no handles from each other",
+        "src/amoeba/sandbox.py",
+        "            if not k32.UpdateProcThreadAttribute(\n"
+        "                    attrs, 0, ctypes.c_size_t(PROC_THREAD_ATTRIBUTE_HANDLE_LIST),",
+        "            if False and k32.UpdateProcThreadAttribute(\n"
+        "                    attrs, 0, ctypes.c_size_t(PROC_THREAD_ATTRIBUTE_HANDLE_LIST),",
+        ["test_a_sandbox_does_not_inherit_another_sandboxs_handles"],
+        layer="_spawn (the process-creation attribute list)",
+        note="restores unrestricted handle inheritance. Every ACL test still "
+             "passes with this hole open, which is the point: it is a "
+             "different guarantee and needs its own test.",
+    ),
+    Mutation(
+        "I36", "Sandbox runs are not serialised by a manager-wide lock",
+        "src/amoeba/sandbox.py",
+        "        return self._spawn(sb, cmd, timeout=timeout)",
+        "        with self._lock:  # MUTANT: serialise every run\n"
+        "            return self._spawn(sb, cmd, timeout=timeout)",
+        ["test_sandboxes_run_concurrently_rather_than_serialised"],
+        layer="run_python (whether runs hold the manager lock)",
+        note="negated by *adding* a defence rather than removing one. The "
+             "claim is the absence of serialisation, so the mutation has to "
+             "introduce it.",
+    ),
 ]
 
 

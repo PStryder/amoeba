@@ -251,6 +251,20 @@ proposed, the artifact is rejected and nothing reaches the workspace. Reporting
 the change while copying anyway is a note in a receipt, not a control.
 → `test_promotion_refuses_content_that_changed_after_it_was_proposed`
 
+**I35. Concurrent sandboxes share no handles.** Process creation names exactly
+the two handles a container may inherit. Without that, `bInheritHandles=True`
+means every inheritable handle in the process, so a container spawned while
+another was running inherited its writable output handles. An open handle
+carries the access it was granted and Windows checks the DACL at open time, so
+no ACL closes this — it is a separate guarantee from I29-I33.
+→ `test_a_sandbox_does_not_inherit_another_sandboxs_handles`
+
+**I36. Sandboxes run concurrently, and that is measured as overlap.** N
+containers are live simultaneously with N distinct OS processes. Asserted by
+counting runs in flight, never by a speedup ratio, which a run simply getting
+faster can produce.
+→ `test_sandboxes_run_concurrently_rather_than_serialised`
+
 ---
 
 ## 3. Data model

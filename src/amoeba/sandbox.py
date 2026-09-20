@@ -71,6 +71,13 @@ CREATE_UNICODE_ENVIRONMENT = 0x00000400
 CREATE_SUSPENDED = 0x00000004
 CREATE_BREAKAWAY_FROM_JOB = 0x01000000
 PROC_THREAD_ATTRIBUTE_SECURITY_CAPABILITIES = 0x00020009
+# Without this, bInheritHandles=True means "inherit every inheritable handle in
+# the process", which across concurrent sandboxes means each container
+# inheriting the others' open output files. An already-open handle carries the
+# access it was granted, and Windows checks the DACL at open time rather than
+# at use time, so no amount of ACL hardening closes that. The handle list makes
+# inheritance explicit: exactly these handles, nothing else.
+PROC_THREAD_ATTRIBUTE_HANDLE_LIST = 0x00020002
 ERROR_ALREADY_EXISTS_HR = 0x800700B7
 
 JobObjectExtendedLimitInformation = 9
@@ -487,29 +494,47 @@ class SandboxManager:
         caps.CapabilityCount = 0
         caps.Reserved = 0
 
-        size = ctypes.c_size_t(0)
-        k32.InitializeProcThreadAttributeList(None, 1, 0, ctypes.byref(size))
-        attr_buf = (ctypes.c_byte * size.value)()
-        attrs = ctypes.cast(attr_buf, ctypes.c_void_p)
-        if not k32.InitializeProcThreadAttributeList(attrs, 1, 0, ctypes.byref(size)):
-            raise SandboxUnavailable("InitializeProcThreadAttributeList failed",
-                                     err=ctypes.get_last_error())
-        if not k32.UpdateProcThreadAttribute(
-                attrs, 0, ctypes.c_size_t(PROC_THREAD_ATTRIBUTE_SECURITY_CAPABILITIES),
-                ctypes.byref(caps), ctypes.sizeof(caps), None, None):
-            raise SandboxUnavailable("UpdateProcThreadAttribute failed",
-                                     err=ctypes.get_last_error())
-
         job = self._make_job(sb)
 
         fout = open(out_path, "wb")
         ferr = open(err_path, "wb")
+        attrs = None
         try:
+            # The attribute list is built *after* the output files exist,
+            # because the handle list has to name them.
+            h_out = msvcrt_handle(fout)
+            h_err = msvcrt_handle(ferr)
+            inheritable = (ctypes.c_void_p * 2)(h_out, h_err)
+
+            size = ctypes.c_size_t(0)
+            k32.InitializeProcThreadAttributeList(None, 2, 0, ctypes.byref(size))
+            attr_buf = (ctypes.c_byte * size.value)()
+            attrs = ctypes.cast(attr_buf, ctypes.c_void_p)
+            if not k32.InitializeProcThreadAttributeList(attrs, 2, 0, ctypes.byref(size)):
+                raise SandboxUnavailable("InitializeProcThreadAttributeList failed",
+                                         err=ctypes.get_last_error())
+            if not k32.UpdateProcThreadAttribute(
+                    attrs, 0, ctypes.c_size_t(PROC_THREAD_ATTRIBUTE_SECURITY_CAPABILITIES),
+                    ctypes.byref(caps), ctypes.sizeof(caps), None, None):
+                raise SandboxUnavailable("UpdateProcThreadAttribute failed",
+                                         err=ctypes.get_last_error())
+            # Exactly these two handles are inherited. Without it, a container
+            # spawned while another is running inherits that one's writable
+            # output handles and can write through them -- measured, not
+            # theorised: a sandbox that was told nothing found them by sweeping
+            # the handle space and injected a line into another sandbox's
+            # recorded stdout.
+            if not k32.UpdateProcThreadAttribute(
+                    attrs, 0, ctypes.c_size_t(PROC_THREAD_ATTRIBUTE_HANDLE_LIST),
+                    ctypes.byref(inheritable), ctypes.sizeof(inheritable), None, None):
+                raise SandboxUnavailable("could not restrict handle inheritance",
+                                         err=ctypes.get_last_error())
+
             si = STARTUPINFOEXW()
             si.StartupInfo.cb = ctypes.sizeof(STARTUPINFOEXW)
             si.StartupInfo.dwFlags = 0x00000100  # STARTF_USESTDHANDLES
-            si.StartupInfo.hStdOutput = msvcrt_handle(fout)
-            si.StartupInfo.hStdError = msvcrt_handle(ferr)
+            si.StartupInfo.hStdOutput = h_out
+            si.StartupInfo.hStdError = h_err
             si.StartupInfo.hStdInput = None
             si.lpAttributeList = attrs
             pi = PROCESS_INFORMATION()
@@ -542,6 +567,8 @@ class SandboxManager:
             k32.CloseHandle(pi.hThread)
             k32.CloseHandle(pi.hProcess)
         finally:
+            if attrs is not None:
+                k32.DeleteProcThreadAttributeList(attrs)
             fout.close(); ferr.close()
             k32.CloseHandle(job)  # kills any survivors
 

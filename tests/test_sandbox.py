@@ -10,6 +10,7 @@ from __future__ import annotations
 import os
 import subprocess
 import sys
+import threading
 import time
 from pathlib import Path
 
@@ -414,3 +415,134 @@ def test_destroying_a_sandbox_revokes_its_grant_on_the_shared_runtime(manager):
     manager.destroy(s.sandbox_id)
     assert sid.lower() not in _dacl(runtime.parent), (
         "a destroyed sandbox's container SID still has access to the runtime")
+
+
+def test_a_sandbox_does_not_inherit_another_sandboxs_handles(manager):
+    """Concurrent containers must not share file handles.
+
+    `CreateProcessW` is called with bInheritHandles=True, which without a
+    PROC_THREAD_ATTRIBUTE_HANDLE_LIST means "inherit every inheritable handle
+    in the process". The stdout/stderr files are deliberately made inheritable,
+    so a container spawned while another is running inherited that one's
+    *writable* output handles.
+
+    Filesystem hardening cannot close this: the handle is already open, and
+    Windows checks the DACL at open time rather than at use time. The ACL tests
+    above would all still pass with this hole wide open.
+
+    B is told nothing. It sweeps the low handle space, the way an attacker
+    would, and writes to anything that answers as a disk file. Writing to its
+    *own* stdout is expected and fine; the assertion is that nothing it wrote
+    reaches A.
+    """
+    sweep = (
+        "import ctypes, ctypes.wintypes as w\n"
+        "k32 = ctypes.WinDLL('kernel32', use_last_error=True)\n"
+        "payload = b'INJECTED-BY-B\\n'\n"
+        "written = w.DWORD()\n"
+        "for h in range(4, 2048, 4):\n"
+        "    try:\n"
+        "        if k32.GetFileType(w.HANDLE(h)) != 1:\n"
+        "            continue\n"
+        "        k32.WriteFile(w.HANDLE(h), payload, len(payload),\n"
+        "                      ctypes.byref(written), None)\n"
+        "    except OSError:\n"
+        "        continue\n"
+        "print('SWEPT')\n"
+    )
+    a = manager.create(owner="wk_victim",
+                       limits=SandboxLimits(wall_seconds=60, max_processes=4))
+    b = manager.create(owner="wk_sweeper",
+                       limits=SandboxLimits(wall_seconds=60, max_processes=4))
+    held = {}
+    try:
+        def run_a():
+            held["a"] = manager.run_python(a.sandbox_id, code=(
+                "import time\n"
+                "print('A-LEGITIMATE', flush=True)\n"
+                "time.sleep(5)\n"
+                "print('A-DONE', flush=True)\n"))
+
+        t = threading.Thread(target=run_a)
+        t.start()
+        time.sleep(1.5)          # A's handles are open and inheritable now
+        rb = manager.run_python(b.sandbox_id, code=sweep)
+        t.join()
+
+        assert rb.exit_code == 0, rb.stderr
+        assert "SWEPT" in rb.stdout, "the sweep did not run; this proves nothing"
+        ra = held["a"]
+        assert "INJECTED-BY-B" not in ra.stdout, (
+            "another sandbox wrote into this sandbox's captured output through "
+            f"an inherited handle: {ra.stdout!r}")
+        assert "A-LEGITIMATE" in ra.stdout and "A-DONE" in ra.stdout
+    finally:
+        manager.destroy(a.sandbox_id)
+        manager.destroy(b.sandbox_id)
+
+
+def test_sandboxes_run_concurrently_rather_than_serialised(manager):
+    """Overlap is measured from inside the containers.
+
+    Two ways to get this wrong, both of which this test originally did:
+
+    * A *speedup ratio* proves nothing -- runs simply getting faster produces
+      one.
+    * Timing the calling thread proves nothing either. A span that starts when
+      the thread calls `run_python` includes time spent waiting for a lock, so
+      fully serialised runs still look like they overlap. Adding a lock around
+      `_spawn` left this test green until it was measured this way.
+
+    So the timestamps come from the sandboxed processes themselves. If the
+    runs are serialised anywhere in the manager, no two children report
+    overlapping intervals and the peak drops to 1.
+    """
+    n = 4
+    boxes = [manager.create(owner=f"wk_conc_{i}",
+                            limits=SandboxLimits(wall_seconds=120, max_processes=4))
+             for i in range(n)]
+    spans, pids, lock = [], [], threading.Lock()
+
+    def work(b):
+        out = manager.run_python(b.sandbox_id, code=(
+            "import os, time\n"
+            "print('START', time.time(), flush=True)\n"
+            "time.sleep(2)\n"
+            "print('END', time.time())\n"
+            "print('PID', os.getpid())\n"))
+        fields = {}
+        for line in out.stdout.splitlines():
+            parts = line.split()
+            if len(parts) == 2 and parts[0] in ("START", "END", "PID"):
+                fields[parts[0]] = parts[1]
+        with lock:
+            if "START" in fields and "END" in fields:
+                spans.append((float(fields["START"]), float(fields["END"])))
+            if "PID" in fields:
+                pids.append(fields["PID"])
+        return out
+
+    try:
+        threads = [threading.Thread(target=work, args=(b,)) for b in boxes]
+        for t in threads:
+            t.start()
+        for t in threads:
+            t.join()
+
+        assert len(spans) == n, f"only {len(spans)} of {n} runs reported timings"
+        # -1 sorts before +1 at equal timestamps, so a run ending exactly as
+        # another starts is not counted as overlap.
+        edges = sorted([(s, 1) for s, _ in spans] + [(e, -1) for _, e in spans],
+                       key=lambda x: (x[0], x[1]))
+        live = peak = 0
+        for _t, d in edges:
+            live += d
+            peak = max(peak, live)
+
+        assert peak == n, (
+            f"only {peak} of {n} sandboxes were executing at the same instant; "
+            "the runs are being serialised somewhere in the manager")
+        assert len(set(pids)) == n, f"expected {n} distinct processes, got {set(pids)}"
+    finally:
+        for b in boxes:
+            manager.destroy(b.sandbox_id)
