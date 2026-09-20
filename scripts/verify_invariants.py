@@ -654,8 +654,8 @@ MUTATIONS: list[Mutation] = [
     Mutation(
         "I46", "Id-only verbs are absent from the neuocyte scope",
         "src/amoeba/scopes.py",
-        '    "tool_invoke", "tool_schemas",\n)',
-        '    "tool_invoke", "tool_schemas",\n'
+        '    "work_messages",\n)',
+        '    "work_messages",\n'
         '    "id_raise_finding", "system_pulse",  # MUTANT: granted\n)',
         ["test_a_neuocyte_cannot_invoke_an_id_only_verb_by_name",
          "test_the_neuocyte_scope_contains_no_id_only_verb"],
@@ -673,6 +673,61 @@ MUTATIONS: list[Mutation] = [
         layer="_Handler._dispatch (what a refusal discloses)",
         note="restores the discovery oracle: asking for a method that does not "
              "exist used to return the name of every method that does.",
+    ),
+    Mutation(
+        "I47", "Ego cannot instantiate a worker or set execution conditions",
+        "src/amoeba/scopes.py",
+        '    "ego_propose_memory", "ego_message_id", "ego_request_id_review",\n)',
+        '    "ego_propose_memory", "ego_message_id", "ego_request_id_review",\n'
+        '    "admit_work", "lease_work",  # MUTANT: execution authority\n)',
+        ["test_ego_requests_work_and_cannot_instantiate_a_worker"],
+        layer="scopes.EGO (the table an Ego connection sees)",
+        note="the boundary is this table. Granting admission or leasing turns "
+             "Ego from a component that states intent into one that runs the "
+             "scheduler.",
+    ),
+    Mutation(
+        "I47b", "Ego cannot read live compute scratch",
+        "src/amoeba/scopes.py",
+        '    "record_conclusion",\n    "publish_ego_snapshot", "list_snapshots",',
+        '    "record_conclusion", "sandbox_files", "sandbox_read",  # MUTANT\n'
+        '    "publish_ego_snapshot", "list_snapshots",',
+        ["test_ego_cannot_inspect_compute_sandbox_scratch"],
+        layer="scopes.EGO (whether scratch is reachable at all)",
+        note="turns half-written scratch into a communication channel: Ego "
+             "could then consume something no neuocyte ever published.",
+    ),
+    Mutation(
+        "I47c", "Board-naive work refuses mid-flight messages",
+        "src/amoeba/ego_api.py",
+        '        if row["board_access"] == "none":',
+        "        if False:  # MUTANT: independence not protected",
+        ["test_board_naive_work_refuses_mid_flight_messages"],
+        layer="ego_work_message (the independence gate)",
+        note="the quiet failure: the message lands, the work still looks "
+             "board-naive, and later agreement is read as independent "
+             "replication when it was an echo of Ego.",
+    ),
+    Mutation(
+        "I47d", "Ego proposes maintained state rather than authoring it",
+        "src/amoeba/scopes.py",
+        '    "record_conclusion",\n    "publish_ego_snapshot",',
+        '    "record_conclusion", "remember",  # MUTANT: direct authoring\n'
+        '    "publish_ego_snapshot",',
+        ["test_ego_proposes_memory_rather_than_authoring_it"],
+        layer="scopes.EGO (belief authoring vs proposing)",
+        note="Ego is the component most exposed to a confident user, so direct "
+             "authoring is where an unchecked belief enters the organism.",
+    ),
+    Mutation(
+        "I47e", "A message's author is the authenticated scope",
+        "src/amoeba/ego_api.py",
+        '                  (message_id, work_id, "ego", body_text, kind, time.time(),',
+        '                  (message_id, work_id, kind, body_text, kind, time.time(),',
+        ["test_ego_can_message_eligible_work_and_the_worker_collects_it"],
+        layer="ego_work_message (where from_role comes from)",
+        note="sourcing the author from anything the caller supplies makes "
+             "attribution a claim rather than a fact.",
     ),
     Mutation(
         "I42c", "A proposal's bytes are preserved as evidence when it is made",

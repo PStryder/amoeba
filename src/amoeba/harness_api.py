@@ -551,6 +551,49 @@ def build(sup: "Supervisor") -> dict[str, Any]:  # noqa: C901
     # Context homeostasis
     # ==================================================================
     # ==================================================================
+    # Work messages
+    # ==================================================================
+    def work_messages(*, work_id: str, neuocyte_id: str, fencing_token: int
+                      ) -> dict[str, Any]:
+        """Collect messages addressed to this work item.
+
+        Called by the neuocyte at a turn boundary, never pushed into a running
+        process or sandbox. The lease and fencing token are checked first, so a
+        superseded neuocyte cannot collect messages meant for its replacement.
+
+        Collection is recorded. A finding produced after a message was
+        collected is one the message may have shaped, and the record says so
+        rather than leaving a later reader to guess whether the worker had
+        seen it.
+        """
+        mind.work.authorise_tool_call(work_id=work_id, neuocyte_id=neuocyte_id,
+                                      fencing_token=fencing_token)
+        rows = [dict(r) for r in mind.db.conn.execute(
+            "SELECT message_id, from_role, body, kind, created_at"
+            " FROM work_messages WHERE work_id = ? AND consumed_at IS NULL"
+            " ORDER BY created_at ASC LIMIT 16", (work_id,))]
+        if not rows:
+            return {"work_id": work_id, "messages": [], "count": 0}
+
+        def body(m: Mutation) -> None:
+            for row in rows:
+                m.sql("UPDATE work_messages SET consumed_at = ?, consumed_by = ?"
+                      " WHERE message_id = ?",
+                      (time.time(), neuocyte_id, row["message_id"]))
+                m.emit(EventKind.WORK_MESSAGE_CONSUMED, {
+                    "message_id": row["message_id"], "work_id": work_id,
+                    "from_role": row["from_role"], "consumed_by": neuocyte_id,
+                    "note": ("anything this worker concludes from here may "
+                             "have been shaped by this message")})
+
+        receipt, _ = mind.writer.apply(body, actor=neuocyte_id,
+                                       bump_version=False)
+        return {"work_id": work_id, "messages": rows, "count": len(rows),
+                "receipt_id": receipt.receipt_id,
+                "note": ("collection is recorded; a later finding is marked as "
+                         "possibly influenced by these")}
+
+    # ==================================================================
     # Host filesystem
     # ==================================================================
     def _filespace():
@@ -949,6 +992,8 @@ def build(sup: "Supervisor") -> dict[str, Any]:  # noqa: C901
         "file_read": file_read, "file_write": file_write,
         "file_delete": file_delete, "file_restore": file_restore,
         "file_versions": file_versions, "file_attach": file_attach,
+        # work messages
+        "work_messages": work_messages,
         # homeostasis
         "context_report": context_report, "context_assess": context_assess,
         "context_rejuvenate": context_rejuvenate,

@@ -673,11 +673,12 @@ class Supervisor:
         # Cached: the handlers are closures, and the tool registry looks them
         # up per call. Rebuilding would make every lookup a fresh closure set.
         if self._method_cache is None:
-            from . import harness_api, id_api, supervisor_api
+            from . import ego_api, harness_api, id_api, supervisor_api
 
             methods = supervisor_api.build(self)
             methods.update(harness_api.build(self))
             methods.update(id_api.build(self))
+            methods.update(ego_api.build(self))
             methods["system_pulse"] = self._system_pulse
             self._method_cache = methods
         return self._method_cache

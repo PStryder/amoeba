@@ -481,6 +481,62 @@ no Id effector and not the pulse.
 → `test_ego_cannot_reach_ids_effectors`,
 `test_the_neuocyte_scope_contains_no_id_only_verb`
 
+### Ego's senses and effectors
+
+Full reference: `EGO.md` (sensory surface, effector set, the three Ego->neuocyte communication mechanisms, and the prohibition on using compute scratch as a channel).
+
+**I47. Ego states intent; the Harness owns execution.** Ego requests work at
+whatever level of abstraction fits — a one-line objective or a worked plan —
+and cannot instantiate a worker, choose one, set a budget, or pick a prompt
+version. The architecture does not require Ego to decompose first: the work
+system, the blackboard and the neuocytes may discover structure during
+execution.
+→ `test_ego_requests_work_and_cannot_instantiate_a_worker`,
+`test_ego_can_request_independent_replication`
+
+**I47b. Running compute scratch is not a communication channel.** Ego may know
+a neuocyte exists, what work it holds, its board mode and its status. It cannot
+read the sandbox. Half-written scratch is not a claim anybody made; reasoning
+over it would let Ego consume something no neuocyte ever published, with no
+authorship and no moment at which the worker stood behind it. Anything worth
+Ego's attention crosses an explicit boundary: a board post, a work result, an
+artifact proposal, or durable evidence.
+→ `test_ego_cannot_inspect_compute_sandbox_scratch`,
+`test_ego_sees_proposal_evidence_not_scratch`,
+`test_ego_can_follow_a_result_from_work_to_answer`
+
+**I47c. A mid-flight message goes to a work item, not a worker.** The Harness
+records it and the neuocyte collects it at a turn boundary. The original
+objective is never rewritten, collection is recorded so a later finding is
+marked as possibly influenced, and a board-naive item refuses the message
+outright — a clarification from the executive role would destroy exactly the
+independence it was admitted for, quietly, in a way that still looks like
+replication afterwards.
+→ `test_ego_can_message_eligible_work_and_the_worker_collects_it`,
+`test_board_naive_work_refuses_mid_flight_messages`,
+`test_a_message_to_finished_work_is_refused`,
+`test_a_neuocyte_cannot_collect_another_work_items_messages`
+
+**I47d. Ego proposes; it does not author or execute.** Maintained state changes
+by supersession through the governed path, cancellation is scoped to work Ego
+originated and is still performed by the Harness, and Ego holds no Id
+telemetry, no scheduler policy, no security or filespace configuration, no
+promotion authority, and no verb that widens its own scope.
+→ `test_ego_proposes_memory_rather_than_authoring_it`,
+`test_ego_can_cancel_its_own_work_but_not_anyone_elses`,
+`test_ego_cannot_reach_a_prohibited_power`,
+`test_ego_cannot_widen_its_own_capabilities`,
+`test_ego_sees_work_state_without_id_telemetry`
+
+**I47e. Role authority is the credential, never a request field.** Ego-only,
+Id-only and neuocyte tables are mutually disjoint where it matters, and no
+caller can reach another role's verbs by naming them, by passing
+identity-shaped arguments, or by re-presenting a different token mid-connection.
+→ `test_a_neuocyte_cannot_invoke_an_ego_only_verb_by_name`,
+`test_a_neuocyte_cannot_spoof_ego_identity`,
+`test_id_cannot_invoke_an_ego_only_verb`,
+`test_the_three_scopes_are_disjoint_where_it_matters`
+
 **I41. A receipt's digest is ground truth, verifiable from inside.** If a
 receipt claims a neuocyte received bytes with digest D, then hashing the bytes
 actually available to that neuocyte must produce D. This holds for attachments,

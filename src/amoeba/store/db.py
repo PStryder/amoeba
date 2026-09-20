@@ -372,6 +372,27 @@ CREATE TABLE IF NOT EXISTS artifacts (
 );
 CREATE INDEX IF NOT EXISTS ix_artifact_status ON artifacts(status, created_at);
 
+-- Targeted messages to a *work item*, not to a worker process. A running
+-- neuocyte is not addressable: the Harness records a message here and the
+-- neuocyte collects it at a turn boundary, so mid-flight communication cannot
+-- become a side channel into a live sandbox.
+--
+-- `consumed_at` is what makes influence visible: a finding produced after a
+-- message was collected is a finding the message may have shaped, and the work
+-- record says so rather than leaving a reader to guess.
+CREATE TABLE IF NOT EXISTS work_messages (
+  message_id    TEXT PRIMARY KEY,
+  work_id       TEXT NOT NULL,
+  from_role     TEXT NOT NULL,          -- authenticated scope, never claimed
+  body          TEXT NOT NULL,
+  kind          TEXT NOT NULL,          -- clarification | constraint | context
+  created_at    REAL NOT NULL,
+  consumed_at   REAL,
+  consumed_by   TEXT,
+  state_version INTEGER NOT NULL
+);
+CREATE INDEX IF NOT EXISTS ix_work_message_work ON work_messages(work_id, created_at);
+
 CREATE TABLE IF NOT EXISTS conversations (
   conversation_id TEXT PRIMARY KEY,
   created_at      REAL NOT NULL,

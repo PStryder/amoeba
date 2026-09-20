@@ -46,6 +46,9 @@ Read this before trusting anything below it.
 | Id sensory surface: `system_pulse` + Harness-mediated investigation | **Implemented, tested** | `tests/test_id_senses_and_effectors.py`; cached, bounded, facts-only, tracks work/failure/resource change |
 | Id effectors: request/propose/challenge/escalate, all receipted | **Implemented, tested** | nine verbs, each attributed to `id` and carrying the `pulse_id` it was formed from |
 | Id-only capability isolation (scoped RPC method tables) | **Implemented, tested** | scope is the presented credential; no role field to forge, no enumeration, no dispatcher bypass; Ego checked separately |
+| Ego sensory surface: productive-work view, artifact evidence, resource identity | **Implemented, tested** | `tests/test_ego_senses_and_effectors.py`; no Id telemetry, no sandbox scratch |
+| Ego effectors: request work, governed work message, cancel own work, propose memory, reach Id | **Implemented, tested** | Ego states intent; the Harness owns admission, worker choice, prompt version and budget |
+| Ego/Id/neuocyte scopes mutually disjoint | **Implemented, tested** | role authority is the presented credential, never a request field; board-naive work refuses mid-flight messages |
 | Cognitive blackboard: posts, threads, relations, receipts | **Implemented, tested** | `tests/test_blackboard.py` |
 | Independent replication vs socially propagated agreement | **Implemented, tested** | every read recorded; `board_corroboration` splits the two |
 | Board-naive neuocytes (`board_access="none"`) | **Implemented, tested** | `test_a_naive_worker_posts_without_having_read_the_board` |

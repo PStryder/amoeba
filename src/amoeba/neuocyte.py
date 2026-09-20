@@ -56,6 +56,13 @@ whether you may make it, runs it, and returns the result to you. Call a tool
 only when you need its result to answer; otherwise answer directly.
 """
 
+MESSAGE_BLOCK = """A message arrived about this task after it was assigned:
+{messages}
+
+This is additional context, not a replacement for your task. Your
+original objective stands; weigh this alongside it.
+"""
+
 TOOL_RESULT_BLOCK = """<tool_result name="{name}">
 {result}
 </tool_result>
@@ -220,6 +227,8 @@ class Neuocyte:
             "tool_calls": tool_trace,
             "tool_call_count": len(tool_trace),
             "stop_reason": out["stop_reason"],
+            "work_messages_seen": out.get("messages_seen", []),
+            "influenced_by_messages": bool(out.get("messages_seen")),
             "completion_tokens": out["tokens_spent"],
             "is_simulated": out.get("is_simulated", False),
             "neuocyte_id": self.neuocyte_id,
@@ -243,11 +252,17 @@ class Neuocyte:
         is recorded rather than silently swallowed.
         """
         trace: list[dict[str, Any]] = []
+        messages_seen: list[dict[str, Any]] = []
         spent = 0
         out: dict[str, Any] = {}
         stop_reason = "answered"
 
         for turn in range(max_turns):
+            # Collect any message addressed to this work item, at a turn
+            # boundary. Nothing is pushed into this process and nothing reaches
+            # the sandbox: a message is durable state the Harness hands over
+            # when it is safe to read it.
+            messages_seen.extend(self._collect_work_messages(item))
             remaining = budget - spent
             if remaining <= 0:
                 stop_reason = "token_budget_exhausted"
@@ -300,7 +315,40 @@ class Neuocyte:
         else:
             stop_reason = "turn_limit_reached"
 
-        return {**out, "stop_reason": stop_reason, "tokens_spent": spent}, trace
+        return ({**out, "stop_reason": stop_reason, "tokens_spent": spent,
+                 "messages_seen": messages_seen}, trace)
+
+    def _collect_work_messages(self, item: dict[str, Any]) -> list[dict[str, Any]]:
+        """Pick up messages sent to this work item since the last turn.
+
+        A message is an addition, never a replacement: the original objective
+        stays exactly as admitted, and the model is told plainly that this
+        arrived afterwards so it can weigh it as a later clarification rather
+        than as part of the brief.
+        """
+        try:
+            res = self.sup.call("work_messages", work_id=item["work_id"],
+                                neuocyte_id=self.neuocyte_id,
+                                fencing_token=item["fencing_token"])
+        except Exception:  # noqa: BLE001 - messages are optional, work is not
+            self.log.debug("work message collection failed", exc_info=True)
+            return []
+        messages = res.get("messages") or []
+        if not messages:
+            return []
+        rendered = "\n".join(
+            f"- ({m['kind']} from {m['from_role']}) {m['body']}"
+            for m in messages)
+        text = self.inf.call(
+            "apply_chat_template",
+            messages=[{"role": "user", "content": MESSAGE_BLOCK.format(
+                messages=rendered)}], add_assistant=True)
+        self.inf.call("ingest_text", session_id=self.session_id, text=text,
+                      parse_special=True)
+        self.log.info("%s collected %d work message(s)", self.neuocyte_id,
+                      len(messages))
+        return [{"message_id": m["message_id"], "from_role": m["from_role"],
+                 "kind": m["kind"]} for m in messages]
 
     def _feed_tool_result(self, name: str, res: dict[str, Any]) -> None:
         """Append the outcome to the session so the model can use it.

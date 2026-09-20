@@ -41,6 +41,8 @@ NEUOCYTE = (
     "maintenance_context",
     "board_read", "board_post",
     "tool_invoke", "tool_schemas",
+    # Collected at a turn boundary, never pushed into the process.
+    "work_messages",
 )
 
 # Shared by the two long-lived role processes, traced from roles.py. Read-heavy
@@ -55,10 +57,26 @@ ROLE_BASE = (
     "context_report",
 )
 
+# Ego's own surface. Two things are deliberately gone from an earlier draft of
+# this table: `remember`, because authoring a belief directly is not a proposal
+# and Ego is the component most exposed to a confident user; and
+# `ensure_snapshot`, which is the supervisor's scheduling helper and was
+# capability nobody asked for.
 EGO = ROLE_BASE + (
-    "remember", "record_conclusion",
-    "publish_ego_snapshot", "ensure_snapshot", "list_snapshots",
+    "record_conclusion",
+    "publish_ego_snapshot", "list_snapshots",
     "board_post",
+    # senses
+    "ego_work_view", "ego_artifact_evidence", "ego_resource_identities",
+    # effectors
+    "ego_request_work", "ego_work_message", "ego_request_cancellation",
+    "ego_propose_memory", "ego_message_id", "ego_request_id_review",
+)
+
+EGO_ONLY = (
+    "ego_work_view", "ego_artifact_evidence", "ego_resource_identities",
+    "ego_request_work", "ego_work_message", "ego_request_cancellation",
+    "ego_propose_memory", "ego_message_id", "ego_request_id_review",
 )
 
 # Id's senses beyond the shared base, plus its effectors. Everything in
@@ -97,6 +115,10 @@ def scope_tables() -> dict[str, tuple[str, ...]]:
 
 def id_only_verbs() -> frozenset[str]:
     return frozenset(ID_ONLY)
+
+
+def ego_only_verbs() -> frozenset[str]:
+    return frozenset(EGO_ONLY)
 
 
 def verbs_for(scope: str) -> frozenset[str]:

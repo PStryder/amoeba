@@ -121,6 +121,11 @@ class EventKind:
     OPERATOR_ESCALATION = "operator.escalation"
     PULSE_CITED = "pulse.cited"
     ID_FINDING_RAISED = "id.finding_raised"
+    WORK_MESSAGE_SENT = "work.message_sent"
+    WORK_MESSAGE_CONSUMED = "work.message_consumed"
+    WORK_MESSAGE_REFUSED = "work.message_refused"
+    EGO_REVIEW_REQUESTED = "ego.review_requested"
+    WORK_REQUESTED_BY_EGO = "work.requested_by_ego"
 
     # arbiter / side channel
     RESOURCE_DECISION = "resource.decision"
