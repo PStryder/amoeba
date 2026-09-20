@@ -183,6 +183,57 @@ true spelling for a file that exists and leaves a new path as given, which is
 what both cases want. A new file keeps the spelling it was created with; an
 existing one is always reported under the name it actually has.
 
+## The input circuit
+
+```
+you:      mind_file_attach(path="F:/hexylab/pcdc/steering.py", work_id=…)
+             │
+Harness:     ├─ resolve inside an allowlisted root      (refuse otherwise)
+             ├─ read the bytes
+             ├─ content-address into the blob store     (durable, by digest)
+             ├─ copy the exact bytes into that work item's sandbox scratch
+             ├─ re-hash what landed and refuse a mismatch
+             └─ emit file.attached + receipt, carrying both digests
+neuocyte:  reads work/steering.py inside its container
+```
+
+Two things this is *not*:
+
+* It does not write into a filespace root. The roots are where your files
+  already live; the copies go into the blob store and into one sandbox.
+* It is not shared with "the neuocytes". It lands in **one work item's**
+  sandbox, reachable only by the neuocyte holding that work item. Another work
+  item's neuocyte cannot see it, and there is no argument in which to name
+  someone else's sandbox.
+
+The durable copy is the point of the blob store: a finding about a file can be
+checked later against the exact bytes that produced it, even after the source
+has changed on disk.
+
+## A digest is ground truth
+
+If a receipt says a neuocyte received bytes with digest D, then hashing the
+bytes actually available to that neuocyte produces D. The environment has to be
+trustworthy enough to reason from; "this is what you were given" cannot be
+approximate.
+
+This is tested by hashing **from inside the container**, not from the test
+process, because a check the Harness runs on itself proves only that the
+Harness is self-consistent. The first version of `file_attach` passed every
+Harness-side check while handing the sandbox different bytes: it routed content
+through `str`, which replaces each non-UTF-8 byte with U+FFFD. 18 bytes in, 40
+bytes out — and the receipt still recorded the source digest, so it claimed the
+neuocyte had seen content it never saw. That is the failure that matters:
+corruption is a bug, but a receipt that misdescribes it is a lie the whole
+provenance chain rests on.
+
+The single exception is declared rather than hidden. `read_file` returns text,
+so a non-UTF-8 file cannot round-trip through it. Such a read sets
+`lossy_decode: true`, says so in `note`, and still reports the **true** digest
+— so a neuocyte can detect the discrepancy itself instead of reasoning about
+U+FFFD soup as though it were the file. Code run through `run_code` reads the
+real bytes.
+
 ## Residual risk, stated plainly
 
 **Resolution and the subsequent open are not atomic.** A link swapped in

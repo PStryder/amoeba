@@ -353,6 +353,31 @@ checked against the exact bytes that produced it.
 → `test_attaching_a_file_puts_it_in_the_work_items_sandbox`,
 `test_attaching_a_file_outside_every_root_is_refused`
 
+**I41. A receipt's digest is ground truth, verifiable from inside.** If a
+receipt claims a neuocyte received bytes with digest D, then hashing the bytes
+actually available to that neuocyte must produce D. This holds for attachments,
+for what a neuocyte is told it wrote, and for what a proposal claims — in the
+return value *and* in the durable event, because a return value nobody rereads
+is not provenance.
+
+The environment has to be trustworthy enough that a neuocyte can reason from it
+as ground truth; "this is what you were given" cannot be approximate. The tests
+hash from *inside the container* rather than from the test process, because a
+check the Harness performs on itself proves only that the Harness is
+self-consistent. The first `file_attach` passed every Harness-side check while
+handing the sandbox different bytes.
+
+The single exception is declared rather than hidden: `read_file` returns text,
+so a non-UTF-8 file cannot round-trip through it. Such a read sets
+`lossy_decode` and still reports the true digest, so the discrepancy is
+detectable by the neuocyte itself.
+→ `test_an_attached_files_digest_is_what_the_neuocyte_can_hash`,
+`test_the_durable_event_carries_the_same_digest`,
+`test_a_digest_a_neuocyte_was_told_it_wrote_is_what_is_on_disk`,
+`test_a_proposed_artifacts_digest_matches_what_the_sandbox_holds`,
+`test_a_lossy_read_declares_itself_and_still_reports_the_true_digest`,
+`test_a_text_read_is_not_marked_lossy`
+
 ---
 
 ## 3. Data model

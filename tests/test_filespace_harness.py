@@ -309,3 +309,57 @@ def test_version_history_is_not_split_by_how_the_path_was_spelled(fstack):
     fstack.call("file_restore", root="out", path="REPORT.MD",
                 sha256=second["prior_sha256"], actor="pete")
     assert (fstack.out / "report.md").read_bytes() == b"v1\n"
+
+
+def test_attaching_a_binary_file_lands_the_exact_bytes(fstack):
+    """The receipt must describe what the neuocyte can actually read.
+
+    `file_attach` used to route content through `str`, which replaces every
+    non-UTF-8 byte with U+FFFD. That corrupted any binary file silently, and
+    the event still recorded the *source* digest -- so the receipt claimed the
+    neuocyte was given content it never saw. Both halves matter; the second is
+    the one that makes provenance a lie rather than just a bug.
+    """
+    if not fstack.call("sandbox_capabilities").get("sandbox_available"):
+        pytest.skip("sandbox unavailable")
+
+    raw = bytes([0x89]) + b"PNG\r\n\x1a\n" + bytes(range(200, 256)) + b"\x00\xff"
+    (fstack.src / "image.bin").write_bytes(raw)
+
+    work = fstack.call("admit_work", objective="inspect a binary",
+                       work_class="user", origin_actor="pete",
+                       sandbox_allowed=True)
+    work_id = work["work_id"]
+    item = fstack.call("lease_work", neuocyte_id="nc_bin", work_id=work_id)
+    assert item
+    try:
+        att = fstack.call("file_attach", path=str(fstack.src / "image.bin"),
+                          work_id=work_id, actor="pete")
+        assert att["bytes"] == len(raw)
+        assert att["sandbox_sha256"] == att["sha256"], (
+            "what landed in the sandbox is not what was read from disk")
+
+        landed = Path(fstack.call("sandbox_list")[0]["root"]) / "work" / "image.bin"
+        assert landed.read_bytes() == raw, (
+            "the attached bytes were altered on the way into the sandbox")
+
+        ev = [e for e in fstack.call("history", limit=500)
+              if e["kind"] == "file.attached"]
+        assert ev, "no file.attached event"
+    finally:
+        fstack.call("cancel_work", work_id=work_id, reason="test")
+
+
+def test_reading_a_non_text_file_says_the_content_is_lossy(fstack):
+    """A model must not be handed U+FFFD soup as though it were the file."""
+    raw = bytes([0x89]) + b"PNG" + bytes(range(200, 240))
+    (fstack.out / "blob.bin").write_bytes(raw)
+
+    r = fstack.call("file_read", root="out", path="blob.bin")
+    assert r["sha256"] == __import__("hashlib").sha256(raw).hexdigest()
+    assert r["lossy_decode"] is True
+    assert "not what the file contains" in r["note"]
+
+    text = fstack.call("file_read", root="out", path="report.md")
+    assert text["lossy_decode"] is False
+    assert text["note"] == ""

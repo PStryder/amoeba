@@ -524,9 +524,14 @@ def build(sup: "Supervisor") -> dict[str, Any]:  # noqa: C901
                                        "operation": "read"})
             raise
         data, truncated = fs.read_bytes(resolved, max_bytes=max_bytes)
+        text = data.decode("utf-8", "replace")
+        lossy = text.encode("utf-8") != data
         return {**resolved.to_dict(), "bytes": len(data), "truncated": truncated,
-                "sha256": sha256_hex(data),
-                "content": data.decode("utf-8", "replace")}
+                "sha256": sha256_hex(data), "lossy_decode": lossy,
+                "note": ("this file is not UTF-8 text; the content is a lossy "
+                         "rendering and is not what the file contains"
+                         if lossy else ""),
+                "content": text}
 
     def file_write(*, root: str, path: str, content: str,
                    actor: str = "supervisor", rationale: str = "",
@@ -716,7 +721,17 @@ def build(sup: "Supervisor") -> dict[str, Any]:  # noqa: C901
         sandbox_id = sup.sandbox_for_work(work_id, owner=actor)
         name = as_name or Path(resolved.path).name
         dest = f"work/{Path(name).name}"
-        _sandbox_manager().write_file(sandbox_id, dest, data.decode("utf-8", "replace"))
+        # Bytes, not text. Routing this through str replaces every non-UTF-8
+        # byte with U+FFFD, which silently corrupts any binary file *and*
+        # leaves a receipt describing the source's digest while the sandbox
+        # holds something else -- a claim that the neuocyte saw content it
+        # never saw.
+        landed = _sandbox_manager().write_bytes(sandbox_id, dest, data)
+        if landed["sha256"] != digest:
+            raise IntegrityError(
+                "the attached file did not land in the sandbox intact",
+                path=resolved.relpath, source_sha256=digest,
+                sandbox_sha256=landed["sha256"])
 
         def body(m: Mutation) -> None:
             m.register_blob(digest, len(data), "application/octet-stream",
@@ -725,13 +740,18 @@ def build(sup: "Supervisor") -> dict[str, Any]:  # noqa: C901
                 "root": resolved.root_name, "path": resolved.relpath,
                 "host_path": str(resolved.path), "work_id": work_id,
                 "sandbox_id": sandbox_id, "sandbox_path": dest,
-                "bytes": len(data), "sha256": digest, "actor": actor})
+                "bytes": len(data), "sha256": digest, "actor": actor,
+                # Stated separately and checked above: the receipt describes
+                # what the neuocyte can actually read, not merely what was read
+                # from disk.
+                "sandbox_sha256": landed["sha256"]})
 
         receipt, _ = mind.writer.apply(body, actor=actor,
                                        operation_id=operation_id)
         return {"root": resolved.root_name, "path": resolved.relpath,
                 "work_id": work_id, "sandbox_id": sandbox_id,
                 "sandbox_path": dest, "bytes": len(data), "sha256": digest,
+                "sandbox_sha256": landed["sha256"], "content_verified": True,
                 "receipt_id": receipt.receipt_id}
 
     # ==================================================================

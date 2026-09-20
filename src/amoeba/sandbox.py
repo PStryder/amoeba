@@ -379,9 +379,20 @@ class SandboxManager:
         return target
 
     def write_file(self, sandbox_id: str, relpath: str, content: str) -> dict[str, Any]:
+        """Text convenience wrapper. Binary content must use write_bytes."""
+        return self.write_bytes(sandbox_id, relpath, content.encode("utf-8"))
+
+    def write_bytes(self, sandbox_id: str, relpath: str, data: bytes
+                    ) -> dict[str, Any]:
+        """Put exact bytes into a sandbox.
+
+        The byte-accurate path, and the one anything not known to be UTF-8 text
+        has to use. Routing a file through ``str`` replaces every byte that is
+        not valid UTF-8 with U+FFFD, which is silent, lossy and -- worse --
+        leaves a receipt describing content that is not what landed.
+        """
         sb = self.get(sandbox_id)
         target = self.resolve_inside(sb, relpath)
-        data = content.encode("utf-8")
         if len(data) > sb.limits.max_artifact_bytes:
             raise ResourceExhausted("file exceeds the per-artifact limit",
                                     size=len(data), limit=sb.limits.max_artifact_bytes)
@@ -400,9 +411,17 @@ class SandboxManager:
             raise InvalidInput("no such file in sandbox", path=relpath)
         data = target.read_bytes()
         truncated = len(data) > max_bytes
+        head = data[:max_bytes]
+        text = head.decode("utf-8", "replace")
+        # Say when the text is not the file. A model handed U+FFFD soup with no
+        # indication would reason about it as though it were the content.
+        lossy = text.encode("utf-8") != head
         return {"path": relpath, "bytes": len(data), "truncated": truncated,
-                "sha256": sha256_hex(data),
-                "content": data[:max_bytes].decode("utf-8", "replace")}
+                "sha256": sha256_hex(data), "lossy_decode": lossy,
+                "note": ("this file is not UTF-8 text; the content below is a "
+                         "lossy rendering and is not what the file contains"
+                         if lossy else ""),
+                "content": text}
 
     def list_files(self, sandbox_id: str, *, limit: int = 200) -> list[dict[str, Any]]:
         """Files in the scratch tree.

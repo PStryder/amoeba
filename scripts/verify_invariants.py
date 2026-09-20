@@ -488,6 +488,53 @@ MUTATIONS: list[Mutation] = [
         layer="Filespace.resolve_host_path (the allowlist check)",
     ),
     Mutation(
+        "I41", "A receipt's digest is what the neuocyte can actually hash",
+        "src/amoeba/harness_api.py",
+        '        landed = _sandbox_manager().write_bytes(sandbox_id, dest, data)',
+        '        landed = _sandbox_manager().write_file(\n'
+        '            sandbox_id, dest, data.decode("utf-8", "replace"))  # MUTANT',
+        ["test_an_attached_files_digest_is_what_the_neuocyte_can_hash",
+         "test_the_durable_event_carries_the_same_digest",
+         "test_attaching_a_binary_file_lands_the_exact_bytes"],
+        layer="file_attach (the write into the sandbox, and the check on it)",
+        note="reintroduces the exact defect this was found by: content routed "
+             "through str, every non-UTF-8 byte replaced with U+FFFD, while "
+             "the receipt keeps the source digest. Defended twice -- the "
+             "byte-accurate write and the integrity check on what landed -- so "
+             "both come out. What is left is the only check that matters: the "
+             "neuocyte hashing its own bytes inside the container and getting "
+             "the digest it was promised.",
+        also=[('        if landed["sha256"] != digest:',
+               "        if False:  # MUTANT: receipt no longer checked")],
+    ),
+    Mutation(
+        "I41b", "A reported digest describes the bytes that were actually stored",
+        "src/amoeba/sandbox.py",
+        "        target.write_bytes(data)\n"
+        '        return {"path": relpath, "bytes": len(data), "sha256": sha256_hex(data)}',
+        "        target.write_bytes(data[:-1] if data else data)  # MUTANT: short write\n"
+        '        return {"path": relpath, "bytes": len(data), "sha256": sha256_hex(data)}',
+        ["test_a_digest_a_neuocyte_was_told_it_wrote_is_what_is_on_disk",
+         "test_a_proposed_artifacts_digest_matches_what_the_sandbox_holds",
+         "test_an_attached_files_digest_is_what_the_neuocyte_can_hash"],
+        layer="SandboxManager.write_bytes (what is stored vs what is reported)",
+        note="the receipt stays internally consistent and is still a lie: it "
+             "reports the digest of what it was handed, not of what landed. "
+             "Only hashing from inside the container can tell the difference, "
+             "which is why the tests do it there.",
+    ),
+    Mutation(
+        "I41c", "A lossy rendering says so instead of passing as the content",
+        "src/amoeba/sandbox.py",
+        "        lossy = text.encode(\"utf-8\") != head",
+        "        lossy = False  # MUTANT: silently claim fidelity",
+        ["test_a_lossy_read_declares_itself_and_still_reports_the_true_digest"],
+        layer="SandboxManager.read_file (the honesty flag on a text rendering)",
+        note="the declared exception to I41. If read_file may return something "
+             "other than the bytes, it has to say so -- otherwise a model "
+             "reasons about U+FFFD soup as though it were the file.",
+    ),
+    Mutation(
         "I37d", "A hard link is not a way to reach a file outside a root",
         "src/amoeba/filespace.py",
         "        if exists and not self.cfg.allow_multiply_linked:\n"
