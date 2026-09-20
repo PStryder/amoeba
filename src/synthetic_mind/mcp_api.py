@@ -1,0 +1,336 @@
+"""The MCP facade: cognitive verbs, not worker or cache controls.
+
+This process is a thin, disposable stdio adapter. It holds no state and owns no
+part of the mind: it forwards to the long-lived supervisor over the loopback
+control plane. When the client hangs up, this process dies and the mind keeps
+running.
+
+Every response carries ``schema_version``, ``operation_id``, ``status``,
+``receipt_id``, ``state_version``, ``result`` and ``limitations``. Long
+operations return a durable handle immediately and are polled through
+``ego_status``.
+
+Nothing here exposes worker topology, sequence ids, KV handles or snapshot
+mechanics. Those are implementation, and a cognitive client has no business
+driving them.
+"""
+
+from __future__ import annotations
+
+import argparse
+import functools
+import inspect
+import os
+import sys
+from collections.abc import Sequence
+from typing import Annotated, Any, Literal
+
+from pydantic import Field
+
+from .config import Config, load_config
+from .errors import MindError
+from .logging_setup import get_logger, setup_logging
+from .rpc import RpcClient, RpcError, read_or_create_token
+
+SCHEMA_VERSION = "1.0.0"
+
+SERVER_INSTRUCTIONS = """Synthetic Mind: a persistent local cognitive system.
+
+Two halves are directly callable. Ego does outward cognition (conversation,
+investigation, recall). Id does inward homeostasis (introspection, health,
+audit, disagreements, maintenance).
+
+You are a client and a cognitive peer, not a component of this mind. Its state
+outlives your connection.
+
+Two invariants worth knowing before you read results:
+  * Raw history is evidence, not memory. `ego_recall` searches MAINTAINED
+    interpretations with confidence and supporting/opposing evidence. Raw events
+    are reached through `id_audit`.
+  * `id_audit` resolves an Ego conclusion through the recorded evidence. It does
+    not ask Ego to defend itself, so its verdict is independent of Ego's account.
+
+Check `limitations` on every response. If the backend is simulated, every
+response says so explicitly."""
+
+
+class Facade:
+    def __init__(self, cfg: Config) -> None:
+        self.cfg = cfg
+        self.log = get_logger("mcp")
+        self.token = read_or_create_token(cfg.token_path)
+        self.client = RpcClient(cfg.supervisor_host, cfg.supervisor_port, self.token,
+                                name="mcp->supervisor")
+
+    def call(self, method: str, **params: Any) -> Any:
+        try:
+            return self.client.call(method, **params)
+        except RpcError as exc:
+            # Reconnect once: the supervisor may have been restarted under us.
+            try:
+                self.client.close()
+                self.client.connect(retries=3)
+                return self.client.call(method, **params)
+            except Exception:  # noqa: BLE001
+                raise exc
+
+    def envelope(self, raw: Any, *, fallback_status: str = "completed") -> dict[str, Any]:
+        """Normalise any supervisor reply into the versioned response shape."""
+        if isinstance(raw, dict) and "schema_version" in raw:
+            out = dict(raw)
+        else:
+            out = {
+                "schema_version": SCHEMA_VERSION,
+                "operation_id": None,
+                "status": fallback_status,
+                "receipt_id": None,
+                "state_version": None,
+                "result": raw,
+                "limitations": [],
+            }
+        out.setdefault("operation_id", None)
+        out.setdefault("receipt_id", None)
+        out.setdefault("state_version", None)
+        out.setdefault("status", fallback_status)
+        out.setdefault("limitations", [])
+        return out
+
+    def error(self, exc: Exception, *, operation_id: str | None = None) -> dict[str, Any]:
+        if isinstance(exc, MindError):
+            err = exc.to_dict()
+        else:
+            err = {"code": "internal_error",
+                   "message": f"{type(exc).__name__}: {exc}", "details": {}}
+        return {
+            "schema_version": SCHEMA_VERSION,
+            "operation_id": operation_id,
+            "status": "failed",
+            "receipt_id": None,
+            "state_version": None,
+            "result": None,
+            "error": err,
+            "limitations": [f"call failed: {err['code']}"],
+        }
+
+
+def build_server(cfg: Config):  # noqa: C901
+    from mcp.server.fastmcp import FastMCP
+
+    facade = Facade(cfg)
+    mcp = FastMCP(name="synthetic-mind", instructions=SERVER_INSTRUCTIONS)
+
+    def guarded(fn):
+        """Turn an unexpected exception into a well-formed error envelope.
+
+        FastMCP builds each tool's input schema from the callable's signature,
+        so the wrapper must expose the wrapped function's signature exactly.
+        A bare ``*args, **kwargs`` wrapper would publish a schema demanding
+        fields named ``a`` and ``kw``, and every real call would be rejected by
+        argument validation before it ever ran.
+        """
+        @functools.wraps(fn)
+        def wrapper(*a: Any, **kw: Any) -> dict[str, Any]:
+            try:
+                return fn(*a, **kw)
+            except Exception as exc:  # noqa: BLE001
+                facade.log.exception("tool %s failed", fn.__name__)
+                return facade.error(exc)
+        # `from __future__ import annotations` makes every annotation a
+        # string; eval_str resolves them here so the schema builder does not
+        # have to re-resolve names like Literal out of a wrapper's namespace.
+        wrapper.__signature__ = inspect.signature(fn, eval_str=True)
+        wrapper.__annotations__ = dict(getattr(fn, "__annotations__", {}))
+        return wrapper
+
+    # ---------------- Ego ----------------
+    @mcp.tool(title="Ego: converse")
+    @guarded
+    def ego_converse(
+        message: Annotated[str, Field(description="What to say to Ego.", max_length=8000)],
+        conversation_id: Annotated[str | None, Field(
+            description="Group turns into one conversation.")] = None,
+        idempotency_key: Annotated[str | None, Field(
+            description="Replaying the same key returns the original result instead of "
+                        "re-running the turn.")] = None,
+        max_tokens: Annotated[int, Field(ge=1, le=2048)] = 384,
+    ) -> dict[str, Any]:
+        """One conversational turn with Ego, grounded in maintained memory.
+
+        Returns the answer, the memories it drew on, and the id of the
+        conclusion recorded for it -- which is what `id_audit` can later
+        examine.
+        """
+        return facade.envelope(facade.call(
+            "ego_converse", message=message, conversation_id=conversation_id,
+            idempotency_key=idempotency_key, max_tokens=max_tokens,
+        ))
+
+    @mcp.tool(title="Ego: investigate")
+    @guarded
+    def ego_investigate(
+        question: Annotated[str, Field(description="The question to investigate.",
+                                       max_length=4000)],
+        constraints: Annotated[str, Field(
+            description="Scope limits Ego should respect.", max_length=2000)] = "",
+        budget_tokens: Annotated[int | None, Field(
+            ge=1, le=8192,
+            description="Requested token budget. The arbiter may reduce it.")] = None,
+        idempotency_key: Annotated[str | None, Field()] = None,
+    ) -> dict[str, Any]:
+        """Start a bounded investigation.
+
+        Returns promptly with a durable operation id and the scope actually
+        accepted by the arbiter -- which may be smaller than requested. Poll
+        `ego_status` with that operation id for progress and findings.
+        """
+        return facade.envelope(facade.call(
+            "ego_investigate", question=question, constraints=constraints,
+            budget_tokens=budget_tokens, idempotency_key=idempotency_key,
+        ))
+
+    @mcp.tool(title="Ego: recall")
+    @guarded
+    def ego_recall(
+        query: Annotated[str, Field(description="Substring to match against claims.",
+                                    max_length=1000)] = "",
+        scope: Annotated[Literal["active", "all", "superseded", "retracted"], Field(
+            description="Which maintained memories to search.")] = "active",
+        limit: Annotated[int, Field(ge=1, le=100)] = 10,
+    ) -> dict[str, Any]:
+        """Search MAINTAINED memory with provenance, confidence and versions.
+
+        This is interpretation, not raw history: each item carries supporting
+        AND opposing evidence and a supersession chain. Raw events are reached
+        through `id_audit`.
+        """
+        return facade.envelope(facade.call("ego_recall", query=query, scope=scope,
+                                           limit=limit))
+
+    @mcp.tool(title="Ego: status")
+    @guarded
+    def ego_status(
+        operation_id: Annotated[str | None, Field(
+            description="Poll one durable operation; omit for overall Ego state.")] = None,
+    ) -> dict[str, Any]:
+        """Progress, outcome, limitations and current state version."""
+        return facade.envelope(facade.call("ego_status", operation_id=operation_id))
+
+    # ---------------- Id ----------------
+    @mcp.tool(title="Id: introspect")
+    @guarded
+    def id_introspect(
+        question: Annotated[str, Field(description="What to ask Id about this mind.",
+                                       max_length=4000)],
+        scope: Annotated[str, Field(max_length=200)] = "all",
+        idempotency_key: Annotated[str | None, Field()] = None,
+    ) -> dict[str, Any]:
+        """Id's observed account of the mind's own operation.
+
+        The response separates what was measured from durable state from what
+        Id inferred. Do not read the inferred part as evidence.
+        """
+        return facade.envelope(facade.call("id_introspect", question=question,
+                                           scope=scope, idempotency_key=idempotency_key))
+
+    @mcp.tool(title="Id: health")
+    @guarded
+    def id_health(
+        scope: Annotated[str, Field(max_length=200)] = "all",
+    ) -> dict[str, Any]:
+        """Measured health, queue and resource status, and capability flags.
+
+        Stays answerable while inference is failing or saturated. Capability
+        flags distinguish one resident weight set, serialized execution,
+        continuous batching and verified physical overlap -- which are not the
+        same thing.
+        """
+        return facade.envelope(facade.call("id_health", scope=scope))
+
+    @mcp.tool(title="Id: audit")
+    @guarded
+    def id_audit(
+        conclusion_id: Annotated[str | None, Field(
+            description="Conclusion to audit, e.g. from an ego_converse result.")] = None,
+        operation_id: Annotated[str | None, Field(
+            description="Audit a whole operation instead.")] = None,
+        focus: Annotated[str, Field(max_length=1000)] = "",
+        idempotency_key: Annotated[str | None, Field()] = None,
+    ) -> dict[str, Any]:
+        """Audit an Ego conclusion through its recorded evidence.
+
+        Id resolves the claim to its original inputs, model configuration and
+        evidence chain without asking Ego to defend itself. A contested verdict
+        opens a recorded disagreement rather than overwriting Ego's claim.
+        """
+        return facade.envelope(facade.call(
+            "id_audit", conclusion_id=conclusion_id, operation_id=operation_id,
+            focus=focus, idempotency_key=idempotency_key,
+        ))
+
+    @mcp.tool(title="Id: disagreements")
+    @guarded
+    def id_disagreements(
+        scope: Annotated[Literal["open", "resolved", "stale", "all"], Field()] = "open",
+        limit: Annotated[int, Field(ge=1, le=100)] = 20,
+    ) -> dict[str, Any]:
+        """Competing claims and the evidence on each side.
+
+        This is not a majority-truth score and neither side is marked correct.
+        """
+        return facade.envelope(facade.call("id_disagreements", scope=scope, limit=limit))
+
+    @mcp.tool(title="Id: maintenance")
+    @guarded
+    def id_maintenance(
+        objective: Annotated[str, Field(description="Maintenance objective.",
+                                        max_length=2000)],
+        scope: Annotated[str, Field(max_length=500)] = "",
+        budget_tokens: Annotated[int | None, Field(ge=1, le=8192)] = None,
+    ) -> dict[str, Any]:
+        """Propose bounded maintenance work.
+
+        The arbiter accepts or refuses. A refusal gives the reason: recursion
+        depth, hourly rate limit, or queue saturation.
+        """
+        return facade.envelope(facade.call("id_maintenance", objective=objective,
+                                           scope=scope, budget_tokens=budget_tokens))
+
+    # ---------------- provenance ----------------
+    @mcp.tool(title="Provenance: resolve an operation")
+    @guarded
+    def mind_provenance(
+        operation_id: Annotated[str, Field(description="Operation to resolve.",
+                                           max_length=64)],
+    ) -> dict[str, Any]:
+        """Resolve the input -> work -> inference -> conclusion -> mutation chain.
+
+        Reports the hash-chain verification result and names any referenced
+        content that cannot be produced. Missing committed content is an
+        integrity failure, not a gap to be glossed over.
+        """
+        return facade.envelope(facade.call("provenance", operation_id=operation_id))
+
+    return mcp, facade
+
+
+def main(argv: Sequence[str] | None = None) -> int:
+    ap = argparse.ArgumentParser(prog="synthetic_mind.mcp_api")
+    ap.add_argument("--config", default=os.environ.get("SYNTHETIC_MIND_CONFIG"))
+    ap.add_argument("--transport", default="stdio", choices=["stdio"])
+    args = ap.parse_args(list(argv) if argv is not None else None)
+    cfg = load_config(args.config)
+    # stdout belongs to the MCP protocol; diagnostics go to file and stderr only.
+    setup_logging(cfg, "mcp", stderr=True)
+    mcp, facade = build_server(cfg)
+    try:
+        facade.client.connect(retries=10, delay=0.5)
+    except Exception as exc:  # noqa: BLE001
+        facade.log.error("supervisor not reachable at %s:%s (%s); "
+                         "tools will return errors until it starts",
+                         cfg.supervisor_host, cfg.supervisor_port, exc)
+    mcp.run(transport=args.transport)
+    return 0
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())

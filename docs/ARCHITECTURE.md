@@ -1,0 +1,270 @@
+# Synthetic Mind — architecture, invariants and data model
+
+Version 0.1.0 · schema_version `1.0.0` · Windows-native, no Docker, no WSL.
+
+This supersedes the conflicting assumptions in the earlier design brief, in
+particular everything about UKV. See [RUNTIME.md](RUNTIME.md) for the measured
+runtime behaviour this design rests on.
+
+---
+
+## 1. Process topology
+
+```
+   external frontier client / human client   (a peer, NOT part of the mind)
+                       |  MCP stdio
+        +--------------v--------------+
+        |   MCP facade  (disposable)  |   holds no state; dies with the client
+        +--------------+--------------+
+                       |  loopback JSON-lines RPC + shared token
+        +--------------v--------------+
+        |  Supervisor  (fixed harness)|   single state writer, arbiter,
+        |  - SQLite WAL + blobs       |   admission control, lifecycle,
+        |  - work queue + leases      |   process supervision, scheduling
+        |  - snapshot registry        |
+        +---+-------+-------+---------+
+            |       |       |  spawns and owns every process below
+   +--------v-+  +--v----+  +v-----------------+
+   |   Ego    |  |  Id   |  | disposable       |
+   | process  |<>| proc  |  | workers (N)      |
+   +--------+-+  +--+----+  +--+---------------+
+            |       |          |   all inference goes through one service
+        +---v-------v----------v---+
+        |   Inference service       |  ONE resident weight set
+        |   one llama_model         |  one llama_context, n_seq_max sequences
+        |   one unified KV pool     |  Ego = seq 0, Id = seq 1, workers 2..N
+        +---------------------------+
+```
+
+Five long-lived processes (supervisor, inference, Ego, Id) plus short-lived
+workers and a short-lived MCP facade. Each is restartable independently.
+
+`Ego <-> Id` is a direct narrow RPC side channel for transient signals only.
+
+---
+
+## 2. Invariants
+
+These are the properties the tests exist to defend. Each names the test that
+pins it.
+
+### State and provenance
+
+**I1. One writer.** Only the supervisor holds a writable `Mind`. Every
+consequential change is one `StateWriter.apply` call = one SQLite transaction
+containing the state rows, the events, and the receipt.
+→ `test_crash_during_commit_leaves_no_half_applied_mutation`
+
+**I2. Raw history is append-only.** `events` rows are never updated or deleted.
+A correction appends a superseding interpretation; the earlier evidence stays.
+→ `test_correction_supersedes_and_preserves_contrary_evidence`
+
+**I3. History is not memory.** Nothing is promoted from `events` into
+`memory_items` implicitly. `ego_recall` searches maintained interpretations;
+raw events are reached only through `id_audit` / `mind_provenance`.
+→ `test_contradictory_history_does_not_become_belief`
+
+**I4. Content before reference.** Blob bytes are fsynced before any event
+referencing them commits. An orphan blob is recoverable garbage; a committed
+reference to missing content is an integrity failure and is reported as one.
+→ `test_missing_blob_is_detected_not_glossed_over`
+
+**I5. Hash chaining detects mutation, not administrators.** Every integrity
+report states this caveat explicitly.
+→ `test_hash_chain_detects_tampering`, `test_hash_chain_caveat_is_stated`
+
+**I6. Acknowledged means durable.** A receipt is returned only after commit; it
+survives restart.
+→ `test_acknowledged_mutation_survives_restart`
+
+### Work and workers
+
+**I7. At-least-once with idempotent commits.** Replaying a `mutation_id`
+returns the original receipt and does not re-apply.
+→ `test_duplicate_commit_is_idempotent`
+
+**I8. Fencing.** Every lease bumps a fencing token. A result presenting a
+superseded token is rejected, not committed.
+→ `test_stale_worker_result_is_fenced`
+
+**I9. Worker death is always safe.** Killing every worker loses no state and no
+work; leases expire, tokens advance, items requeue.
+→ `test_killing_all_workers_preserves_state_and_resumes_work`
+
+**I10. Retirement never destroys authoritative state.** A retired or crashed
+worker releases inference and snapshot resources only.
+→ `test_retiring_a_worker_does_not_destroy_work_state`
+
+**I11. Stale findings are flagged, not silently trusted.** A result pinned to an
+older `state_version` commits with a `stale_against` marker for the consumer to
+validate.
+→ `test_findings_pinned_to_an_older_state_version_are_flagged`
+
+### Ego snapshots (what "UKV" means here)
+
+**I12. Only Ego publishes.** A snapshot is a versioned, immutable snapshot of a
+valid prefix of **Ego's actual inference context**. It is not a merge of Ego and
+Id, not a cross-model tensor format, and not a curated summary. Id's PKV is
+never published.
+→ `test_maintenance_workers_get_no_ego_snapshot`
+
+**I13. Ego continues after publishing.** Publishing freezes nothing for Ego; it
+keeps appending past the published prefix. Workers see the frozen prefix only.
+→ `test_ego_continues_independently_after_publishing`
+
+**I14. Worker tails are private.** A worker's continuation is invisible to Ego
+and to sibling workers. No live UKV updates reach a running worker; there is no
+cache merging, no live prefix replacement, no shared writable KV.
+→ `test_worker_tails_are_private`
+
+**I15. Pinned for life.** A worker stays on its snapshot and model generation
+until retirement. Replacements fork from the newest published snapshot.
+→ `worker.py::_execute_ego_derived`, `test_old_snapshot_survives_while_referenced`
+
+**I16. Referenced storage is never recycled.** Reference-counted; the newest
+snapshot is always retained; releasing a referenced snapshot is refused.
+→ `test_reclaim_only_unreferenced_and_superseded`
+
+**I17. Incompatible cached tensors are never reinterpreted.** A snapshot from a
+different model generation is refused; the recorded token prefix allows exact
+recomputation instead.
+→ `test_worker_refuses_cross_generation_snapshot`,
+`test_backend_restart_invalidates_handles_but_keeps_tokens`
+
+**I18. KV is replaceable acceleration, not memory.** Losing the inference
+process loses every KV handle and no durable state.
+→ `test_inference_restart_invalidates_handles_but_keeps_snapshots`
+
+### Roles and authority
+
+**I19. Neither half is the harness.** Ego and Id request and propose; the
+arbiter decides and the writer commits.
+→ `test_maintenance_recursion_is_bounded`, `test_requested_budget_is_capped_not_honoured_blindly`
+
+**I20. Id audits the record, not Ego.** An audit resolves a conclusion through
+recorded evidence without asking Ego to defend itself.
+→ `test_id_audits_ego_conclusion_without_asking_ego`
+
+**I21. Disagreement, not overwrite.** A contested audit opens a recorded
+disagreement; Ego's claim is not rewritten.
+→ `test_contested_audit_opens_a_disagreement_rather_than_overwriting`
+
+**I22. The side channel changes nothing.** Signals are transient, bounded and
+receipt-free; consequential changes go through the writer.
+→ `test_side_channel_signal_changes_no_state`
+
+**I23. Tools pass through the harness.** A model can request a tool call; the
+harness parses it, validates it against a schema, checks role permissions,
+executes it and records the outcome.
+→ `tools.py`, `test_tool_*`
+
+### Reporting
+
+**I24. No overclaiming.** `physical_overlap_verified` and
+`prefix_reuse_verified` are false until evidence exists. Batching is never
+reported as overlap. A simulated backend labels every result it produces.
+→ `test_capability_flags_do_not_overclaim`,
+`test_simulated_backend_is_labelled_on_every_cognitive_result`
+
+**I25. Health stays answerable.** Status and health respond while inference is
+down or saturated.
+→ `test_health_stays_answerable_when_inference_is_down`
+
+**I26. A client is not the mind.** An MCP client disconnecting does not touch
+any long-lived process.
+→ `test_mcp_client_disconnect_does_not_kill_the_mind`
+
+---
+
+## 3. Data model
+
+SQLite in WAL mode with `synchronous=FULL`, plus a content-addressed blob store
+on disk (`blobs/ab/cd/<sha256>.blob`).
+
+| Table | Purpose | Key fields |
+|---|---|---|
+| `events` | append-only raw history | `seq` (monotonic), `event_id`, `run_id`, `actor_id`, `actor_incarnation`, `operation_id`, `causation_id`, `correlation_id`, `kind`, `payload_sha256` \| `payload_inline`, `prev_hash`, `event_hash` |
+| `receipts` | durable acknowledgement | `receipt_id`, `mutation_id` (unique = idempotency), `prior_version`, `result_version`, `event_seq_from/to`, `outcome` |
+| `blobs` | content index | `sha256`, `size`, `encoding`, `schema` |
+| `state_version` | single monotonic counter | `version` |
+| `memory_items` | maintained interpretations | `memory_id`, `kind`, `claim`, `confidence`, `status`, `version`, `supersedes`, `created_by` |
+| `memory_evidence` | supporting **and** opposing | `memory_id`, `stance`, `event_id`, `blob_sha256`, `note` |
+| `conclusions` | auditable Ego outputs | `conclusion_id`, `claim`, `uncertainty`, `alternatives`, `operation_id`, `produced_by`, `review_status`, `model_identity`, `snapshot_id` |
+| `conclusion_evidence` | what a conclusion rests on | `event_id`, `blob_sha256`, `memory_id` |
+| `work_items` | leased queue | `work_id`, `objective`, `work_class`, `origin_actor`, `snapshot_id`, `model_generation`, `pinned_state_ver`, `status`, `lease_owner`, `lease_expires`, `attempt`, `fencing_token`, `budget_tokens`, `deadline`, `maintenance_depth` |
+| `operations` | externally visible units | `operation_id`, `kind`, `actor`, `status`, `idempotency_key`, `request_blob`, `result_blob`, `limitations` |
+| `agents` | identity and incarnation | `agent_id`, `role`, `incarnation`, `status`, `pid`, `session_handle`, `snapshot_id`, `model_generation` |
+| `snapshots` | published Ego prefixes | `snapshot_id`, `version`, `actor`, `model_generation`, `token_count`, `tokens_blob`, `text_blob`, `kv_mode`, `backend_handle`, `refcount`, `status` |
+| `snapshot_refs` | reference counting | `ref_id`, `snapshot_id`, `holder`, `acquired_at`, `released_at` |
+| `audits` | Id verdicts | `audit_id`, `target_kind`, `target_id`, `verdict`, `findings`, `unresolved`, `evidence` |
+| `disagreements` | competing claims | `claim_a`/`actor_a`, `claim_b`/`actor_b`, `evidence_a`/`evidence_b`, `status` |
+
+`tokens_blob` is what makes a snapshot survive everything: the exact token
+prefix is durable content, so the context can be rebuilt by recomputation after
+a restart, a backend change or a model change.
+
+---
+
+## 4. Worker lifecycle
+
+1. The supervisor publishes (or reuses, if fresh) an Ego snapshot at an
+   inference boundary — `ensure_snapshot`.
+2. The worker acquires a **reference** on that snapshot (refcount +1).
+3. It instantiates a session from it:
+   - `fork_prefix` when `kv_mode == "shared_prefix"` — a physically shared
+     prefix, reported as `forked_shared_prefix`;
+   - otherwise `restore_prefix` — exact recomputation of the recorded tokens,
+     reported as `recomputed_exact_prefix`.
+   The two are reported distinctly and never conflated.
+4. It appends its private instruction tail and generates.
+5. It commits its finding with its fencing token and its pinned state version.
+6. It releases the reference, closes its session, and retires.
+
+Maintenance workers skip steps 1–3 entirely: they receive a narrow task plus
+state references, never a snapshot of Id's private context.
+
+---
+
+## 5. Scheduling
+
+Weighted fair between `user` and `maintenance` work, with two hard guarantees
+layered on top:
+
+- **Reserved slots.** Each class holds slots the other can never take, so
+  neither starves.
+- **Bounded maintenance.** `maintenance_depth` caps recursion;
+  `max_maintenance_per_hour` caps rate. A maintenance job that spawns
+  maintenance jobs terminates.
+
+Retirement triggers: task completion, wall-clock budget, token budget,
+age, staleness, failure, or supervisor shutdown.
+
+**Retirement is a throughput mechanism, not hygiene.** With `kv_unified=True`
+the KV pool is shared, and attention is computed over its used extent, so a
+session that merely *exists* taxes every other decode. Measured: 63 idle
+sessions slow an unrelated probe session by 1.94x, recovering exactly on
+retirement ([BENCHMARKS §2](BENCHMARKS.md#2-resident-idle-sessions-tax-every-other-decode)).
+A worker that finishes but does not release its session slows the whole mind.
+
+---
+
+## 6. Recovery
+
+On supervisor start:
+
+1. Verify the hash chain and every committed content reference.
+2. Acquire the single-supervisor lock (stale-PID aware).
+3. Mark all `worker` agents crashed; mark `ego`/`id`/`inference` crashed so they
+   re-register with a new incarnation.
+4. Null every `backend_handle` and set those snapshots to `kv_mode=recomputed`.
+5. Release every outstanding snapshot reference; zero refcounts.
+6. Requeue every leased work item with `fencing_token + 1`.
+7. Mark in-flight operations `interrupted` rather than reporting them complete.
+8. Emit `supervisor.recovery` and `run.started`.
+
+No step depends on a worker being alive.
+
+Child processes are supervised by **reachability**, not only by process exit:
+on Windows the venv `python.exe` is a trampoline, so `Popen.pid` is not the pid
+of the interpreter that serves RPC, and a killed child can leave the trampoline
+behind with `poll()` still returning `None`.

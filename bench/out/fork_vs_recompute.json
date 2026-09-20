@@ -1,0 +1,46 @@
+[
+  {
+    "prompt_index": 0,
+    "control_recompute_vs_recompute_max_abs_diff": 1.0243854522705078,
+    "control_recompute_logits_bit_identical": false,
+    "control_recompute_first_divergence_step": 36,
+    "fork_vs_recompute_logits_bit_identical": false,
+    "prefix_tokens": 47,
+    "logits_max_abs_diff": 0.9980020523071289,
+    "logits_cosine": 0.9993525840455691,
+    "kl_divergence_nats": 0.006183972698114955,
+    "top1_same": true,
+    "top5_same_set": false,
+    "top10_same_order": false,
+    "greedy_identical": false,
+    "greedy_first_divergence_step": 36,
+    "greedy_tokens_generated": [
+      48,
+      48
+    ],
+    "forked_text": "The single most important detail is that Marguerite Olabode was the duty officer on the night of the storm, as she would have been responsible for monitoring and responding to the observed anomalies. \n\nHowever, if we are",
+    "recomputed_text": "The single most important detail is that Marguerite Olabode was the duty officer on the night of the storm, as she would have been responsible for monitoring and responding to the three unusual events. \n\nHowever, if we a"
+  },
+  {
+    "prompt_index": 1,
+    "control_recompute_vs_recompute_max_abs_diff": 0.8838701248168945,
+    "control_recompute_logits_bit_identical": false,
+    "control_recompute_first_divergence_step": null,
+    "fork_vs_recompute_logits_bit_identical": false,
+    "prefix_tokens": 30,
+    "logits_max_abs_diff": 0.9681234359741211,
+    "logits_cosine": 0.9996534757850692,
+    "kl_divergence_nats": 0.0005452809017780073,
+    "top1_same": true,
+    "top5_same_set": true,
+    "top10_same_order": false,
+    "greedy_identical": false,
+    "greedy_first_divergence_step": 45,
+    "greedy_tokens_generated": [
+      48,
+      48
+    ],
+    "forked_text": "The single most important detail is that interpretations (beliefs) decay over time while evidence (raw history) remains constant and unchanging. This distinction ensures that a synthetic mind can maintain accurate, evolv",
+    "recomputed_text": "The single most important detail is that interpretations (beliefs) decay over time while evidence (raw history) remains constant and unchanging. This distinction ensures that a synthetic mind can maintain accurate, evolv"
+  }
+]

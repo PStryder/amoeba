@@ -1,0 +1,49 @@
+# Synthetic Mind - real backend (one resident Qwen3-4B on the RTX 4080).
+state_dir   = "F:/hexylab/synthetic-mind-state"
+runtime_dir = "F:/hexylab/synthetic-mind-runtime/llama.cpp-b11057-win-cuda12.4"
+models_dir  = "F:/hexylab/synthetic-mind-models"
+
+supervisor_host = "127.0.0.1"
+supervisor_port = 8711
+inference_port  = 8712
+ego_port        = 8713
+id_port         = 8714
+log_level       = "INFO"
+
+[backend]
+kind         = "llama_cpp"
+lib_path     = "F:/hexylab/synthetic-mind-runtime/llama.cpp-b11057-win-cuda12.4/llama.dll"
+model_path   = "F:/hexylab/synthetic-mind-models/Qwen3-4B-Instruct-2507-Q5_K_M.gguf"
+n_gpu_layers = -1
+# n_ctx is the TOTAL shared KV pool. kv_unified is forced on: it is the only
+# mode in which an Ego prefix can be physically shared with workers.
+n_ctx        = 16384
+n_seq_max    = 8
+n_batch      = 1024
+n_ubatch     = 512
+n_threads    = 8
+flash_attn   = true
+type_k       = "f16"
+type_v       = "f16"
+
+[arbiter]
+max_workers              = 3
+max_outstanding_work     = 64
+max_prompt_tokens        = 6144
+max_completion_tokens    = 512
+worker_wall_seconds      = 180.0
+worker_token_budget      = 512
+worker_max_age_seconds   = 900.0
+lease_seconds            = 90.0
+user_weight              = 0.7
+maintenance_weight       = 0.3
+user_reserved_slots      = 1
+maintenance_reserved_slots = 1
+max_maintenance_depth    = 2
+max_maintenance_per_hour = 20
+
+[ego]
+max_context_tokens = 6144
+
+[id]
+max_context_tokens = 6144

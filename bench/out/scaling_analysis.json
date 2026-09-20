@@ -1,0 +1,14 @@
+{
+  "geometric": {
+    "knee_at_sessions": 2,
+    "ms_per_session_before": 0.5047166669100989,
+    "ms_per_session_after": 0.3541281477907888,
+    "ratio": 0.7016375146847822
+  },
+  "zoom": {
+    "knee_at_sessions": 32,
+    "ms_per_session_before": 0.05759641927246184,
+    "ms_per_session_after": 0.3104262532550214,
+    "ratio": 5.389679726209009
+  }
+}

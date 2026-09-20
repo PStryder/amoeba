@@ -1,0 +1,363 @@
+"""Acceptance tests 5, 6, 12: provenance, history-vs-memory, crash during commit."""
+
+from __future__ import annotations
+
+import sqlite3
+
+import pytest
+
+from synthetic_mind.errors import Fenced, IntegrityError, InvalidInput, NotFound, StaleVersion
+from synthetic_mind.store.events import EventKind, missing_content, verify_chain
+from synthetic_mind.store.writer import Mutation
+
+
+# ---------------------------------------------------------------------------
+# Test 5: event/receipt provenance resolves; missing content is detected.
+# ---------------------------------------------------------------------------
+def test_provenance_chain_resolves_end_to_end(mind):
+    op_id, receipt, replayed = mind.memory.open_operation(
+        kind="ego_converse", actor="ego", request={"message": "hello"}
+    )
+    assert not replayed and receipt.outcome == "committed"
+
+    work_id, _ = mind.work.admit(
+        objective="answer hello", work_class="user", origin_actor="ego",
+        operation_id=op_id,
+    )
+    item = mind.work.lease(worker_id="wk1")
+    assert item["work_id"] == work_id
+    mind.work.complete(work_id=work_id, worker_id="wk1",
+                       fencing_token=item["fencing_token"],
+                       result={"finding": "hello back"}, operation_id=op_id)
+    cid, _ = mind.memory.record_conclusion(
+        claim="hello back", produced_by="ego", operation_id=op_id,
+        evidence=[{"note": "work result"}], model_identity="gen_test",
+    )
+    mind.memory.update_operation(operation_id=op_id, status="completed", actor="ego",
+                                 result={"answer": "hello back"})
+
+    prov = mind.provenance(operation_id=op_id)
+    kinds = [e["kind"] for e in prov["events"]]
+    # input -> work -> result -> conclusion -> mutation, all under one operation
+    assert EventKind.INPUT_RECEIVED in kinds
+    assert EventKind.WORK_ADMITTED in kinds
+    assert EventKind.WORK_COMPLETED in kinds
+    assert EventKind.CONCLUSION_RECORDED in kinds
+    assert EventKind.OUTPUT_EMITTED in kinds
+    assert prov["hash_chain_ok"] is True
+    assert prov["unresolved_content"] == []
+    assert prov["conclusions"][0]["conclusion_id"] == cid
+    assert prov["work_items"][0]["work_id"] == work_id
+    assert len(prov["receipts"]) >= 3
+
+
+def test_missing_blob_is_detected_not_glossed_over(mind, cfg):
+    op_id, _, _ = mind.memory.open_operation(
+        kind="ego_converse", actor="ego", request={"message": "x" * 5000}
+    )
+    row = mind.db.conn.execute(
+        "SELECT request_blob FROM operations WHERE operation_id = ?", (op_id,)
+    ).fetchone()
+    sha = row["request_blob"]
+    assert mind.blobs.exists(sha)
+
+    # Simulate content loss under a committed reference.
+    mind.blobs.path_for(sha).unlink()
+
+    report = mind.verify_integrity(deep=True)
+    assert report["missing_content_count"] >= 1
+    assert any(m["sha256"] == sha and m["reason"] == "absent"
+               for m in report["missing_content"])
+    with pytest.raises(IntegrityError):
+        mind.blobs.get(sha)
+
+
+def test_corrupt_blob_is_detected(mind):
+    sha = mind.blobs.put_text("original content")
+    mind.blobs.path_for(sha).write_bytes(b"tampered")
+    assert mind.blobs.verify(sha) is False
+    with pytest.raises(IntegrityError):
+        mind.blobs.get(sha)
+
+
+def test_hash_chain_detects_tampering(mind):
+    for i in range(5):
+        mind.writer.apply(lambda m, i=i: m.emit("test.event", {"i": i}), actor="tester")
+    assert verify_chain(mind.db.conn)[0] is True
+
+    # Rewrite a payload without recomputing hashes.
+    mind.db.conn.execute(
+        "UPDATE events SET payload_inline = ? WHERE kind = 'test.event'"
+        " AND seq = (SELECT MIN(seq) FROM events WHERE kind='test.event')",
+        ('{"i":999}',),
+    )
+    mind.db.conn.commit()
+    ok, bad = verify_chain(mind.db.conn)
+    assert ok is False and bad is not None
+
+
+def test_hash_chain_caveat_is_stated(mind):
+    report = mind.verify_integrity()
+    assert "administrator" in report["caveat"]
+
+
+# ---------------------------------------------------------------------------
+# Test 6: raw history stays separate from maintained memory.
+# ---------------------------------------------------------------------------
+def test_contradictory_history_does_not_become_belief(mind):
+    # Two contradictory raw events.
+    mind.writer.apply(
+        lambda m: m.emit(EventKind.INPUT_RECEIVED, {"text": "the port is 8080"}),
+        actor="user")
+    mind.writer.apply(
+        lambda m: m.emit(EventKind.INPUT_RECEIVED, {"text": "the port is 9090"}),
+        actor="user")
+
+    assert mind.db.conn.execute(
+        "SELECT COUNT(*) AS n FROM events WHERE kind = ?", (EventKind.INPUT_RECEIVED,)
+    ).fetchone()["n"] == 2
+    # Nothing was promoted into memory.
+    assert mind.memory.recall(scope="all") == []
+
+
+def test_correction_supersedes_and_preserves_contrary_evidence(mind):
+    first, _ = mind.memory.remember(
+        kind="belief", claim="the port is 8080", confidence=0.6, created_by="ego",
+        supporting=[{"note": "user said so"}],
+    )
+    second, _ = mind.memory.remember(
+        kind="belief", claim="the port is 9090", confidence=0.85, created_by="id",
+        supporting=[{"note": "observed listening socket"}],
+        opposing=[{"note": "user originally said 8080"}],
+        supersedes=first,
+    )
+    old = mind.memory.get_memory(first)
+    new = mind.memory.get_memory(second)
+    assert old["status"] == "superseded"
+    assert new["status"] == "active" and new["supersedes"] == first
+    assert new["version"] == old["version"] + 1
+    # Contrary evidence survives on the new interpretation.
+    assert len(new["evidence"]["opposing"]) == 1
+    # The old claim is still retrievable, not rewritten.
+    assert old["claim"] == "the port is 8080"
+    # Default recall shows only the active interpretation.
+    active = mind.memory.recall(query="port")
+    assert [m["memory_id"] for m in active] == [second]
+    assert len(mind.memory.recall(query="port", scope="all")) == 2
+
+
+def test_recall_matches_salient_terms_not_whole_phrase(mind):
+    mind.memory.remember(kind="belief",
+                         claim="The inference backend keeps one resident weight set.",
+                         confidence=0.9, created_by="operator")
+    hits = mind.memory.recall(query="How many copies of the model weights are resident?")
+    assert len(hits) == 1
+
+
+# ---------------------------------------------------------------------------
+# Test 12: duplicate results, stale findings, crash during commit.
+# ---------------------------------------------------------------------------
+def test_duplicate_commit_is_idempotent(mind):
+    work_id, _ = mind.work.admit(objective="o", work_class="user", origin_actor="ego")
+    item = mind.work.lease(worker_id="wk1")
+    token = item["fencing_token"]
+    r1 = mind.work.complete(work_id=work_id, worker_id="wk1", fencing_token=token,
+                            result={"finding": "a"})
+    r2 = mind.work.complete(work_id=work_id, worker_id="wk1", fencing_token=token,
+                            result={"finding": "a"})
+    assert r1.receipt_id == r2.receipt_id
+    assert r2.replayed is True
+    assert mind.db.conn.execute(
+        "SELECT COUNT(*) AS n FROM events WHERE kind = ?", (EventKind.WORK_COMPLETED,)
+    ).fetchone()["n"] == 1
+
+
+def test_stale_worker_result_is_fenced(mind):
+    work_id, _ = mind.work.admit(objective="o", work_class="user", origin_actor="ego")
+    first = mind.work.lease(worker_id="wk1", lease_seconds=0.0)
+    # The lease expires and a replacement worker takes it.
+    expired = mind.work.expire_leases(now=first["lease_expires"] + 1)
+    assert work_id in expired
+    second = mind.work.lease(worker_id="wk2")
+    assert second["fencing_token"] > first["fencing_token"]
+
+    with pytest.raises(Fenced):
+        mind.work.complete(work_id=work_id, worker_id="wk1",
+                           fencing_token=first["fencing_token"],
+                           result={"finding": "stale"})
+    # The replacement can still commit.
+    mind.work.complete(work_id=work_id, worker_id="wk2",
+                       fencing_token=second["fencing_token"],
+                       result={"finding": "fresh"})
+    assert mind.work.get_work(work_id)["result"]["finding"] == "fresh"
+
+
+def test_findings_pinned_to_an_older_state_version_are_flagged(mind):
+    work_id, _ = mind.work.admit(objective="o", work_class="user", origin_actor="ego")
+    item = mind.work.lease(worker_id="wk1")
+    pinned = item["pinned_state_ver"]
+    # State moves on while the worker is running.
+    mind.memory.remember(kind="belief", claim="something changed", confidence=0.5,
+                         created_by="id")
+    mind.work.complete(work_id=work_id, worker_id="wk1",
+                       fencing_token=item["fencing_token"],
+                       result={"finding": "x"}, pinned_state_ver=pinned)
+    ev = mind.db.conn.execute(
+        "SELECT payload_inline FROM events WHERE kind = ?", (EventKind.WORK_COMPLETED,)
+    ).fetchone()
+    assert '"stale_against"' in ev["payload_inline"]
+    assert '"pinned"' in ev["payload_inline"]
+
+
+def test_crash_during_commit_leaves_no_half_applied_mutation(mind):
+    before_version = mind.state_version()
+    before_events = mind.db.conn.execute(
+        "SELECT COUNT(*) AS n FROM events").fetchone()["n"]
+
+    class Boom(RuntimeError):
+        pass
+
+    def body(m: Mutation) -> None:
+        m.sql("INSERT INTO memory_items(memory_id, kind, claim, confidence, status,"
+              " version, created_by, created_at, updated_at, state_version)"
+              " VALUES ('mem_x','belief','half written',0.5,'active',1,'ego',0,0,1)")
+        m.emit("test.partial", {"x": 1})
+        raise Boom("fault injected between state change and commit")
+
+    with pytest.raises(Boom):
+        mind.writer.apply(body, actor="tester")
+
+    assert mind.state_version() == before_version
+    assert mind.db.conn.execute(
+        "SELECT COUNT(*) AS n FROM events").fetchone()["n"] == before_events
+    assert mind.db.conn.execute(
+        "SELECT COUNT(*) AS n FROM memory_items WHERE memory_id='mem_x'"
+    ).fetchone()["n"] == 0
+    # No receipt was issued for a mutation that did not commit.
+    assert mind.db.conn.execute(
+        "SELECT COUNT(*) AS n FROM receipts").fetchone()["n"] == 0
+    assert verify_chain(mind.db.conn)[0] is True
+
+
+def test_acknowledged_mutation_survives_restart(cfg):
+    from synthetic_mind.mind import Mind
+
+    m1 = Mind(cfg)
+    mem_id, receipt = m1.memory.remember(kind="belief", claim="durable claim",
+                                         confidence=0.8, created_by="ego")
+    version = receipt.result_version
+    m1.close()
+
+    m2 = Mind(cfg)
+    assert m2.memory.get_memory(mem_id)["claim"] == "durable claim"
+    assert m2.state_version() == version
+    assert m2.writer.receipt_for(receipt.mutation_id).receipt_id == receipt.receipt_id
+    m2.close()
+
+
+def test_optimistic_concurrency_rejects_stale_expected_version(mind):
+    stale = mind.state_version() - 1
+    with pytest.raises(StaleVersion):
+        mind.writer.apply(lambda m: m.emit("x", {}), actor="t", expect_version=stale)
+
+
+def test_blob_deduplication(mind):
+    a = mind.blobs.put_text("identical context block")
+    b = mind.blobs.put_text("identical context block")
+    assert a == b
+    files = list(mind.cfg.blob_dir.rglob("*.blob"))
+    assert len(files) == 1
+
+
+def test_lease_can_target_a_specific_work_item(mind):
+    """The dispatcher spawns a worker FOR an item; the lease must honour that.
+
+    Without targeting, a worker claims the queue head instead, hands it back,
+    and burns one of that item's retries for nothing.
+    """
+    a, _ = mind.work.admit(objective="first", work_class="user", origin_actor="ego")
+    b, _ = mind.work.admit(objective="second", work_class="user", origin_actor="ego")
+
+    got = mind.work.lease(worker_id="wk2", work_id=b)
+    assert got["work_id"] == b
+    assert mind.work.get_work(a)["status"] == "queued"
+    assert mind.work.get_work(a)["attempt"] == 0
+
+    # A worker targeting an already-leased item gets nothing rather than
+    # stealing a different one.
+    assert mind.work.lease(worker_id="wk3", work_id=b) is None
+    assert mind.work.get_work(a)["status"] == "queued"
+
+
+def test_concurrent_writers_do_not_break_the_hash_chain(mind):
+    """Regression: the supervisor serves RPC from multiple threads.
+
+    A SQLite connection has exactly one transaction. Two threads inside
+    apply() would interleave BEGIN/commit, read the same hash-chain tip, and
+    publish each other's half-finished work. The visible symptom was a broken
+    chain under live load, surfacing as a failed audit dossier.
+    """
+    import threading
+
+    errors: list[BaseException] = []
+    barrier = threading.Barrier(6)
+
+    def writer(n: int) -> None:
+        try:
+            barrier.wait(timeout=10)
+            for i in range(10):
+                mind.memory.remember(
+                    kind="belief", claim=f"claim from thread {n} #{i}",
+                    confidence=0.5, created_by=f"t{n}",
+                )
+        except BaseException as exc:  # noqa: BLE001
+            errors.append(exc)
+
+    threads = [threading.Thread(target=writer, args=(n,)) for n in range(6)]
+    for t in threads:
+        t.start()
+    for t in threads:
+        t.join(timeout=60)
+
+    assert errors == [], errors
+    ok, bad = verify_chain(mind.db.conn)
+    assert ok is True, f"hash chain broke at {bad}"
+
+    # Every mutation committed exactly once, and versions are a dense sequence.
+    assert mind.db.conn.execute(
+        "SELECT COUNT(*) AS n FROM memory_items").fetchone()["n"] == 60
+    versions = [r["result_version"] for r in mind.db.conn.execute(
+        "SELECT result_version FROM receipts ORDER BY result_version")]
+    assert versions == sorted(set(versions))
+    assert mind.state_version() == max(versions)
+
+
+def test_concurrent_heartbeats_do_not_commit_someone_elses_transaction(mind):
+    """heartbeat() is the one write outside apply(); it must share the lock."""
+    import threading
+
+    stop = threading.Event()
+    errors: list[BaseException] = []
+
+    def beat() -> None:
+        try:
+            while not stop.is_set():
+                mind.work.heartbeat("ego")
+        except BaseException as exc:  # noqa: BLE001
+            errors.append(exc)
+
+    mind.work.register_agent(agent_id="ego", role="ego")
+    t = threading.Thread(target=beat, daemon=True)
+    t.start()
+    try:
+        for i in range(25):
+            mind.memory.remember(kind="belief", claim=f"under heartbeat {i}",
+                                 confidence=0.5, created_by="ego")
+    finally:
+        stop.set()
+        t.join(timeout=10)
+
+    assert errors == [], errors
+    assert verify_chain(mind.db.conn)[0] is True
+    assert mind.db.conn.execute(
+        "SELECT COUNT(*) AS n FROM memory_items").fetchone()["n"] == 25

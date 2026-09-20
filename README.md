@@ -611,6 +611,40 @@ The current implementation is focused on establishing the boring but essential m
 
 The architecture deliberately attempts to establish these invariants before adding increasingly autonomous behavior.
 
+### Where that machinery lives
+
+| Document | Contents |
+|---|---|
+| [Implementation & quickstart](docs/IMPLEMENTATION.md) | capability status table, setup, running, tests |
+| [Architecture](docs/ARCHITECTURE.md) | process topology, 26 named invariants, data model, recovery |
+| [Runtime findings](docs/RUNTIME.md) | what was measured on real hardware, and what was not |
+| [Benchmarks](docs/BENCHMARKS.md) | concurrency curve, prefix-sharing evidence, raw data in `bench/out/` |
+| [MCP contract](docs/MCP_CONTRACT.md) | the cognitive verbs, and what of MCP is *not* implemented |
+| [Open questions](docs/OPEN_QUESTIONS.md) | unresolved design questions and known failure modes |
+
+A note on naming: this README calls the disposable workers **neuocytes**. The
+code currently calls them `worker` throughout (`src/synthetic_mind/worker.py`,
+the `work_items` table, `max_workers`). Same thing; the code has not been
+renamed yet -- nor has the Python package, which is still `synthetic_mind`.
+
+Two results worth pulling forward, because they constrain the design:
+
+- **Physical prefix sharing is real and measured.** With one unified KV stream,
+  a neuocyte forked from an Ego snapshot shares KV cells rather than copying
+  them: 900-token prefix across 4 sequences occupied 2036 of 2048 cells, where
+  copying would have needed 4736. The contrasting mode copies, and is measured
+  too. See [RUNTIME §2](docs/RUNTIME.md#2-ego-snapshots-shared-prefix-vs-copied-prefix).
+- **Concurrent cognition has a knee at ~32 neuocytes** on this hardware. Past
+  it each added neuocyte costs 5.4x more decode time for a quarter of the
+  throughput return. Separately, neuocytes that merely *exist* tax every other
+  decode by up to 1.94x, fully recovered on retirement — which makes retirement
+  a throughput mechanism, not hygiene. See
+  [BENCHMARKS §1-2](docs/BENCHMARKS.md#1-the-scaling-curve-where-batching-stops-paying).
+
+Genuinely overlapping independent inference execution — item 3 in the
+concurrency list above — is **not** achieved and is not claimed anywhere in
+this repository.
+
 ---
 
 # Acceptance Test

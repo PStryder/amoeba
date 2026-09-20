@@ -1,0 +1,5 @@
+# Store text with LF in the repository; check out native on Windows.
+* text=auto
+
+# Benchmark output is raw measured evidence cited by the docs; keep it verbatim.
+bench/out/*.json -text diff

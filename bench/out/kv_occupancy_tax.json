@@ -1,0 +1,59 @@
+{
+  "n_ctx": 32768,
+  "n_seq_max": 64,
+  "ballast_tokens_per_session": 400,
+  "measure_tokens": 64,
+  "repeats": 5,
+  "stages": [
+    {
+      "stage": "empty pool",
+      "idle_sessions": 0,
+      "approx_cells_occupied": 78,
+      "pool_utilisation": 0.00238037109375,
+      "probe_tokens_per_s": 162.15405445235814
+    },
+    {
+      "stage": "16 idle sessions resident",
+      "idle_sessions": 16,
+      "approx_cells_occupied": 6478,
+      "pool_utilisation": 0.19769287109375,
+      "probe_tokens_per_s": 129.04596920113656
+    },
+    {
+      "stage": "32 idle sessions resident",
+      "idle_sessions": 32,
+      "approx_cells_occupied": 12878,
+      "pool_utilisation": 0.39300537109375,
+      "probe_tokens_per_s": 109.70441859422849
+    },
+    {
+      "stage": "48 idle sessions resident",
+      "idle_sessions": 48,
+      "approx_cells_occupied": 19278,
+      "pool_utilisation": 0.58831787109375,
+      "probe_tokens_per_s": 93.90460788692376
+    },
+    {
+      "stage": "63 idle sessions resident",
+      "idle_sessions": 63,
+      "approx_cells_occupied": 25278,
+      "pool_utilisation": 0.77142333984375,
+      "probe_tokens_per_s": 83.50354792289188
+    },
+    {
+      "stage": "after retiring ballast",
+      "idle_sessions": 0,
+      "approx_cells_occupied": 78,
+      "pool_utilisation": 0.00238037109375,
+      "probe_tokens_per_s": 162.19687558932475
+    }
+  ],
+  "verdict": {
+    "empty_pool_tokens_per_s": 162.15405445235814,
+    "full_pool_tokens_per_s": 83.50354792289188,
+    "slowdown_factor": 1.941882213221563,
+    "recovered_after_retirement_tokens_per_s": 162.19687558932475,
+    "recovery_fraction": 1.0002640768811562,
+    "conclusion": "resident idle sessions tax unrelated decodes"
+  }
+}

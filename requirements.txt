@@ -1,0 +1,8 @@
+# Direct dependencies, pinned. requirements.lock.txt has the full resolved set.
+mcp==1.26.0
+pydantic==2.12.4
+anyio==4.12.0
+numpy==2.2.6
+# dev
+pytest==8.4.2
+pytest-timeout==2.4.0

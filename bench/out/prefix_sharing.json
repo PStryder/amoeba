@@ -1,0 +1,31 @@
+[
+  {
+    "kv_unified": true,
+    "n_kv_streams": 1,
+    "n_ctx_total": 2048,
+    "n_ctx_per_seq": 2048,
+    "vram_consumed_by_load": 3267362816,
+    "prefix_len": 900,
+    "workers": 3,
+    "prefill_seconds": 0.11037660000147298,
+    "vram_free_after_prefill": 12499025920,
+    "fork_seconds_total": 0.00021440000273287296,
+    "forks_created": 3,
+    "fork_errors": [],
+    "vram_free_after_fork": 12499025920,
+    "vram_delta_at_fork_bytes": 0,
+    "state_seq_size_worker_logical": 132722088,
+    "state_seq_size_ego_logical": 132722088,
+    "tail_tokens_accommodated": 1136,
+    "exhausted_reason": "ResourceExhausted: {'seq_id': 3, 'start_pos': 1172, 'n_tokens': 16}",
+    "observed_total_logical_tokens": 4736,
+    "cells_if_shared": 2036,
+    "cells_if_copied": 4736,
+    "kv_capacity_cells": 2048,
+    "verdict": "PHYSICALLY_SHARED"
+  },
+  {
+    "kv_unified": false,
+    "error": "OSError('exception: access violation writing 0x00007FFDF8B6FF9A')"
+  }
+]
