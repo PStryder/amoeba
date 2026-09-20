@@ -31,6 +31,7 @@ from .ids import new_id
 from .logging_setup import get_logger, setup_logging
 from .homeostasis import ContextHomeostasis, HomeostasisConfig
 from .mind import Mind
+from .pulse import PulseCollector
 from .rpc import RpcClient, RpcServer, read_or_create_token, wait_for_port
 from .sandbox import SandboxManager
 from .security import audit_paths, harden_state_tree
@@ -139,6 +140,13 @@ class Supervisor:
         # from the work id, so there is no identifier for a model to forge.
         self._work_sandboxes: dict[str, str] = {}
         self._work_sandbox_lock = threading.RLock()
+        self.pulse = PulseCollector(self)
+        # What a *running* role actually primed its context with, as
+        # reported at registration. Editing configuration changes what the
+        # next incarnation would run, not this. In memory on purpose: it
+        # describes live processes, and the roles are this supervisor's
+        # own children, so it cannot outlive what it describes.
+        self.role_prompt_digest: dict[str, str] = {}
         self.homeostasis = ContextHomeostasis(
             HomeostasisConfig(**{k: getattr(cfg.homeostasis, k)
                                  for k in HomeostasisConfig.__slots__}),
@@ -278,6 +286,7 @@ class Supervisor:
             on_error=lambda m, e: self.log.exception("rpc %s: %s", m, e),
         )
         self._server.register_all(self.methods())
+        self._register_scopes()
         self._server.serve_in_thread()
         self.log.info("supervisor listening on %s:%s",
                       self.cfg.supervisor_host, self.cfg.supervisor_port)
@@ -623,14 +632,53 @@ class Supervisor:
         self._spawn(name)
 
     # ------------------------------------------------------------------
+    def _system_pulse(self, *, max_age_seconds: float = 1.0) -> dict[str, Any]:
+        """Bounded live telemetry: what the organism is doing right now.
+
+        Facts only. Deciding whether any of it is a problem is Id's job, and
+        putting that conclusion here would move cognition into the Harness.
+        """
+        return self.pulse.capture(max_age_seconds=float(max_age_seconds))
+
+    # ------------------------------------------------------------------
+    # Capability scopes
+    # ------------------------------------------------------------------
+    def _register_scopes(self) -> None:
+        """Give each kind of caller its own method table.
+
+        Absence, not a guard. A verb outside a scope's table does not exist for
+        that caller: it cannot be listed, cannot be dispatched, and there is no
+        shared implementation containing an `if caller != id` to get wrong. The
+        scope comes from the presented secret, so it cannot be claimed.
+
+        Membership is derived from what each caller actually calls, not from
+        what seems reasonable -- an unused verb in a scope is capability nobody
+        asked for.
+        """
+        from .scopes import scope_tables
+
+        methods = self.methods()
+        for scope, names in scope_tables().items():
+            token = read_or_create_token(self.cfg.scope_token_path(scope))
+            missing = [n for n in names if n not in methods]
+            if missing:
+                raise InvalidInput("scope names unknown methods",
+                                   scope=scope, missing=missing)
+            self._server.register_scope(
+                scope, {n: methods[n] for n in names}, token=token)
+            self.log.info("scope %s: %d verbs", scope, len(names))
+
+    # ------------------------------------------------------------------
     def methods(self) -> dict[str, Any]:
         # Cached: the handlers are closures, and the tool registry looks them
         # up per call. Rebuilding would make every lookup a fresh closure set.
         if self._method_cache is None:
-            from . import harness_api, supervisor_api
+            from . import harness_api, id_api, supervisor_api
 
             methods = supervisor_api.build(self)
             methods.update(harness_api.build(self))
+            methods.update(id_api.build(self))
+            methods["system_pulse"] = self._system_pulse
             self._method_cache = methods
         return self._method_cache
 

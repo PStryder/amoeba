@@ -416,6 +416,71 @@ boundary rather than the boundary.
 `test_sandboxed_code_cannot_reach_another_work_items_scratch`,
 `test_movement_across_the_boundary_is_only_ever_the_harness`
 
+### Id's senses and effectors
+
+Full reference: `ID.md` (sensory surface, the `system_pulse` contract, the effector set and its authority boundaries, and the capability-isolation model).
+
+**I44. Id has one cheap, bounded sense of the whole organism.** `system_pulse`
+answers "what is happening right now" in a single call: work, neuocytes,
+scheduler capacity, inference, context pressure, resource versions, pending
+decisions, rolling failure counters, storage and attention counters. It is
+cached, incrementally maintained, and small enough to poll — a sense Id cannot
+afford to use is not a sense.
+→ `test_id_can_obtain_the_complete_bounded_pulse`,
+`test_the_pulse_excludes_bulky_content`, `test_the_pulse_is_cheap_and_cached`
+
+**I44b. The pulse reports observations, never verdicts.** There is no
+`ego_unhealthy` field. It reports the heartbeat, the occupancy and the failure
+counts; deciding what they add up to is Id's cognition, and moving that
+conclusion into the Harness would leave Id agreeing with a number it cannot
+inspect.
+→ `test_the_pulse_reports_observations_not_verdicts`
+
+**I44c. The pulse tracks reality.** It moves when work is admitted or leased,
+when failures occur, and when a versioned resource changes — and reports the
+execution mode of running work, because board-naive or informed is what makes
+later agreement interpretable.
+→ `test_the_pulse_moves_when_work_moves`,
+`test_the_pulse_moves_when_failures_happen`,
+`test_a_resource_version_changes_when_the_resource_does`,
+`test_the_pulse_reports_execution_mode_of_running_work`
+
+**I44d. Configured is distinguished from embodied.** A running role primed its
+context with the prompt that existed when it started; editing configuration
+changes the next incarnation, not the live one. Reporting only the configured
+version would assert the running mind is something it is not.
+→ `test_id_can_obtain_the_complete_bounded_pulse`,
+`test_id_proposals_do_not_install_themselves`
+
+**I45. Id requests; the Harness decides.** Every Id effector goes through the
+Harness, is validated there, and leaves a receipt attributed to `id` carrying
+the `pulse_id` it was formed from. Id may raise findings, propose corrections
+and prompts, request investigation, rejuvenation and cancellation, message Ego
+and escalate to the operator — and cannot install a prompt, change scheduler
+policy, or edit a belief in place.
+→ `test_id_can_invoke_every_authorised_effector`,
+`test_consequential_id_actions_are_receipted_and_attributed`,
+`test_id_proposals_do_not_install_themselves`,
+`test_id_cannot_change_scheduler_policy_or_requeue`
+
+**I46. A neuocyte has no path to an Id-only verb.** Architectural absence, not
+a permission check: Id's effectors are in no other scope's method table, so for
+a neuocyte connection they do not exist. The scope is decided by the secret
+presented, so there is no role, actor or caller field to forge; the generic
+tool dispatcher builds only a neuocyte registry; and an unknown-method error no
+longer enumerates the table, so names cannot be discovered.
+→ `test_a_neuocyte_cannot_invoke_an_id_only_verb_by_name`,
+`test_a_neuocyte_cannot_enumerate_the_methods_it_lacks`,
+`test_a_neuocyte_cannot_spoof_its_way_into_id_scope`,
+`test_the_generic_tool_dispatcher_cannot_reach_an_id_verb`,
+`test_a_neuocytes_model_facing_tool_list_contains_no_id_verb`
+
+**I46b. Ego is checked separately.** Ego and Id are both long-lived role
+processes and share plumbing; they do not share authority. Ego's scope contains
+no Id effector and not the pulse.
+→ `test_ego_cannot_reach_ids_effectors`,
+`test_the_neuocyte_scope_contains_no_id_only_verb`
+
 **I41. A receipt's digest is ground truth, verifiable from inside.** If a
 receipt claims a neuocyte received bytes with digest D, then hashing the bytes
 actually available to that neuocyte must produce D. This holds for attachments,

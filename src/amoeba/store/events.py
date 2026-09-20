@@ -116,6 +116,12 @@ class EventKind:
     OPERATION_CANCELLED = "operation.cancelled"
     GENERATION_CANCELLED = "generation.cancelled"
 
+    # Id governance: proposals and escalations that the operator decides on.
+    PROMPT_PROPOSED = "prompt.proposed"
+    OPERATOR_ESCALATION = "operator.escalation"
+    PULSE_CITED = "pulse.cited"
+    ID_FINDING_RAISED = "id.finding_raised"
+
     # arbiter / side channel
     RESOURCE_DECISION = "resource.decision"
     SIDE_CHANNEL_SIGNAL = "side_channel.signal"

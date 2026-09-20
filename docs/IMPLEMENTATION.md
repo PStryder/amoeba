@@ -43,6 +43,9 @@ Read this before trusting anything below it.
 | Tool *execution* loop (model requests -> harness runs -> result returned) | **Wired** | multi-turn loop in the neuocyte; execution happens in the Harness via `tool_invoke`, gated on the work row's `sandbox_allowed`, bounded by turns/budget/deadline, every call receipted |
 | Host filesystem: allowlisted roots, versioned writes, explicit attach | **Implemented, tested** | `tests/test_filespace.py`, `tests/test_filespace_harness.py`; no root configured by default, so Amoeba has no host access until one is |
 | Four separated stores (filespace / blobs / compute sandbox / accepted artifact) | **Implemented, tested** | `tests/test_store_boundaries.py`; sandbox reach measured from inside the container, destruction verified to preserve input, evidence and accepted work product |
+| Id sensory surface: `system_pulse` + Harness-mediated investigation | **Implemented, tested** | `tests/test_id_senses_and_effectors.py`; cached, bounded, facts-only, tracks work/failure/resource change |
+| Id effectors: request/propose/challenge/escalate, all receipted | **Implemented, tested** | nine verbs, each attributed to `id` and carrying the `pulse_id` it was formed from |
+| Id-only capability isolation (scoped RPC method tables) | **Implemented, tested** | scope is the presented credential; no role field to forge, no enumeration, no dispatcher bypass; Ego checked separately |
 | Cognitive blackboard: posts, threads, relations, receipts | **Implemented, tested** | `tests/test_blackboard.py` |
 | Independent replication vs socially propagated agreement | **Implemented, tested** | every read recorded; `board_corroboration` splits the two |
 | Board-naive neuocytes (`board_access="none"`) | **Implemented, tested** | `test_a_naive_worker_posts_without_having_read_the_board` |

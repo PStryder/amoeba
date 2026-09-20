@@ -92,9 +92,15 @@ class Neuocyte:
         self.cfg = cfg
         self.neuocyte_id = neuocyte_id
         self.log = get_logger("neuocyte")
+        # The neuocyte scope is the narrowest table there is: work lifecycle,
+        # snapshots, the board, and tool_invoke. It contains no Id effector and
+        # no operator verb, so there is nothing here to misuse -- not because a
+        # check refuses, but because those verbs do not exist on this
+        # connection.
         self.token = read_or_create_token(cfg.token_path)
-        self.sup = RpcClient(cfg.supervisor_host, cfg.supervisor_port, self.token,
-                             name=f"{neuocyte_id}->supervisor")
+        self.scope_token = read_or_create_token(cfg.scope_token_path("neuocyte"))
+        self.sup = RpcClient(cfg.supervisor_host, cfg.supervisor_port,
+                             self.scope_token, name=f"{neuocyte_id}->supervisor")
         self.inf = RpcClient(cfg.supervisor_host, cfg.inference_port, self.token,
                              name=f"{neuocyte_id}->inference")
         self.session_id: str | None = None

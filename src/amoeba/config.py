@@ -180,7 +180,28 @@ class Config:
 
     @property
     def token_path(self) -> Path:
+        """The operator/control credential.
+
+        Held by the supervisor itself and by the MCP facade. Deliberately NOT
+        given to Ego, Id or neuocytes: presenting it grants the full method
+        table, so handing it to a child would make every capability boundary
+        below it decorative.
+        """
         return self.state_dir / "control.token"
+
+    def scope_token_path(self, scope: str) -> Path:
+        """The credential a child presents to name its own capability scope.
+
+        The scope a caller gets is what its secret *is*, never what it claims,
+        so there is no role field to forge. Same-account file permissions are
+        the residual limit here, exactly as for the ACL work in security.py:
+        this removes accidental and model-driven capability, not a determined
+        process running as the Amoeba user.
+        """
+        safe = "".join(c for c in scope if c.isalnum() or c in "-_")
+        if not safe:
+            raise ValueError("scope name must not be empty")
+        return self.state_dir / f"scope.{safe}.token"
 
     @property
     def lock_path(self) -> Path:

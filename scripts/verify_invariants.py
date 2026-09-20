@@ -594,6 +594,87 @@ MUTATIONS: list[Mutation] = [
              "store, the database and every other work item's scratch at once.",
     ),
     Mutation(
+        "I44", "The pulse carries the sections Id needs",
+        "src/amoeba/pulse.py",
+        '            "resources": resources,',
+        "            # MUTANT: resource versions dropped",
+        ["test_id_can_obtain_the_complete_bounded_pulse"],
+        layer="PulseCollector._assemble (the pulse contract)",
+        note="a missing section is the quiet failure: the call still works and "
+             "Id simply stops being able to notice that cognition changed.",
+    ),
+    Mutation(
+        "I44b", "The pulse states observations, not verdicts",
+        "src/amoeba/pulse.py",
+        '            "pending_decisions": pending,',
+        '            "pending_decisions": pending,\n'
+        '            "ego_unhealthy": True,  # MUTANT: a verdict',
+        ["test_the_pulse_reports_observations_not_verdicts"],
+        layer="PulseCollector._assemble (what the field names assert)",
+        note="the exact shape being ruled out. A verdict here moves cognition "
+             "into the Harness and leaves Id agreeing with a number it cannot "
+             "inspect.",
+    ),
+    Mutation(
+        "I44c", "The pulse reflects live failure state",
+        "src/amoeba/pulse.py",
+        "            label = FAILURE_KINDS.get(row[\"kind\"])",
+        "            label = None  # MUTANT: failures never counted",
+        ["test_the_pulse_moves_when_failures_happen"],
+        layer="PulseCollector._drain_failures (the counter feed)",
+        note="counters that never move look exactly like a system with no "
+             "problems, which is the worst possible failure for a sense.",
+    ),
+    Mutation(
+        "I44d", "A resource digest tracks the resource",
+        "src/amoeba/resources.py",
+        "    text = prompt_text(role, cfg)\n"
+        "    return ResourceVersion(\n"
+        '        kind=f"prompt.{role}", sha256=sha256_hex(text.encode("utf-8")),',
+        "    text = prompt_text(role, cfg)\n"
+        "    return ResourceVersion(\n"
+        '        kind=f"prompt.{role}", sha256=sha256_hex(role.encode("utf-8")),',
+        ["test_a_resource_version_changes_when_the_resource_does"],
+        layer="resources.prompt_version (what the digest is over)",
+        note="a digest that is stable regardless of the text is worse than no "
+             "digest: it actively asserts nothing changed.",
+    ),
+    Mutation(
+        "I45", "Id actions are attributed and carry their telemetry",
+        "src/amoeba/id_api.py",
+        '                "raised_by": "id", "pulse_id": prov.get("pulse_id"),\n'
+        '                "note": "Id is not authorised to remediate this autonomously"})',
+        '                "raised_by": "id",  # MUTANT: provenance dropped\n'
+        '                "note": "Id is not authorised to remediate this autonomously"})',
+        ["test_consequential_id_actions_are_receipted_and_attributed"],
+        layer="id_escalate_to_operator (the provenance on the record)",
+        note="without the cited pulse the record says what Id did but not what "
+             "it was looking at, which is the half that makes it auditable.",
+    ),
+    Mutation(
+        "I46", "Id-only verbs are absent from the neuocyte scope",
+        "src/amoeba/scopes.py",
+        '    "tool_invoke", "tool_schemas",\n)',
+        '    "tool_invoke", "tool_schemas",\n'
+        '    "id_raise_finding", "system_pulse",  # MUTANT: granted\n)',
+        ["test_a_neuocyte_cannot_invoke_an_id_only_verb_by_name",
+         "test_the_neuocyte_scope_contains_no_id_only_verb"],
+        layer="scopes.NEUOCYTE (the table a neuocyte connection sees)",
+        note="the isolation is this table. Granting from it is the whole "
+             "failure, and it is a two-word edit -- which is exactly why it "
+             "needs a test that dies.",
+    ),
+    Mutation(
+        "I46b", "An unknown method does not enumerate the table",
+        "src/amoeba/rpc.py",
+        '                                  "details": {"scope": getattr(self, "scope", None)}}})',
+        '                                  "details": {"known": sorted(visible)}}})',
+        ["test_a_neuocyte_cannot_enumerate_the_methods_it_lacks"],
+        layer="_Handler._dispatch (what a refusal discloses)",
+        note="restores the discovery oracle: asking for a method that does not "
+             "exist used to return the name of every method that does.",
+    ),
+    Mutation(
         "I42c", "A proposal's bytes are preserved as evidence when it is made",
         "src/amoeba/harness_api.py",
         "        digest = mind.blobs.put(data)",

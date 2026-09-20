@@ -32,7 +32,7 @@ from typing import Any, Sequence
 
 from .config import Config, load_config
 from .errors import BackendUnavailable, NotFound
-from .ids import new_id
+from .ids import new_id, sha256_hex
 from .logging_setup import get_logger, setup_logging
 from .rpc import RpcClient, RpcServer, read_or_create_token
 from .tools import parse_tool_calls, strip_tool_calls
@@ -61,9 +61,15 @@ class RoleProcess:
         self.cfg = cfg
         self.port = port
         self.log = get_logger(self.role)
+        # Two different credentials on purpose. The control token is what this
+        # role's own server accepts, so the supervisor can call in. The scope
+        # token is what it presents *outward*, and it buys strictly less: Ego
+        # cannot reach Id's effectors, and neither can reach the operator
+        # surface, because neither holds the control token.
         self.token = read_or_create_token(cfg.token_path)
-        self.sup = RpcClient(cfg.supervisor_host, cfg.supervisor_port, self.token,
-                             name=f"{self.role}->supervisor")
+        self.scope_token = read_or_create_token(cfg.scope_token_path(self.role))
+        self.sup = RpcClient(cfg.supervisor_host, cfg.supervisor_port,
+                             self.scope_token, name=f"{self.role}->supervisor")
         self.inf = RpcClient(cfg.supervisor_host, cfg.inference_port, self.token,
                              name=f"{self.role}->inference")
         self.session_id: str | None = None
@@ -85,9 +91,13 @@ class RoleProcess:
         self.model_generation = self.capabilities.get("model_generation", "")
         sess = self.inf.call("open_session", role=self.role)
         self.session_id = sess["session_id"]
+        # Report the digest of the prompt this incarnation is about to prime
+        # its context with, so the Harness can tell configured from embodied.
+        prompt_sha = sha256_hex(self._system_text().encode("utf-8"))
         reg = self.sup.call("register_agent", agent_id=self.role, role=self.role,
                             pid=os.getpid(), session_handle=self.session_id,
-                            model_generation=self.model_generation)
+                            model_generation=self.model_generation,
+                            prompt_sha256=prompt_sha)
         self.incarnation = reg["incarnation"]
         self.log.info("%s incarnation %s on session %s (backend=%s simulated=%s)",
                       self.role, self.incarnation, self.session_id,

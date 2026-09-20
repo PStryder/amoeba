@@ -126,12 +126,16 @@ def build(sup: "Supervisor") -> dict[str, Any]:
     # ------------------------------------------------------------------
     def register_agent(*, agent_id: str, role: str, pid: int | None = None,
                        session_handle: str | None = None, snapshot_id: str | None = None,
-                       model_generation: str | None = None, work_id: str | None = None
-                       ) -> dict[str, Any]:
+                       model_generation: str | None = None, work_id: str | None = None,
+                       prompt_sha256: str | None = None) -> dict[str, Any]:
         incarnation, receipt = mind.work.register_agent(
             agent_id=agent_id, role=role, pid=pid, session_handle=session_handle,
             snapshot_id=snapshot_id, model_generation=model_generation, work_id=work_id,
         )
+        if prompt_sha256 and role in ("ego", "id"):
+            # What this incarnation is actually running, which is not
+            # necessarily what the configuration now says.
+            sup.role_prompt_digest[role] = prompt_sha256
         return {"agent_id": agent_id, "incarnation": incarnation,
                 "receipt_id": receipt.receipt_id}
 

@@ -68,12 +68,18 @@ class _Handler(socketserver.StreamRequestHandler):
                                                    "message": f"bad frame: {exc}"}})
                 return
             if not authed:
-                if not secrets.compare_digest(str(msg.get("token", "")), self.server.token):
+                scope = self.server.scope_for_token(str(msg.get("token", "")))
+                if scope is None:
                     self._send({"ok": False, "error": {"code": "unauthorized",
                                                        "message": "bad control token"}})
                     return
                 authed = True
-                self._send({"ok": True, "result": {"service": self.server.service_name}})
+                self.scope = scope
+                # The scope is what the presented secret *is*, never what the
+                # caller says it is. There is no role field in this handshake
+                # precisely so there is nothing to spoof.
+                self._send({"ok": True, "result": {"service": self.server.service_name,
+                                                   "scope": scope}})
                 continue
             self._dispatch(msg)
 
@@ -81,12 +87,18 @@ class _Handler(socketserver.StreamRequestHandler):
         req_id = msg.get("id")
         method = msg.get("method")
         params = msg.get("params") or {}
-        handler = self.server.methods.get(method)
+        visible = self.server.methods_for(getattr(self, "scope", None))
+        handler = visible.get(method)
         if handler is None:
+            # Deliberately does not list what *is* available. Enumerating the
+            # method table turned an unknown-method error into a discovery
+            # oracle: a caller could learn the name of every verb it is not
+            # allowed to call by asking for one that does not exist. A caller
+            # is told its own surface by `methods`, which is scoped.
             self._send({"id": req_id, "ok": False,
                         "error": {"code": "not_found",
                                   "message": f"unknown method {method!r}",
-                                  "details": {"known": sorted(self.server.methods)}}})
+                                  "details": {"scope": getattr(self, "scope", None)}}})
             return
         try:
             result = handler(**params) if params else handler()
@@ -129,7 +141,43 @@ class RpcServer(socketserver.ThreadingTCPServer):
         self.service_name = service_name
         self.methods: dict[str, Callable[..., Any]] = {}
         self.on_error = on_error or (lambda method, exc: None)
+        # scope name -> {method: handler}. Empty means "unscoped": every
+        # authenticated caller sees one flat table, which is what the role and
+        # inference servers want. The supervisor registers real scopes. Set
+        # before binding so no connection can arrive against a half-built table.
+        self.scopes: dict[str, dict[str, Any]] = {}
+        self._scope_tokens: dict[str, str] = {}
         super().__init__((host, port), _Handler)
+
+    def register_scope(self, scope: str, methods: dict[str, Any], *,
+                       token: str | None = None) -> None:
+        """Expose exactly these methods to callers presenting this scope's token.
+
+        Absence is the mechanism. A method that is not in a scope's table does
+        not exist for that caller: it cannot be listed, named, or dispatched,
+        and there is no shared implementation with a caller check inside it to
+        get wrong.
+        """
+        self.scopes[scope] = dict(methods)
+        if token:
+            self._scope_tokens[token] = scope
+
+    def scope_for_token(self, presented: str) -> str | None:
+        import secrets as _secrets
+
+        if _secrets.compare_digest(presented, self.token):
+            return "operator"
+        for tok, scope in self._scope_tokens.items():
+            if _secrets.compare_digest(presented, tok):
+                return scope
+        return None
+
+    def methods_for(self, scope: str | None) -> dict[str, Any]:
+        if not self.scopes:
+            return self.methods
+        if scope == "operator":
+            return self.methods
+        return self.scopes.get(scope or "", {})
 
     def register(self, name: str, fn: Callable[..., Any]) -> None:
         self.methods[name] = fn
