@@ -40,7 +40,7 @@ def setup_logging(cfg: "Config", component: str, *, stderr: bool | None = None) 
     root.addHandler(fh)
 
     if stderr is None:
-        stderr = os.environ.get("SYNTHETIC_MIND_STDERR_LOG", "1") != "0"
+        stderr = os.environ.get("AMOEBA_STDERR_LOG", "1") != "0"
     if stderr:
         sh = logging.StreamHandler(stream=sys.stderr)
         sh.setFormatter(fmt)

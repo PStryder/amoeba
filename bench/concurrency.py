@@ -35,8 +35,8 @@ from pathlib import Path
 ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT / "src"))
 
-from synthetic_mind.backends.llama_engine import LlamaEngine  # noqa: E402
-from synthetic_mind.config import load_config  # noqa: E402
+from amoeba.backends.llama_engine import LlamaEngine  # noqa: E402
+from amoeba.config import load_config  # noqa: E402
 
 # Geometric sweep. Override with --counts to zoom in on a bend.
 SESSION_COUNTS = (1, 2, 4, 8, 16, 32, 64)
@@ -56,7 +56,7 @@ PROMPTS = [
      "A model may request work but cannot raise a cap. " * 6
      + " Summarise the paragraph above in one sentence."),
     "Name one failure mode of reference-counted cache reclamation.",
-    "Why does a fencing token stop a replaced worker from committing a result?",
+    "Why does a fencing token stop a replaced neuocyte from committing a result?",
     ("The observatory logged a pressure drop, a radio burst and a power failure "
      "at 02:14, and the duty officer was Marguerite Olabode. " * 6
      + " Who was the duty officer?"),
@@ -233,10 +233,10 @@ def run_prefix_sharing_cost(eng: LlamaEngine) -> dict:
     for _ in range(4):
         t = time.perf_counter()
         forks.append(eng.fork_prefix(src_session_id=src.session_id,
-                                     prefix_len=prefix_len, role="worker"))
+                                     prefix_len=prefix_len, role="neuocyte"))
         fork_times.append(time.perf_counter() - t)
 
-    recompute = eng.open_session(role="worker")
+    recompute = eng.open_session(role="neuocyte")
     t = time.perf_counter()
     eng.restore_prefix(session_id=recompute.session_id, tokens=tokens)
     recompute_times.append(time.perf_counter() - t)

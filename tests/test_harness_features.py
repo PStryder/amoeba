@@ -22,7 +22,7 @@ from conftest import PYTHON, ROOT, LiveStack
 # Cognitive blackboard
 # ===========================================================================
 def test_board_round_trip_over_the_control_plane(stack: LiveStack):
-    a = stack.call("board_post", author="wk_1", author_kind="worker",
+    a = stack.call("board_post", author="wk_1", author_kind="neuocyte",
                    post_type="finding", body="the knee is at 32 sessions",
                    title="scaling", confidence=0.8)
     assert a["receipt_id"] and a["board_naive"] is True
@@ -33,7 +33,7 @@ def test_board_round_trip_over_the_control_plane(stack: LiveStack):
     assert "socially informed" in read["note"]
     cursor = read["cursor"]
 
-    b = stack.call("board_post", author="wk_2", author_kind="worker",
+    b = stack.call("board_post", author="wk_2", author_kind="neuocyte",
                    post_type="note", body="agreed", thread_id=a["thread_id"],
                    relations=[{"to_post": a["post_id"], "relation": "supports"}])
     assert b["board_naive"] is False        # wk_2 had read the board
@@ -43,16 +43,16 @@ def test_board_round_trip_over_the_control_plane(stack: LiveStack):
 
 
 def test_independence_and_corroboration_over_rpc(stack: LiveStack):
-    claim = stack.call("board_post", author="wk_1", author_kind="worker",
+    claim = stack.call("board_post", author="wk_1", author_kind="neuocyte",
                        post_type="finding", body="prefix KV is shared")
     # wk_2 never reads: independent.
-    indep = stack.call("board_post", author="wk_2", author_kind="worker",
+    indep = stack.call("board_post", author="wk_2", author_kind="neuocyte",
                        post_type="finding", body="measured: shared",
                        relations=[{"to_post": claim["post_id"],
                                    "relation": "supports"}])
     # wk_3 reads first: an echo.
     stack.call("board_read", reader="wk_3", limit=10)
-    echo = stack.call("board_post", author="wk_3", author_kind="worker",
+    echo = stack.call("board_post", author="wk_3", author_kind="neuocyte",
                       post_type="note", body="concur",
                       relations=[{"to_post": claim["post_id"],
                                   "relation": "supports"}])
@@ -68,7 +68,7 @@ def test_independence_and_corroboration_over_rpc(stack: LiveStack):
 
 
 def test_promotion_from_board_to_memory_is_an_explicit_harness_act(stack: LiveStack):
-    p = stack.call("board_post", author="wk_1", author_kind="worker",
+    p = stack.call("board_post", author="wk_1", author_kind="neuocyte",
                    post_type="finding", body="the pool taxes idle sessions",
                    confidence=0.9)
     # Posting alone changed no belief.
@@ -86,10 +86,10 @@ def test_promotion_from_board_to_memory_is_an_explicit_harness_act(stack: LiveSt
 
 
 def test_promotion_records_how_much_support_was_real(stack: LiveStack):
-    claim = stack.call("board_post", author="wk_1", author_kind="worker",
+    claim = stack.call("board_post", author="wk_1", author_kind="neuocyte",
                        post_type="finding", body="claim under test")
     stack.call("board_read", reader="wk_echo", limit=10)
-    stack.call("board_post", author="wk_echo", author_kind="worker", post_type="note",
+    stack.call("board_post", author="wk_echo", author_kind="neuocyte", post_type="note",
                body="agreed", relations=[{"to_post": claim["post_id"],
                                           "relation": "supports"}])
     out = stack.call("board_promote_to_memory", post_id=claim["post_id"])
@@ -102,9 +102,9 @@ def test_promotion_records_how_much_support_was_real(stack: LiveStack):
 
 
 def test_board_posts_are_not_mind_state(stack: LiveStack):
-    stack.call("board_post", author="wk_1", author_kind="worker",
+    stack.call("board_post", author="wk_1", author_kind="neuocyte",
                post_type="finding", body="port is 9090")
-    stack.call("board_post", author="wk_2", author_kind="worker",
+    stack.call("board_post", author="wk_2", author_kind="neuocyte",
                post_type="finding", body="port is 8080")
     assert stack.call("ego_recall")["result"]["count"] == 0
     assert stack.call("board_stats")["posts"] == 2
@@ -277,10 +277,10 @@ def test_summarise_mode_is_refused_through_the_harness(stack: LiveStack):
 
 
 # ===========================================================================
-# Board-naive workers: the experiment the read tracking exists for
+# Board-naive neuocytes: the experiment the read tracking exists for
 # ===========================================================================
 def test_work_can_be_admitted_board_naive(stack: LiveStack):
-    stack.call("board_post", author="wk_seed", author_kind="worker",
+    stack.call("board_post", author="wk_seed", author_kind="neuocyte",
                post_type="finding", body="a seeded finding others might echo")
     admitted = stack.call("admit_work", objective="independently determine X",
                           work_class="user", origin_actor="ego",
@@ -291,7 +291,7 @@ def test_work_can_be_admitted_board_naive(stack: LiveStack):
 
 
 def test_a_naive_worker_posts_without_having_read_the_board(stack: LiveStack):
-    stack.call("board_post", author="wk_seed", author_kind="worker",
+    stack.call("board_post", author="wk_seed", author_kind="neuocyte",
                post_type="finding", body="seeded claim")
     admitted = stack.call("admit_work", objective="determine the answer",
                           work_class="user", origin_actor="ego",
@@ -305,7 +305,7 @@ def test_a_naive_worker_posts_without_having_read_the_board(stack: LiveStack):
         time.sleep(1)
     item = stack.call("get_work", work_id=work_id)
     if item["status"] != "done":
-        pytest.skip(f"worker did not complete: {item['status']}")
+        pytest.skip(f"neuocyte did not complete: {item['status']}")
     result = item["result"]
     assert result["board_access"] == "none"
     assert result["board_posts_seen"] == []

@@ -55,7 +55,7 @@ class IntegrityError(MindError):
 
 
 class Fenced(MindError):
-    """A result arrived from a worker that has been superseded."""
+    """A result arrived from a neuocyte that has been superseded."""
 
     code = "fenced"
 

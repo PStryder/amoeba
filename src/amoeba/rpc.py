@@ -1,7 +1,7 @@
 """Loopback JSON line protocol for the internal control plane.
 
 The supervisor and the inference service each listen on a loopback TCP port.
-Ego, Id, workers and the MCP facade are clients. Binding the MCP facade to a
+Ego, Id, neuocytes and the MCP facade are clients. Binding the MCP facade to a
 long-lived supervisor -- rather than hosting the mind inside the facade -- is
 what makes a client disconnect harmless: the stdio process dies, the mind does
 not.

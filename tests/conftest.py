@@ -14,9 +14,9 @@ import pytest
 ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT / "src"))
 
-from synthetic_mind.config import Config, load_config  # noqa: E402
-from synthetic_mind.mind import Mind  # noqa: E402
-from synthetic_mind.rpc import RpcClient, read_or_create_token, wait_for_port  # noqa: E402
+from amoeba.config import Config, load_config  # noqa: E402
+from amoeba.mind import Mind  # noqa: E402
+from amoeba.rpc import RpcClient, read_or_create_token, wait_for_port  # noqa: E402
 
 PYTHON = str(ROOT / ".venv" / "Scripts" / "python.exe")
 if not Path(PYTHON).exists():
@@ -65,7 +65,7 @@ def mind(cfg: Config) -> Iterator[Mind]:
 
 @pytest.fixture()
 def backend() -> Iterator[Any]:
-    from synthetic_mind.backends.deterministic import DeterministicBackend
+    from amoeba.backends.deterministic import DeterministicBackend
 
     b = DeterministicBackend(n_seq_max=6, n_ctx=4096)
     b.load()
@@ -141,9 +141,9 @@ def _write_stack_config(tmp_path: Path, *, kind: str = "deterministic",
     lines += [
         "",
         "[arbiter]",
-        "max_workers = 2",
-        "worker_wall_seconds = 45.0",
-        "worker_token_budget = 128",
+        "max_neuocytes = 2",
+        "neuocyte_wall_seconds = 45.0",
+        "neuocyte_token_budget = 128",
         "lease_seconds = 8.0",
         "max_maintenance_per_hour = 50",
     ]
@@ -160,9 +160,9 @@ def start_stack(tmp_path: Path, *, kind: str = "deterministic",
     cfg = load_config(cfg_path)
     env = dict(os.environ)
     env["PYTHONPATH"] = os.pathsep.join([str(ROOT / "src"), env.get("PYTHONPATH", "")])
-    env["SYNTHETIC_MIND_STDERR_LOG"] = "0"
+    env["AMOEBA_STDERR_LOG"] = "0"
     proc = subprocess.Popen(
-        [PYTHON, "-m", "synthetic_mind.supervisor", "--config", str(cfg_path)],
+        [PYTHON, "-m", "amoeba.supervisor", "--config", str(cfg_path)],
         env=env, cwd=str(ROOT),
         stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
     )

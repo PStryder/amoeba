@@ -7,7 +7,7 @@ system can fail.
 
 **Does board-mediated collaboration make the swarm better or just louder?**
 The machinery to answer this now exists — `board_access="none"` produces
-naive workers, and `board_corroboration` separates replication from echo — but
+naive neuocytes, and `board_corroboration` separates replication from echo — but
 the experiment has not been run. It is entirely possible that shared context
 spreads Ego's mistakes faster than it spreads its insight.
 
@@ -16,7 +16,7 @@ because those are defensible without a model in the loop. Whether the middle is
 the least valuable part of a cognitive context is an assumption, not a finding.
 
 **Is a 4B model good enough for both roles?**
-Qwen3-4B-Instruct-2507 follows the structured formats Ego, Id and workers need,
+Qwen3-4B-Instruct-2507 follows the structured formats Ego, Id and neuocytes need,
 and produces coherent short answers. Whether it can do *genuine* synthesis or a
 *genuine* audit was not evaluated. No quality benchmark was run. The honest
 position is that the plumbing is proven and the cognition is not.
@@ -36,8 +36,8 @@ but it also means contradictions can accumulate unresolved, and there is no
 policy yet for who breaks a tie between a user goal and a maintenance goal.
 
 **Does an Ego-derived shared projection actually help?**
-Not measured. Forking is cheap and correct, but whether a worker inheriting
-Ego's context produces better findings than a worker given a narrow brief is an
+Not measured. Forking is cheap and correct, but whether a neuocyte inheriting
+Ego's context produces better findings than a neuocyte given a narrow brief is an
 open empirical question — and a shared prefix spreads Ego's mistakes as
 efficiently as its context.
 
@@ -59,7 +59,7 @@ mitigation in place beyond retiring promptly; a future option would be to trim
 or evict idle sessions on a timer, which is not implemented.
 
 **Context overflow.** `n_ctx` is a shared pool. A long Ego context plus several
-forked workers can exhaust it; `llama_decode` returns 1 and the engine raises
+forked neuocytes can exhaust it; `llama_decode` returns 1 and the engine raises
 `resource_exhausted`. There is now a homeostasis path that trims and reborns a
 role context at critical pressure
 ([HOMEOSTASIS](HOMEOSTASIS.md)), which buys headroom but does not remove the
@@ -74,7 +74,7 @@ open question is whether verbatim head+tail is the right thing to keep, which
 is an empirical question nobody has answered here.
 
 **Positional consistency.** A fork copies positions `[0, prefix_len)` and the
-worker continues from `prefix_len`. Nothing currently shifts positions, so
+neuocyte continues from `prefix_len`. Nothing currently shifts positions, so
 `llama_memory_seq_add` / `seq_div` are unused and untested here. Any future
 context trimming would have to deal with RoPE position shifts, and
 `llama_memory_can_shift` would need checking first.
@@ -95,6 +95,12 @@ invalidates snapshot reuse. None of these three paths has a dedicated test.
 SQLite file can rewrite rows and recompute every hash. Real immutability would
 need checkpoints exported to independent append-only storage. Every integrity
 report states this.
+
+**Cancellation granularity.** A generation stops between tokens (~6 ms), which
+is fine. A long *prefill* is not interruptible: that would need llama.cpp's
+`abort_callback` on the compute path, and putting a Python callback there
+risks GIL and deadlock problems that were not worth taking on for the benefit.
+A cancel issued during a 6000-token prefill waits for it to finish.
 
 **Windows process identity.** The venv `python.exe` is a trampoline, so
 `Popen.pid` is not the pid of the interpreter serving RPC. Supervision uses

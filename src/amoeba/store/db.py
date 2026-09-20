@@ -164,8 +164,8 @@ CREATE TABLE IF NOT EXISTS work_items (
   budget_tokens     INTEGER,
   deadline          REAL,
   maintenance_depth INTEGER NOT NULL DEFAULT 0,
-  -- none | read | read_write. 'none' makes the worker board-naive by
-  -- construction, which is what turns agreement between two workers into
+  -- none | read | read_write. 'none' makes the neuocyte board-naive by
+  -- construction, which is what turns agreement between two neuocytes into
   -- evidence of independent replication rather than an echo.
   board_access      TEXT NOT NULL DEFAULT 'read_write',
   sandbox_allowed   INTEGER NOT NULL DEFAULT 0,
@@ -258,12 +258,12 @@ CREATE TABLE IF NOT EXISTS disagreements (
 -- ------------------------------------------------------------------
 -- Cognitive blackboard: neuocyte-to-neuocyte communication.
 --
--- This is NOT authoritative Mind State. A post is something a worker said,
+-- This is NOT authoritative Mind State. A post is something a neuocyte said,
 -- not something the organism believes. Promotion into memory_items is a
 -- separate, receipted act.
 --
 -- board_reads exists for one reason: to tell independent replication apart
--- from socially propagated agreement. Two workers reaching the same finding
+-- from socially propagated agreement. Two neuocytes reaching the same finding
 -- means something very different depending on whether the second had read the
 -- first, so every read is recorded with a timestamp and every post snapshots
 -- what its author had already seen.
@@ -274,11 +274,11 @@ CREATE TABLE IF NOT EXISTS board_posts (
   -- ~0.5ms granularity and returns identical values for consecutive calls, so
   -- a "since <timestamp>" poll silently drops posts written in the same tick.
   -- seq is assigned under the writer's transaction lock and is strictly
-  -- increasing, so it is the cursor workers should page on.
+  -- increasing, so it is the cursor neuocytes should page on.
   seq              INTEGER NOT NULL DEFAULT 0,
   thread_id        TEXT NOT NULL,
   author           TEXT NOT NULL,
-  author_kind      TEXT NOT NULL,          -- ego | id | worker | operator
+  author_kind      TEXT NOT NULL,          -- ego | id | neuocyte | operator
   author_incarnation INTEGER,
   work_id          TEXT,
   operation_id     TEXT,
@@ -428,7 +428,29 @@ class Database:
             "INSERT OR IGNORE INTO meta(key, value) VALUES ('schema_version', ?)",
             (str(SCHEMA_VERSION),),
         )
+        self._migrate_vocabulary()
         self.conn.commit()
+
+    def _migrate_vocabulary(self) -> None:
+        """Normalise the pre-rename vocabulary in an existing database.
+
+        Disposable cognitive workers are called neuocytes. A database written
+        before the rename stores the role as 'worker', and leaving it would
+        make live_agents(role=...) quietly miss them. Rewriting these two
+        columns is safe: they are enumerations, not evidence, and the
+        append-only event payloads that recorded the old word are deliberately
+        left alone.
+        """
+        for table, column in (("agents", "role"), ("board_posts", "author_kind")):
+            try:
+                cur = self.conn.execute(
+                    f"UPDATE {table} SET {column} = 'neuocyte' WHERE {column} = 'worker'")
+                if cur.rowcount:
+                    self.conn.execute(
+                        "INSERT OR REPLACE INTO meta(key, value) VALUES (?, ?)",
+                        (f"migrated_{table}_{column}", str(cur.rowcount)))
+            except sqlite3.OperationalError:
+                pass
 
     def close(self) -> None:
         try:

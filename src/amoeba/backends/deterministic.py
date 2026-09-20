@@ -152,6 +152,18 @@ class DeterministicBackend:
                  "n_past": s.n_past, "prefix_len": s.prefix_len,
                  "snapshot_id": s.snapshot_id} for s in self._sessions.values()]
 
+    def request_cancel(self, session_id: str) -> bool:
+        sess = self._sessions.get(session_id)
+        if sess is None:
+            return False
+        sess.cancel_requested = True
+        return True
+
+    def clear_cancel(self, session_id: str) -> None:
+        sess = self._sessions.get(session_id)
+        if sess is not None:
+            sess.cancel_requested = False
+
     def reset_session(self, session_id: str) -> None:
         sess = self.get_session(session_id)
         sess.tokens.clear()
@@ -168,7 +180,7 @@ class DeterministicBackend:
                 raise InvalidInput("prefix_len must be a valid prefix",
                                    prefix_len=prefix_len, source_n_past=src.n_past)
             dst = self.open_session(role=role, session_id=session_id)
-            # A copy of the token list, so a worker mutating its own list can
+            # A copy of the token list, so a neuocyte mutating its own list can
             # never be mistaken for it mutating the source.
             dst.tokens = list(src.tokens[:prefix_len])
             dst.prefix_len = prefix_len
@@ -224,6 +236,13 @@ class DeterministicBackend:
         """
         with self._lock:
             sess = self.get_session(session_id)
+            if sess.cancel_requested:
+                sess.cancel_requested = False
+                return GenerationResult(
+                    session_id=session_id, text="", tokens=[],
+                    finish_reason="cancelled", prompt_tokens=sess.n_past,
+                    completion_tokens=0, time_to_first_token=0.0,
+                    total_seconds=0.0)
             t0 = time.perf_counter()
             seed_material = f"{sess.role}|{seed}|{','.join(map(str, sess.tokens))}"
             digest = hashlib.sha256(seed_material.encode()).hexdigest()

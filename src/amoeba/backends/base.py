@@ -1,6 +1,6 @@
 """The inference backend interface and its capability contract.
 
-Everything above this line in the architecture (Ego, Id, workers, supervisor)
+Everything above this line in the architecture (Ego, Id, neuocytes, supervisor)
 talks only to this interface. A backend advertises what it can actually do; the
 harness never assumes a capability that was not measured.
 

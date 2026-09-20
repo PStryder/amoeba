@@ -31,14 +31,14 @@ from .logging_setup import get_logger, setup_logging
 from .rpc import RpcClient, RpcServer, read_or_create_token
 from .tools import parse_tool_calls, strip_tool_calls
 
-EGO_SYSTEM = """You are Ego, the outward-facing half of a persistent synthetic mind.
+EGO_SYSTEM = """You are Ego, the outward-facing half of a persistent amoeba.
 You converse, investigate and synthesise. You have a durable memory of maintained
 beliefs, and an append-only history that is evidence rather than memory.
 Be concrete and brief. State uncertainty plainly rather than hedging everywhere.
 When you assert something substantive, you are producing a conclusion that Id may
 later audit against the recorded evidence, so do not claim support you do not have."""
 
-ID_SYSTEM = """You are Id, the inward half of a persistent synthetic mind.
+ID_SYSTEM = """You are Id, the inward half of a persistent amoeba.
 You observe outcomes, resource pressure, unfinished obligations and contradictions.
 You audit Ego's conclusions against recorded evidence, not against Ego's own defence
 of them. You may propose maintenance work; you may not perform administration.
@@ -327,7 +327,7 @@ class EgoProcess(RoleProcess):
                     ) -> dict[str, Any]:
         """Turn a question into a bounded plan and a claim worth committing.
 
-        The actual fan-out work happens in disposable workers forked from a
+        The actual fan-out work happens in disposable neuocytes forked from a
         published Ego snapshot; this produces the framing and the scope.
         """
         prompt = (
@@ -500,9 +500,9 @@ class IdProcess(RoleProcess):
 
 # ---------------------------------------------------------------------------
 def main(argv: Sequence[str] | None = None) -> int:
-    ap = argparse.ArgumentParser(prog="synthetic_mind.roles")
+    ap = argparse.ArgumentParser(prog="amoeba.roles")
     ap.add_argument("role", choices=["ego", "id"])
-    ap.add_argument("--config", default=os.environ.get("SYNTHETIC_MIND_CONFIG"))
+    ap.add_argument("--config", default=os.environ.get("AMOEBA_CONFIG"))
     args = ap.parse_args(list(argv) if argv is not None else None)
     cfg = load_config(args.config)
     setup_logging(cfg, args.role)

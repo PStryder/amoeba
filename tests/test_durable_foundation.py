@@ -6,9 +6,9 @@ import sqlite3
 
 import pytest
 
-from synthetic_mind.errors import Fenced, IntegrityError, InvalidInput, NotFound, StaleVersion
-from synthetic_mind.store.events import EventKind, missing_content, verify_chain
-from synthetic_mind.store.writer import Mutation
+from amoeba.errors import Fenced, IntegrityError, InvalidInput, NotFound, StaleVersion
+from amoeba.store.events import EventKind, missing_content, verify_chain
+from amoeba.store.writer import Mutation
 
 
 # ---------------------------------------------------------------------------
@@ -24,9 +24,9 @@ def test_provenance_chain_resolves_end_to_end(mind):
         objective="answer hello", work_class="user", origin_actor="ego",
         operation_id=op_id,
     )
-    item = mind.work.lease(worker_id="wk1")
+    item = mind.work.lease(neuocyte_id="wk1")
     assert item["work_id"] == work_id
-    mind.work.complete(work_id=work_id, worker_id="wk1",
+    mind.work.complete(work_id=work_id, neuocyte_id="wk1",
                        fencing_token=item["fencing_token"],
                        result={"finding": "hello back"}, operation_id=op_id)
     cid, _ = mind.memory.record_conclusion(
@@ -159,11 +159,11 @@ def test_recall_matches_salient_terms_not_whole_phrase(mind):
 # ---------------------------------------------------------------------------
 def test_duplicate_commit_is_idempotent(mind):
     work_id, _ = mind.work.admit(objective="o", work_class="user", origin_actor="ego")
-    item = mind.work.lease(worker_id="wk1")
+    item = mind.work.lease(neuocyte_id="wk1")
     token = item["fencing_token"]
-    r1 = mind.work.complete(work_id=work_id, worker_id="wk1", fencing_token=token,
+    r1 = mind.work.complete(work_id=work_id, neuocyte_id="wk1", fencing_token=token,
                             result={"finding": "a"})
-    r2 = mind.work.complete(work_id=work_id, worker_id="wk1", fencing_token=token,
+    r2 = mind.work.complete(work_id=work_id, neuocyte_id="wk1", fencing_token=token,
                             result={"finding": "a"})
     assert r1.receipt_id == r2.receipt_id
     assert r2.replayed is True
@@ -174,19 +174,19 @@ def test_duplicate_commit_is_idempotent(mind):
 
 def test_stale_worker_result_is_fenced(mind):
     work_id, _ = mind.work.admit(objective="o", work_class="user", origin_actor="ego")
-    first = mind.work.lease(worker_id="wk1", lease_seconds=0.0)
-    # The lease expires and a replacement worker takes it.
+    first = mind.work.lease(neuocyte_id="wk1", lease_seconds=0.0)
+    # The lease expires and a replacement neuocyte takes it.
     expired = mind.work.expire_leases(now=first["lease_expires"] + 1)
     assert work_id in expired
-    second = mind.work.lease(worker_id="wk2")
+    second = mind.work.lease(neuocyte_id="wk2")
     assert second["fencing_token"] > first["fencing_token"]
 
     with pytest.raises(Fenced):
-        mind.work.complete(work_id=work_id, worker_id="wk1",
+        mind.work.complete(work_id=work_id, neuocyte_id="wk1",
                            fencing_token=first["fencing_token"],
                            result={"finding": "stale"})
     # The replacement can still commit.
-    mind.work.complete(work_id=work_id, worker_id="wk2",
+    mind.work.complete(work_id=work_id, neuocyte_id="wk2",
                        fencing_token=second["fencing_token"],
                        result={"finding": "fresh"})
     assert mind.work.get_work(work_id)["result"]["finding"] == "fresh"
@@ -194,12 +194,12 @@ def test_stale_worker_result_is_fenced(mind):
 
 def test_findings_pinned_to_an_older_state_version_are_flagged(mind):
     work_id, _ = mind.work.admit(objective="o", work_class="user", origin_actor="ego")
-    item = mind.work.lease(worker_id="wk1")
+    item = mind.work.lease(neuocyte_id="wk1")
     pinned = item["pinned_state_ver"]
-    # State moves on while the worker is running.
+    # State moves on while the neuocyte is running.
     mind.memory.remember(kind="belief", claim="something changed", confidence=0.5,
                          created_by="id")
-    mind.work.complete(work_id=work_id, worker_id="wk1",
+    mind.work.complete(work_id=work_id, neuocyte_id="wk1",
                        fencing_token=item["fencing_token"],
                        result={"finding": "x"}, pinned_state_ver=pinned)
     ev = mind.db.conn.execute(
@@ -240,7 +240,7 @@ def test_crash_during_commit_leaves_no_half_applied_mutation(mind):
 
 
 def test_acknowledged_mutation_survives_restart(cfg):
-    from synthetic_mind.mind import Mind
+    from amoeba.mind import Mind
 
     m1 = Mind(cfg)
     mem_id, receipt = m1.memory.remember(kind="belief", claim="durable claim",
@@ -270,22 +270,22 @@ def test_blob_deduplication(mind):
 
 
 def test_lease_can_target_a_specific_work_item(mind):
-    """The dispatcher spawns a worker FOR an item; the lease must honour that.
+    """The dispatcher spawns a neuocyte FOR an item; the lease must honour that.
 
-    Without targeting, a worker claims the queue head instead, hands it back,
+    Without targeting, a neuocyte claims the queue head instead, hands it back,
     and burns one of that item's retries for nothing.
     """
     a, _ = mind.work.admit(objective="first", work_class="user", origin_actor="ego")
     b, _ = mind.work.admit(objective="second", work_class="user", origin_actor="ego")
 
-    got = mind.work.lease(worker_id="wk2", work_id=b)
+    got = mind.work.lease(neuocyte_id="wk2", work_id=b)
     assert got["work_id"] == b
     assert mind.work.get_work(a)["status"] == "queued"
     assert mind.work.get_work(a)["attempt"] == 0
 
-    # A worker targeting an already-leased item gets nothing rather than
+    # A neuocyte targeting an already-leased item gets nothing rather than
     # stealing a different one.
-    assert mind.work.lease(worker_id="wk3", work_id=b) is None
+    assert mind.work.lease(neuocyte_id="wk3", work_id=b) is None
     assert mind.work.get_work(a)["status"] == "queued"
 
 

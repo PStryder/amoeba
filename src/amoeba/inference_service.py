@@ -1,6 +1,6 @@
 """The single GPU-owner process.
 
-One process holds one set of weights. Ego, Id and every worker are *sessions*
+One process holds one set of weights. Ego, Id and every neuocyte are *sessions*
 inside it, addressed by session id. Separating persistent agent identity (which
 lives in the durable state) from ownership of the inference buffers (which
 lives here) is what lets an agent be restarted without reloading the model, and
@@ -101,6 +101,7 @@ class InferenceService:
             "open_session": self.open_session,
             "close_session": self.close_session,
             "reset_session": lambda session_id: b.reset_session(session_id),
+            "cancel_generation": self.cancel_generation,
             "active_sessions": lambda: b.active_sessions(),
             "tokenize": lambda text, add_special=False, parse_special=True: b.tokenize(
                 text, add_special=add_special, parse_special=parse_special),
@@ -123,6 +124,19 @@ class InferenceService:
             "stats": lambda: dict(self._stats),
             "shutdown": self.shutdown,
         }
+
+    def cancel_generation(self, *, session_id: str) -> dict[str, Any]:
+        """Stop an in-flight generation on one session.
+
+        Runs on an RPC handler thread while the engine lock is held by the
+        generation being cancelled, which is exactly why the backend's
+        request_cancel does not take that lock.
+        """
+        ok = bool(self.backend.request_cancel(session_id))
+        if ok:
+            self._stats["cancellations"] = self._stats.get("cancellations", 0) + 1
+        return {"session_id": session_id, "cancel_requested": ok,
+                "granularity": "one decode step (~6ms); prefill is not interruptible"}
 
     def context_report(self) -> dict[str, Any]:
         """Measured KV occupancy. Homeostasis never estimates this."""
@@ -342,8 +356,8 @@ class InferenceService:
 
 
 def main(argv: Sequence[str] | None = None) -> int:
-    ap = argparse.ArgumentParser(prog="synthetic_mind.inference_service")
-    ap.add_argument("--config", default=os.environ.get("SYNTHETIC_MIND_CONFIG"))
+    ap = argparse.ArgumentParser(prog="amoeba.inference_service")
+    ap.add_argument("--config", default=os.environ.get("AMOEBA_CONFIG"))
     args = ap.parse_args(list(argv) if argv is not None else None)
     cfg = load_config(args.config)
     setup_logging(cfg, "inference")

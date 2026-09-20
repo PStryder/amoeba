@@ -14,8 +14,8 @@ from pathlib import Path
 
 import pytest
 
-from synthetic_mind.errors import InvalidInput, ResourceExhausted
-from synthetic_mind.sandbox import SandboxLimits, SandboxManager
+from amoeba.errors import InvalidInput, ResourceExhausted
+from amoeba.sandbox import SandboxLimits, SandboxManager
 
 pytestmark = pytest.mark.skipif(sys.platform != "win32",
                                 reason="AppContainer isolation is Windows-only")
@@ -142,7 +142,7 @@ def test_cannot_read_project_source(manager, sb):
 
 
 def test_cannot_read_the_state_database(manager, sb):
-    db = r"F:\hexylab\synthetic-mind-state\mind.sqlite3"
+    db = r"F:\hexylab\amoeba-state\mind.sqlite3"
     r = run(manager, sb, f"print(open({db!r}, 'rb').read(16))\n")
     assert r.exit_code != 0
 

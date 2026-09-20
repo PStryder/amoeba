@@ -1,7 +1,7 @@
 """Acceptance tests 7, 8, 13 against the real model.
 
 7.  Fork an Ego snapshot and compare results with exact recomputation.
-8.  Prevent cross-worker and Ego/worker cache contamination.
+8.  Prevent cross-neuocyte and Ego/neuocyte cache contamination.
 13. Measure one-set-of-weights ownership and actual prefix allocation behaviour.
 
 Skipped automatically when the llama.cpp runtime or the GGUF model is absent.
@@ -15,8 +15,8 @@ from pathlib import Path
 import pytest
 
 from conftest import REAL_CONFIG, requires_gpu
-from synthetic_mind.config import load_config
-from synthetic_mind.errors import CapabilityUnsupported, ResourceExhausted
+from amoeba.config import load_config
+from amoeba.errors import CapabilityUnsupported, ResourceExhausted
 
 pytestmark = requires_gpu
 
@@ -29,7 +29,7 @@ PROMPT = (
 
 @pytest.fixture(scope="module")
 def engine():
-    from synthetic_mind.backends.llama_engine import LlamaEngine
+    from amoeba.backends.llama_engine import LlamaEngine
 
     real = load_config(REAL_CONFIG)
     eng = LlamaEngine(
@@ -103,7 +103,7 @@ def test_forked_prefix_does_not_allocate_new_kv_cells(engine):
 
     vram_before = engine.vram_free()
     forks = [engine.fork_prefix(src_session_id=src.session_id,
-                                prefix_len=prefix_len, role="worker")
+                                prefix_len=prefix_len, role="neuocyte")
              for _ in range(3)]
     assert engine.vram_free() == vram_before          # necessary, not sufficient
 
@@ -147,7 +147,7 @@ def test_partial_fork_refused_when_not_unified():
     ``GGML_ASSERT(is_full && "seq_cp() is only supported for full KV buffers")``,
     which aborts. The engine must never reach that call.
     """
-    from synthetic_mind.backends.llama_engine import LlamaEngine
+    from amoeba.backends.llama_engine import LlamaEngine
 
     real = load_config(REAL_CONFIG)
     eng = LlamaEngine(
@@ -166,7 +166,7 @@ def test_partial_fork_refused_when_not_unified():
         eng.ingest(src.session_id, eng.tokenize(PROMPT, add_special=False))
         with pytest.raises(CapabilityUnsupported):
             eng.fork_prefix(src_session_id=src.session_id,
-                            prefix_len=max(1, src.n_past // 2), role="worker")
+                            prefix_len=max(1, src.n_past // 2), role="neuocyte")
     finally:
         eng.close()
 
@@ -192,10 +192,10 @@ def test_fork_matches_exact_recomputation(engine):
     engine.ingest(src.session_id, tokens)
 
     forked = engine.fork_prefix(src_session_id=src.session_id,
-                                prefix_len=src.n_past, role="worker")
-    recomputed = engine.open_session(role="worker")
+                                prefix_len=src.n_past, role="neuocyte")
+    recomputed = engine.open_session(role="neuocyte")
     engine.restore_prefix(session_id=recomputed.session_id, tokens=tokens)
-    control = engine.open_session(role="worker")
+    control = engine.open_session(role="neuocyte")
     engine.restore_prefix(session_id=control.session_id, tokens=tokens)
 
     # The fork reproduces the exact token prefix, not a summary of it.
@@ -247,7 +247,7 @@ def test_recomputation_is_not_summarisation(engine):
     tokens = engine.tokenize(PROMPT, add_special=False)
     engine.ingest(src.session_id, tokens)
 
-    restored = engine.open_session(role="worker")
+    restored = engine.open_session(role="neuocyte")
     n = engine.restore_prefix(session_id=restored.session_id, tokens=tokens)
     assert n == len(tokens)
     assert engine.get_session(restored.session_id).tokens == tokens
@@ -260,7 +260,7 @@ def test_recomputation_is_not_summarisation(engine):
 
 
 # ---------------------------------------------------------------------------
-# Test 8: no cross-worker or Ego/worker contamination.
+# Test 8: no cross-neuocyte or Ego/neuocyte contamination.
 # ---------------------------------------------------------------------------
 def test_worker_tails_are_private(engine):
     src = engine.open_session(role="ego")
@@ -268,13 +268,13 @@ def test_worker_tails_are_private(engine):
     prefix_len = src.n_past
 
     w1 = engine.fork_prefix(src_session_id=src.session_id, prefix_len=prefix_len,
-                            role="worker")
+                            role="neuocyte")
     w2 = engine.fork_prefix(src_session_id=src.session_id, prefix_len=prefix_len,
-                            role="worker")
+                            role="neuocyte")
 
     # Unique markers that could only appear via cache leakage.
-    marker1 = " SECRET-MARKER-ALPHA-74319 is the passphrase for worker one."
-    marker2 = " SECRET-MARKER-BRAVO-58206 is the passphrase for worker two."
+    marker1 = " SECRET-MARKER-ALPHA-74319 is the passphrase for neuocyte one."
+    marker2 = " SECRET-MARKER-BRAVO-58206 is the passphrase for neuocyte two."
     engine.ingest(w1.session_id, engine.tokenize(marker1, add_special=False))
     engine.ingest(w2.session_id, engine.tokenize(marker2, add_special=False))
 
@@ -309,14 +309,14 @@ def test_ego_continues_independently_after_publishing(engine):
     prefix_copy = list(src.tokens)
 
     w = engine.fork_prefix(src_session_id=src.session_id, prefix_len=prefix_len,
-                           role="worker")
+                           role="neuocyte")
     # Ego keeps appending past the published prefix.
     engine.ingest(src.session_id,
                   engine.tokenize(" Later the power was restored.", add_special=False))
     engine.generate(src.session_id, max_tokens=8, temperature=0.0)
     assert src.n_past > prefix_len
 
-    # The worker's view of the frozen prefix is unchanged.
+    # The neuocyte's view of the frozen prefix is unchanged.
     assert w.tokens == prefix_copy[:prefix_len]
     assert w.n_past == prefix_len
     out = engine.generate(w.session_id, max_tokens=8, temperature=0.0)
@@ -330,13 +330,13 @@ def test_closed_worker_slot_is_clean_for_the_next_tenant(engine):
     src = engine.open_session(role="ego")
     engine.ingest(src.session_id, engine.tokenize(PROMPT, add_special=False))
     w = engine.fork_prefix(src_session_id=src.session_id, prefix_len=src.n_past,
-                           role="worker")
+                           role="neuocyte")
     seq_id = w.seq_id
     engine.ingest(w.session_id,
                   engine.tokenize(" SECRET-MARKER-CHARLIE-99001", add_special=False))
     engine.close_session(w.session_id)
 
-    reused = engine.open_session(role="worker", seq_id=seq_id)
+    reused = engine.open_session(role="neuocyte", seq_id=seq_id)
     assert reused.n_past == 0
     assert engine.ffi.lib.llama_memory_seq_pos_max(engine.mem, seq_id) < 0
     engine.ingest(reused.session_id,
@@ -412,7 +412,7 @@ def test_interleaved_sessions_do_not_sample_each_others_logits(engine):
 
 
 def test_sampling_without_current_logits_is_refused_not_guessed(engine):
-    from synthetic_mind.errors import BackendUnavailable
+    from amoeba.errors import BackendUnavailable
 
     s = engine.open_session(role="probe")
     engine.ingest(s.session_id, engine.tokenize("hello there", add_special=False),

@@ -1,10 +1,10 @@
 """Command-line entry point.
 
-    python -m synthetic_mind doctor     --config config.toml
-    python -m synthetic_mind supervise  --config config.toml
-    python -m synthetic_mind mcp        --config config.toml --transport stdio
-    python -m synthetic_mind status     --config config.toml
-    python -m synthetic_mind shutdown   --config config.toml
+    python -m amoeba doctor     --config config.toml
+    python -m amoeba supervise  --config config.toml
+    python -m amoeba mcp        --config config.toml --transport stdio
+    python -m amoeba status     --config config.toml
+    python -m amoeba shutdown   --config config.toml
 """
 
 from __future__ import annotations
@@ -116,7 +116,7 @@ def _status(cfg: Any) -> int:
     except Exception as exc:  # noqa: BLE001
         print(json.dumps({"error": repr(exc),
                           "hint": "is the supervisor running? "
-                                  "python -m synthetic_mind supervise"}, indent=2))
+                                  "python -m amoeba supervise"}, indent=2))
         return 1
     finally:
         client.close()
@@ -139,13 +139,13 @@ def _shutdown(cfg: Any) -> int:
 
 
 def main(argv: Sequence[str] | None = None) -> int:
-    ap = argparse.ArgumentParser(prog="synthetic_mind")
+    ap = argparse.ArgumentParser(prog="amoeba")
     ap.add_argument("command",
                     choices=["doctor", "supervise", "mcp", "status", "shutdown",
-                             "ego", "id", "inference", "worker"])
-    ap.add_argument("--config", default=os.environ.get("SYNTHETIC_MIND_CONFIG"))
+                             "ego", "id", "inference", "neuocyte"])
+    ap.add_argument("--config", default=os.environ.get("AMOEBA_CONFIG"))
     ap.add_argument("--transport", default="stdio")
-    ap.add_argument("--worker-id", default=None)
+    ap.add_argument("--neuocyte-id", default=None)
     ap.add_argument("--work-id", default=None)
     args, rest = ap.parse_known_args(list(argv) if argv is not None else None)
     cfg = load_config(args.config)
@@ -169,14 +169,14 @@ def main(argv: Sequence[str] | None = None) -> int:
     if args.command in ("ego", "id"):
         from .roles import main as roles_main
         return roles_main([args.command, *cfg_args])
-    if args.command == "worker":
-        from .worker import main as worker_main
+    if args.command == "neuocyte":
+        from .neuocyte import main as neuocyte_main
         extra = []
-        if args.worker_id:
-            extra += ["--worker-id", args.worker_id]
+        if args.neuocyte_id:
+            extra += ["--neuocyte-id", args.neuocyte_id]
         if args.work_id:
             extra += ["--work-id", args.work_id]
-        return worker_main(cfg_args + extra)
+        return neuocyte_main(cfg_args + extra)
     return 2
 
 

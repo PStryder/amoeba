@@ -1,7 +1,7 @@
 """Acceptance tests 9, 10, 11 plus scheduling bounds.
 
 9.  Hold old snapshots safely while newer ones are published.
-10. Reclaim retired-worker and unreferenced-snapshot memory.
+10. Reclaim retired-neuocyte and unreferenced-snapshot memory.
 11. Reject incompatible snapshot reuse after a model change.
 """
 
@@ -9,10 +9,10 @@ from __future__ import annotations
 
 import pytest
 
-from synthetic_mind.arbiter import Arbiter, ResourceSnapshot
-from synthetic_mind.config import ArbiterConfig
-from synthetic_mind.errors import CapabilityUnsupported, NotFound, ResourceExhausted
-from synthetic_mind.store.events import EventKind
+from amoeba.arbiter import Arbiter, ResourceSnapshot
+from amoeba.config import ArbiterConfig
+from amoeba.errors import CapabilityUnsupported, NotFound, ResourceExhausted
+from amoeba.store.events import EventKind
 
 
 def publish(mind, *, version_tokens, generation="gen_a", handle="sess_ego"):
@@ -45,7 +45,7 @@ def test_old_snapshot_survives_while_referenced(mind):
         mind.work.mark_snapshot_released(snapshot_id=s1, actor="supervisor",
                                          reason="premature")
 
-    # A running worker keeps its pinned snapshot; a replacement gets the newest.
+    # A running neuocyte keeps its pinned snapshot; a replacement gets the newest.
     assert mind.work.snapshot_tokens(s1) != mind.work.snapshot_tokens(s2)
     mind.work.release_snapshot_ref(ref_id=ref, actor="wk1")
     assert mind.work.get_snapshot(s1)["refcount"] == 0
@@ -104,8 +104,8 @@ def test_refcount_tracks_multiple_holders(mind):
 def test_retiring_a_worker_does_not_destroy_work_state(mind):
     work_id, _ = mind.work.admit(objective="keep me", work_class="user",
                                  origin_actor="ego")
-    item = mind.work.lease(worker_id="wk1")
-    mind.work.register_agent(agent_id="wk1", role="worker", work_id=work_id)
+    item = mind.work.lease(neuocyte_id="wk1")
+    mind.work.register_agent(agent_id="wk1", role="neuocyte", work_id=work_id)
     mind.work.retire_agent(agent_id="wk1", reason="killed", crashed=True)
     # Authoritative work state is intact; only the lease is reclaimed.
     assert mind.work.get_work(work_id)["objective"] == "keep me"
@@ -127,13 +127,13 @@ def test_snapshot_from_another_model_generation_is_not_reused(mind):
 
 
 def test_worker_refuses_cross_generation_snapshot(mind):
-    """The worker's guard: a mismatched generation raises rather than reinterpreting."""
-    from synthetic_mind.worker import Worker
+    """The neuocyte's guard: a mismatched generation raises rather than reinterpreting."""
+    from amoeba.neuocyte import Neuocyte
 
     s_old, _, _ = publish(mind, version_tokens=[1, 2, 3], generation="gen_a")
     snap = mind.work.get_snapshot(s_old)
 
-    class FakeWorker(Worker):
+    class FakeWorker(Neuocyte):
         def __init__(self) -> None:  # noqa: D107
             self.model_generation = "gen_b_different_weights"
 
@@ -155,21 +155,21 @@ def test_backend_restart_invalidates_handles_but_keeps_tokens(mind):
 
 
 def test_recovery_releases_refs_and_requeues_work(cfg):
-    from synthetic_mind.mind import Mind
+    from amoeba.mind import Mind
 
     m1 = Mind(cfg)
     s1, _, _ = publish(m1, version_tokens=[1, 2])
     m1.work.acquire_snapshot_ref(snapshot_id=s1, holder="wk1")
     work_id, _ = m1.work.admit(objective="unfinished", work_class="user",
                                origin_actor="ego")
-    m1.work.lease(worker_id="wk1")
-    m1.work.register_agent(agent_id="wk1", role="worker", work_id=work_id)
+    m1.work.lease(neuocyte_id="wk1")
+    m1.work.register_agent(agent_id="wk1", role="neuocyte", work_id=work_id)
     m1.close()
 
     m2 = Mind(cfg)
     report = m2.recover()
     summary = report["summary"]
-    assert summary["crashed_workers"] == 1
+    assert summary["crashed_neuocytes"] == 1
     assert summary["released_snapshot_refs"] == 1
     assert work_id in summary["requeued_work"]
     assert m2.work.get_work(work_id)["status"] == "queued"
@@ -186,34 +186,34 @@ def _snap(**kw) -> ResourceSnapshot:
 
 
 def test_maintenance_cannot_consume_the_user_reserve():
-    arb = Arbiter(ArbiterConfig(max_workers=2, user_reserved_slots=1,
+    arb = Arbiter(ArbiterConfig(max_neuocytes=2, user_reserved_slots=1,
                                 maintenance_reserved_slots=1))
-    s = _snap(active_workers=1, active_maintenance_workers=1,
+    s = _snap(active_neuocytes=1, active_maintenance_neuocytes=1,
               queued_user=1, queued_maintenance=5)
-    # One slot left and no user worker running: the user class gets it.
+    # One slot left and no user neuocyte running: the user class gets it.
     assert arb.next_class_to_serve(s) == "user"
 
 
 def test_user_cannot_consume_the_maintenance_reserve():
-    arb = Arbiter(ArbiterConfig(max_workers=2, user_reserved_slots=1,
+    arb = Arbiter(ArbiterConfig(max_neuocytes=2, user_reserved_slots=1,
                                 maintenance_reserved_slots=1))
-    s = _snap(active_workers=1, active_user_workers=1,
+    s = _snap(active_neuocytes=1, active_user_neuocytes=1,
               queued_user=5, queued_maintenance=1)
     assert arb.next_class_to_serve(s) == "maintenance"
 
 
 def test_no_dispatch_when_worker_cap_reached():
-    arb = Arbiter(ArbiterConfig(max_workers=2))
-    s = _snap(active_workers=2, queued_user=5, queued_maintenance=5)
+    arb = Arbiter(ArbiterConfig(max_neuocytes=2))
+    s = _snap(active_neuocytes=2, queued_user=5, queued_maintenance=5)
     assert arb.next_class_to_serve(s) is None
 
 
 def test_weighted_fair_share_converges_to_configured_weights():
-    arb = Arbiter(ArbiterConfig(max_workers=8, user_weight=0.7,
+    arb = Arbiter(ArbiterConfig(max_neuocytes=8, user_weight=0.7,
                                 maintenance_weight=0.3,
                                 user_reserved_slots=0, maintenance_reserved_slots=0))
     for _ in range(200):
-        s = _snap(active_workers=0, queued_user=10, queued_maintenance=10)
+        s = _snap(active_neuocytes=0, queued_user=10, queued_maintenance=10)
         arb.note_served(arb.next_class_to_serve(s))
     share = arb.fairness_state()["observed_user_share"]
     assert 0.6 <= share <= 0.8
@@ -242,7 +242,7 @@ def test_queue_cap_rejects_admission():
 
 
 def test_requested_budget_is_capped_not_honoured_blindly():
-    arb = Arbiter(ArbiterConfig(worker_token_budget=256, worker_wall_seconds=30))
+    arb = Arbiter(ArbiterConfig(neuocyte_token_budget=256, neuocyte_wall_seconds=30))
     d = arb.admit(work_class="user", snapshot=_snap(),
                   requested_budget_tokens=999999, requested_wall_seconds=99999)
     assert d.admitted

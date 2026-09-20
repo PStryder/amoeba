@@ -1,8 +1,8 @@
-# Synthetic Mind - DETERMINISTIC TEST BACKEND.
+# Amoeba - DETERMINISTIC TEST BACKEND.
 # Output from this configuration is a hash function, NOT model inference.
-state_dir   = "F:/hexylab/synthetic-mind-state/test"
-runtime_dir = "F:/hexylab/synthetic-mind-runtime/llama.cpp-b11057-win-cuda12.4"
-models_dir  = "F:/hexylab/synthetic-mind-models"
+state_dir   = "F:/hexylab/amoeba-state/test"
+runtime_dir = "F:/hexylab/amoeba-runtime/llama.cpp-b11057-win-cuda12.4"
+models_dir  = "F:/hexylab/amoeba-models"
 
 supervisor_port = 8721
 inference_port  = 8722
@@ -16,8 +16,8 @@ n_ctx     = 32768
 n_seq_max = 8
 
 [arbiter]
-max_workers            = 2
-worker_wall_seconds    = 30.0
-worker_token_budget    = 128
+max_neuocytes            = 2
+neuocyte_wall_seconds    = 30.0
+neuocyte_token_budget    = 128
 lease_seconds          = 10.0
 max_maintenance_per_hour = 50

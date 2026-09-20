@@ -54,7 +54,7 @@ class ToolSpec:
     description: str
     params: list[ToolParam]
     handler: Callable[..., Any]
-    allowed_roles: tuple[str, ...] = ("ego", "id", "worker")
+    allowed_roles: tuple[str, ...] = ("ego", "id", "neuocyte")
     timeout_seconds: float = 10.0
     mutates_state: bool = False
 
@@ -235,7 +235,7 @@ class ToolRegistry:
         elapsed = time.perf_counter() - t0
         if elapsed > spec.timeout_seconds:
             # The handler is synchronous and local; a genuine hang is handled by
-            # the worker wall-clock budget. This flags an over-budget call so it
+            # the neuocyte wall-clock budget. This flags an over-budget call so it
             # is visible in the receipt rather than silently accepted.
             return ToolCallOutcome(request.name, True, reason="executed_over_budget",
                                    arguments=args, result=result,
@@ -302,7 +302,7 @@ def build_default_registry(mind: Any) -> ToolRegistry:
             ToolParam("limit", "integer", "max events", default=20, minimum=1, maximum=100),
         ],
         handler=read_history,
-        allowed_roles=("id", "worker"),
+        allowed_roles=("id", "neuocyte"),
     ))
     reg.register(ToolSpec(
         name="get_conclusion",

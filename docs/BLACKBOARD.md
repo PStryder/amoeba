@@ -2,12 +2,12 @@
 
 A durable, receipted, queryable space where neuocytes talk to each other.
 
-**It is communication, not Mind State.** A post is something a worker *said*. A
+**It is communication, not Mind State.** A post is something a neuocyte *said*. A
 memory item is something the organism *believes*. Nothing crosses that line
 implicitly — promotion is a separate, receipted act by the Harness, and the
 post keeps its own identity afterwards.
 
-`test_board_posts_are_not_mind_state` asserts that two workers posting
+`test_board_posts_are_not_mind_state` asserts that two neuocytes posting
 contradictory findings produce **zero** beliefs.
 
 ---
@@ -58,15 +58,15 @@ constructs the collision deterministically and shows both behaviours.
 
 ## Making independence possible
 
-A worker only sees the board if its work item allows it:
+A neuocyte only sees the board if its work item allows it:
 
 ```
 admit_work(..., board_access="none" | "read" | "read_write")
 ```
 
-`none` produces a board-naive worker **by construction** — it is shown an
-explicit "you have deliberately not been shown what other workers found" block
-instead. That is what turns later agreement between two workers into evidence
+`none` produces a board-naive neuocyte **by construction** — it is shown an
+explicit "you have deliberately not been shown what other neuocytes found" block
+instead. That is what turns later agreement between two neuocytes into evidence
 rather than an echo, and it is what makes an independent-replication experiment
 possible at all.
 
@@ -96,7 +96,7 @@ marked `superseded`.
 `board_promote_to_memory`.
 
 `board_read(..., record=False)` exists for the Harness and audit paths, which
-must inspect the board without contaminating any worker's independence record.
+must inspect the board without contaminating any neuocyte's independence record.
 It is never used on behalf of a neuocyte.
 
 ### Promotion

@@ -1,4 +1,4 @@
-# Synthetic Mind
+# Amoeba
 
 A persistent local cognitive system exposed through MCP. Native Windows, native
 Python, one resident set of model weights on the GPU. No Docker, no WSL.
@@ -6,7 +6,7 @@ Python, one resident set of model weights on the GPU. No Docker, no WSL.
 Two long-lived halves — **Ego** (outward: conversation, investigation,
 synthesis) and **Id** (inward: homeostasis, introspection, audit,
 contradictions) — each with its own process and its own private inference
-context. Disposable workers fork from published snapshots of Ego's *actual*
+context. Disposable neuocytes fork from published snapshots of Ego's *actual*
 context and retire. A fixed supervisor owns lifecycle, admission control,
 scheduling, hard resource limits and the single durable writer. An external
 frontier model is a client and a cognitive peer, not part of the mind.
@@ -29,19 +29,20 @@ Read this before trusting anything below it.
 | Recovery: restart, lease expiry, fencing, requeue | **Implemented, tested** | `test_supervisor_restart_recovers_state` |
 | Maintained memory separate from raw history | **Implemented, tested** | `test_contradictory_history_does_not_become_belief` |
 | Leased work queue, at-least-once, idempotent commits | **Implemented, tested** | `test_duplicate_commit_is_idempotent` |
-| Ego/Id/worker/supervisor/inference as separate processes | **Implemented, tested** | `test_role_restarts_independently` |
+| Ego/Id/neuocyte/supervisor/inference as separate processes | **Implemented, tested** | `test_role_restarts_independently` |
 | MCP facade: 10 cognitive verbs, typed in/out schemas, stdio | **Implemented, tested** | `test_real_mcp_client_calls_both_halves` |
-| MCP resources / prompts / sampling / cancellation / streaming | **Not implemented** | tools-only surface — see [MCP contract](MCP_CONTRACT.md#what-is-not-implemented) |
+| MCP cancellation (explicit + on client abort) | **Implemented, tested** | `tests/test_cancellation.py` |
+| MCP resources / prompts / sampling / streaming | **Not implemented** | tools-only surface — see [MCP contract](MCP_CONTRACT.md#what-is-not-implemented) |
 | Id audits an Ego conclusion through the record | **Implemented, tested** | `test_id_audits_ego_conclusion_without_asking_ego` |
 | One real local model, one resident weight set | **Implemented, tested** | `test_single_resident_weight_set` |
 | Ego snapshot fork with **physically shared** prefix KV | **Implemented, measured** | `bench/prefix_sharing.py` → 2036/2048 cells vs 4736 if copied |
 | Reference-counted snapshot release and reclamation | **Implemented, tested** | `test_reclaim_only_unreferenced_and_superseded` |
 | Fork agrees with exact recomputation | **Implemented, measured with a caveat** | same top-1, KL < 0.007; **not** bit-identical — see [RUNTIME §3](RUNTIME.md#3-fork-vs-exact-recomputation) |
-| Cross-worker / Ego-worker cache isolation | **Implemented, tested** | `test_worker_tails_are_private` |
+| Cross-neuocyte / Ego-neuocyte cache isolation | **Implemented, tested** | `test_worker_tails_are_private` |
 | Tool-call schema + permission validation | **Implemented, tested** | `tests/test_tools.py` |
 | Cognitive blackboard: posts, threads, relations, receipts | **Implemented, tested** | `tests/test_blackboard.py` |
 | Independent replication vs socially propagated agreement | **Implemented, tested** | every read recorded; `board_corroboration` splits the two |
-| Board-naive workers (`board_access="none"`) | **Implemented, tested** | `test_a_naive_worker_posts_without_having_read_the_board` |
+| Board-naive neuocytes (`board_access="none"`) | **Implemented, tested** | `test_a_naive_worker_posts_without_having_read_the_board` |
 | Sandboxed compute (OS-enforced AppContainer) | **Implemented, tested** | 29 boundary tests; network + host FS blocked |
 | Artifact promotion by Harness decision | **Implemented, tested** | proposal -> re-hash -> receipt |
 | Context homeostasis: measure, retire, checkpoint, rebirth | **Implemented, tested** | `tests/test_homeostasis.py` |
@@ -68,10 +69,10 @@ saying so.
 Third-party runtime, weights, source and runtime data are separate trees:
 
 ```
-F:\hexylab\synthetic-mind-mcp\        application source (this repo)
-F:\hexylab\synthetic-mind-runtime\    llama.cpp b11057 win-cuda-12.4 + vendored llama.h
-F:\hexylab\synthetic-mind-models\     Qwen3-4B-Instruct-2507-Q5_K_M.gguf
-F:\hexylab\synthetic-mind-state\      SQLite WAL, content-addressed blobs, logs
+F:\hexylab\amoeba\        application source (this repo)
+F:\hexylab\amoeba-runtime\    llama.cpp b11057 win-cuda-12.4 + vendored llama.h
+F:\hexylab\amoeba-models\     Qwen3-4B-Instruct-2507-Q5_K_M.gguf
+F:\hexylab\amoeba-state\      SQLite WAL, content-addressed blobs, logs
 ```
 
 `F:\hexylab\pcdc` and `F:\hexylab\bitnet` are untouched.
@@ -81,7 +82,7 @@ F:\hexylab\synthetic-mind-state\      SQLite WAL, content-addressed blobs, logs
 ## Setup
 
 ```powershell
-Set-Location F:\hexylab\synthetic-mind-mcp
+Set-Location F:\hexylab\amoeba
 
 # 3.11 only; do not use the global or the cathedral environment
 C:\Python311\python.exe -m venv .venv
@@ -101,19 +102,19 @@ above; `doctor` tells you if either is missing.
 
 ```powershell
 # 1. Check what is actually present and working. Exits non-zero on a fatal gap.
-.\.venv\Scripts\python.exe -m synthetic_mind doctor --config config.toml
+.\.venv\Scripts\python.exe -m amoeba doctor --config config.toml
 
 # 2. Start the mind. This process owns everything and stays running.
-.\.venv\Scripts\python.exe -m synthetic_mind supervise --config config.toml
+.\.venv\Scripts\python.exe -m amoeba supervise --config config.toml
 
 # 3. From another shell: check on it.
-.\.venv\Scripts\python.exe -m synthetic_mind status --config config.toml
+.\.venv\Scripts\python.exe -m amoeba status --config config.toml
 
 # 4. A client starts a separate stdio facade that connects to the supervisor.
-.\.venv\Scripts\python.exe -m synthetic_mind mcp --config config.toml --transport stdio
+.\.venv\Scripts\python.exe -m amoeba mcp --config config.toml --transport stdio
 
 # 5. Stop cleanly.
-.\.venv\Scripts\python.exe -m synthetic_mind shutdown --config config.toml
+.\.venv\Scripts\python.exe -m amoeba shutdown --config config.toml
 ```
 
 Killing the facade in step 4 does not touch the mind.

@@ -1,4 +1,4 @@
-"""The MCP facade: cognitive verbs, not worker or cache controls.
+"""The MCP facade: cognitive verbs, not neuocyte or cache controls.
 
 This process is a thin, disposable stdio adapter. It holds no state and owns no
 part of the mind: it forwards to the long-lived supervisor over the loopback
@@ -10,7 +10,7 @@ Every response carries ``schema_version``, ``operation_id``, ``status``,
 operations return a durable handle immediately and are polled through
 ``ego_status``.
 
-Nothing here exposes worker topology, sequence ids, KV handles or snapshot
+Nothing here exposes neuocyte topology, sequence ids, KV handles or snapshot
 mechanics. Those are implementation, and a cognitive client has no business
 driving them.
 """
@@ -22,6 +22,7 @@ import functools
 import inspect
 import os
 import sys
+import uuid
 from collections.abc import Sequence
 from typing import Annotated, Any, Literal
 
@@ -34,7 +35,7 @@ from .rpc import RpcClient, RpcError, read_or_create_token
 
 SCHEMA_VERSION = "1.0.0"
 
-SERVER_INSTRUCTIONS = """Synthetic Mind: a persistent local cognitive system.
+SERVER_INSTRUCTIONS = """Amoeba: a persistent local cognitive system.
 
 Two halves are directly callable. Ego does outward cognition (conversation,
 investigation, recall). Id does inward homeostasis (introspection, health,
@@ -49,7 +50,7 @@ Three invariants worth knowing before you read results:
     are reached through `id_audit`.
   * `id_audit` resolves an Ego conclusion through the recorded evidence. It does
     not ask Ego to defend itself, so its verdict is independent of Ego's account.
-  * The blackboard is communication between workers, not belief. Agreement on it
+  * The blackboard is communication between neuocytes, not belief. Agreement on it
     only counts as corroboration when the agreeing parties had not read each
     other -- `board_corroboration` tells you which kind you are looking at. Your
     own reads are recorded too.
@@ -77,6 +78,41 @@ class Facade:
                 return self.client.call(method, **params)
             except Exception:  # noqa: BLE001
                 raise exc
+
+    async def call_cancellable(self, method: str, *, idempotency_key: str,
+                               **params: Any) -> Any:
+        """Run a long call so that MCP cancellation actually stops work.
+
+        The SDK cancels the task awaiting the tool, but a sync handler running
+        in a worker thread cannot be interrupted mid-call. So the call is
+        awaited here, and when that await is cancelled the facade tells the
+        supervisor to cancel the operation: queued work is dropped, a running
+        neuocyte is killed, and the in-flight generation is asked to stop
+        between tokens.
+
+        The operation is addressed by idempotency key, because a cancellation
+        can arrive before the operation id has come back to the client.
+        """
+        import anyio
+
+        try:
+            return await anyio.to_thread.run_sync(
+                lambda: self.call(method, idempotency_key=idempotency_key, **params))
+        except anyio.get_cancelled_exc_class():
+            # Shielded: the cancel itself must survive the cancellation that
+            # triggered it, or the work carries on unattended.
+            with anyio.CancelScope(shield=True):
+                try:
+                    await anyio.to_thread.run_sync(
+                        lambda: self.call("cancel_operation",
+                                          idempotency_key=idempotency_key,
+                                          reason="client cancelled the MCP call",
+                                          actor="mcp_client"))
+                    self.log.info("cancelled operation for key %s", idempotency_key)
+                except Exception:  # noqa: BLE001
+                    self.log.warning("could not cancel %s after client abort",
+                                     idempotency_key, exc_info=True)
+            raise
 
     def envelope(self, raw: Any, *, fallback_status: str = "completed") -> dict[str, Any]:
         """Normalise any supervisor reply into the versioned response shape."""
@@ -121,7 +157,7 @@ def build_server(cfg: Config):  # noqa: C901
     from mcp.server.fastmcp import FastMCP
 
     facade = Facade(cfg)
-    mcp = FastMCP(name="synthetic-mind", instructions=SERVER_INSTRUCTIONS)
+    mcp = FastMCP(name="amoeba", instructions=SERVER_INSTRUCTIONS)
 
     def guarded(fn):
         """Turn an unexpected exception into a well-formed error envelope.
@@ -132,13 +168,29 @@ def build_server(cfg: Config):  # noqa: C901
         fields named ``a`` and ``kw``, and every real call would be rejected by
         argument validation before it ever ran.
         """
-        @functools.wraps(fn)
-        def wrapper(*a: Any, **kw: Any) -> dict[str, Any]:
-            try:
-                return fn(*a, **kw)
-            except Exception as exc:  # noqa: BLE001
-                facade.log.exception("tool %s failed", fn.__name__)
-                return facade.error(exc)
+        if inspect.iscoroutinefunction(fn):
+            @functools.wraps(fn)
+            async def wrapper(*a: Any, **kw: Any) -> dict[str, Any]:
+                try:
+                    return await fn(*a, **kw)
+                except BaseException as exc:
+                    # A cancellation must propagate rather than be flattened
+                    # into an error envelope: the SDK needs to see the task
+                    # actually end, and the facade has already told the
+                    # supervisor to stop the work.
+                    if type(exc).__name__ == "CancelledError" or isinstance(
+                            exc, (KeyboardInterrupt, SystemExit)):
+                        raise
+                    facade.log.exception("tool %s failed", fn.__name__)
+                    return facade.error(exc)
+        else:
+            @functools.wraps(fn)
+            def wrapper(*a: Any, **kw: Any) -> dict[str, Any]:
+                try:
+                    return fn(*a, **kw)
+                except Exception as exc:  # noqa: BLE001
+                    facade.log.exception("tool %s failed", fn.__name__)
+                    return facade.error(exc)
         # `from __future__ import annotations` makes every annotation a
         # string; eval_str resolves them here so the schema builder does not
         # have to re-resolve names like Literal out of a wrapper's namespace.
@@ -149,7 +201,7 @@ def build_server(cfg: Config):  # noqa: C901
     # ---------------- Ego ----------------
     @mcp.tool(title="Ego: converse")
     @guarded
-    def ego_converse(
+    async def ego_converse(
         message: Annotated[str, Field(description="What to say to Ego.", max_length=8000)],
         conversation_id: Annotated[str | None, Field(
             description="Group turns into one conversation.")] = None,
@@ -163,10 +215,14 @@ def build_server(cfg: Config):  # noqa: C901
         Returns the answer, the memories it drew on, and the id of the
         conclusion recorded for it -- which is what `id_audit` can later
         examine.
+
+        Cancellable: aborting this call stops the generation between tokens
+        rather than letting it run to its budget.
         """
-        return facade.envelope(facade.call(
-            "ego_converse", message=message, conversation_id=conversation_id,
-            idempotency_key=idempotency_key, max_tokens=max_tokens,
+        key = idempotency_key or f"mcp-converse-{uuid.uuid4()}"
+        return facade.envelope(await facade.call_cancellable(
+            "ego_converse", idempotency_key=key, message=message,
+            conversation_id=conversation_id, max_tokens=max_tokens,
         ))
 
     @mcp.tool(title="Ego: investigate")
@@ -222,7 +278,7 @@ def build_server(cfg: Config):  # noqa: C901
     # ---------------- Id ----------------
     @mcp.tool(title="Id: introspect")
     @guarded
-    def id_introspect(
+    async def id_introspect(
         question: Annotated[str, Field(description="What to ask Id about this mind.",
                                        max_length=4000)],
         scope: Annotated[str, Field(max_length=200)] = "all",
@@ -233,8 +289,9 @@ def build_server(cfg: Config):  # noqa: C901
         The response separates what was measured from durable state from what
         Id inferred. Do not read the inferred part as evidence.
         """
-        return facade.envelope(facade.call("id_introspect", question=question,
-                                           scope=scope, idempotency_key=idempotency_key))
+        key = idempotency_key or f"mcp-introspect-{uuid.uuid4()}"
+        return facade.envelope(await facade.call_cancellable(
+            "id_introspect", idempotency_key=key, question=question, scope=scope))
 
     @mcp.tool(title="Id: health")
     @guarded
@@ -252,7 +309,7 @@ def build_server(cfg: Config):  # noqa: C901
 
     @mcp.tool(title="Id: audit")
     @guarded
-    def id_audit(
+    async def id_audit(
         conclusion_id: Annotated[str | None, Field(
             description="Conclusion to audit, e.g. from an ego_converse result.")] = None,
         operation_id: Annotated[str | None, Field(
@@ -266,9 +323,10 @@ def build_server(cfg: Config):  # noqa: C901
         evidence chain without asking Ego to defend itself. A contested verdict
         opens a recorded disagreement rather than overwriting Ego's claim.
         """
-        return facade.envelope(facade.call(
-            "id_audit", conclusion_id=conclusion_id, operation_id=operation_id,
-            focus=focus, idempotency_key=idempotency_key,
+        key = idempotency_key or f"mcp-audit-{uuid.uuid4()}"
+        return facade.envelope(await facade.call_cancellable(
+            "id_audit", idempotency_key=key, conclusion_id=conclusion_id,
+            operation_id=operation_id, focus=focus,
         ))
 
     @mcp.tool(title="Id: disagreements")
@@ -299,6 +357,30 @@ def build_server(cfg: Config):  # noqa: C901
         return facade.envelope(facade.call("id_maintenance", objective=objective,
                                            scope=scope, budget_tokens=budget_tokens))
 
+    @mcp.tool(title="Mind: cancel an operation")
+    @guarded
+    def mind_cancel(
+        operation_id: Annotated[str, Field(
+            description="Operation to stop, e.g. from an ego_investigate result.",
+            max_length=64)],
+        reason: Annotated[str, Field(max_length=500)] = "client cancelled",
+    ) -> dict[str, Any]:
+        """Stop an operation and everything downstream of it.
+
+        Queued work is cancelled so no neuocyte picks it up, a neuocyte already
+        running is killed, and an in-flight generation is asked to stop between
+        tokens. Durable state already committed is untouched: cancelling is not
+        undoing.
+
+        Cancelling an operation that has already finished is not an error. You
+        get `already_terminal: true` and its final status, because a client
+        that cancels just as the work lands deserves the truth rather than a
+        failure.
+        """
+        return facade.envelope(facade.call("cancel_operation",
+                                           operation_id=operation_id,
+                                           reason=reason, actor="mcp_client"))
+
     # ---------------- cognitive blackboard ----------------
     @mcp.tool(title="Board: read")
     @guarded
@@ -315,7 +397,7 @@ def build_server(cfg: Config):  # noqa: C901
         """Read the swarm's working discussion.
 
         This is communication between neuocytes, NOT the mind's beliefs. A post
-        is something a worker said; `ego_recall` is what the organism holds to
+        is something a neuocyte said; `ego_recall` is what the organism holds to
         be true.
 
         Reading is recorded against you. If you then post something that agrees
@@ -369,7 +451,7 @@ def build_server(cfg: Config):  # noqa: C901
     ) -> dict[str, Any]:
         """Separate independent replication from socially propagated agreement.
 
-        Several workers agreeing means very different things depending on
+        Several neuocytes agreeing means very different things depending on
         whether they had read each other. This splits the support into
         `independent_support` (separate routes to the same answer) and
         `socially_informed_support` (one observation restated), and lists any
@@ -396,8 +478,8 @@ def build_server(cfg: Config):  # noqa: C901
 
 
 def main(argv: Sequence[str] | None = None) -> int:
-    ap = argparse.ArgumentParser(prog="synthetic_mind.mcp_api")
-    ap.add_argument("--config", default=os.environ.get("SYNTHETIC_MIND_CONFIG"))
+    ap = argparse.ArgumentParser(prog="amoeba.mcp_api")
+    ap.add_argument("--config", default=os.environ.get("AMOEBA_CONFIG"))
     ap.add_argument("--transport", default="stdio", choices=["stdio"])
     args = ap.parse_args(list(argv) if argv is not None else None)
     cfg = load_config(args.config)

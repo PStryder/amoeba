@@ -1,4 +1,4 @@
-# Synthetic Mind — architecture, invariants and data model
+# Amoeba — architecture, invariants and data model
 
 Version 0.1.0 · schema_version `1.0.0` · Windows-native, no Docker, no WSL.
 
@@ -26,18 +26,18 @@ runtime behaviour this design rests on.
             |       |       |  spawns and owns every process below
    +--------v-+  +--v----+  +v-----------------+
    |   Ego    |  |  Id   |  | disposable       |
-   | process  |<>| proc  |  | workers (N)      |
+   | process  |<>| proc  |  | neuocytes (N)      |
    +--------+-+  +--+----+  +--+---------------+
             |       |          |   all inference goes through one service
         +---v-------v----------v---+
         |   Inference service       |  ONE resident weight set
         |   one llama_model         |  one llama_context, n_seq_max sequences
-        |   one unified KV pool     |  Ego = seq 0, Id = seq 1, workers 2..N
+        |   one unified KV pool     |  Ego = seq 0, Id = seq 1, neuocytes 2..N
         +---------------------------+
 ```
 
 Five long-lived processes (supervisor, inference, Ego, Id) plus short-lived
-workers and a short-lived MCP facade. Each is restartable independently.
+neuocytes and a short-lived MCP facade. Each is restartable independently.
 
 `Ego <-> Id` is a direct narrow RPC side channel for transient signals only.
 
@@ -77,7 +77,7 @@ report states this caveat explicitly.
 survives restart.
 → `test_acknowledged_mutation_survives_restart`
 
-### Work and workers
+### Work and neuocytes
 
 **I7. At-least-once with idempotent commits.** Replaying a `mutation_id`
 returns the original receipt and does not re-apply.
@@ -87,12 +87,12 @@ returns the original receipt and does not re-apply.
 superseded token is rejected, not committed.
 → `test_stale_worker_result_is_fenced`
 
-**I9. Worker death is always safe.** Killing every worker loses no state and no
+**I9. Neuocyte death is always safe.** Killing every neuocyte loses no state and no
 work; leases expire, tokens advance, items requeue.
 → `test_killing_all_workers_preserves_state_and_resumes_work`
 
 **I10. Retirement never destroys authoritative state.** A retired or crashed
-worker releases inference and snapshot resources only.
+neuocyte releases inference and snapshot resources only.
 → `test_retiring_a_worker_does_not_destroy_work_state`
 
 **I11. Stale findings are flagged, not silently trusted.** A result pinned to an
@@ -109,17 +109,17 @@ never published.
 → `test_maintenance_workers_get_no_ego_snapshot`
 
 **I13. Ego continues after publishing.** Publishing freezes nothing for Ego; it
-keeps appending past the published prefix. Workers see the frozen prefix only.
+keeps appending past the published prefix. Neuocytes see the frozen prefix only.
 → `test_ego_continues_independently_after_publishing`
 
-**I14. Worker tails are private.** A worker's continuation is invisible to Ego
-and to sibling workers. No live UKV updates reach a running worker; there is no
+**I14. Neuocyte tails are private.** A neuocyte's continuation is invisible to Ego
+and to sibling neuocytes. No live UKV updates reach a running neuocyte; there is no
 cache merging, no live prefix replacement, no shared writable KV.
 → `test_worker_tails_are_private`
 
-**I15. Pinned for life.** A worker stays on its snapshot and model generation
+**I15. Pinned for life.** A neuocyte stays on its snapshot and model generation
 until retirement. Replacements fork from the newest published snapshot.
-→ `worker.py::_execute_ego_derived`, `test_old_snapshot_survives_while_referenced`
+→ `neuocyte.py::_execute_ego_derived`, `test_old_snapshot_survives_while_referenced`
 
 **I16. Referenced storage is never recycled.** Reference-counted; the newest
 snapshot is always retained; releasing a referenced snapshot is refused.
@@ -174,6 +174,18 @@ down or saturated.
 any long-lived process.
 → `test_mcp_client_disconnect_does_not_kill_the_mind`
 
+**I27. Cancelling stops future work; it does not undo the past.** Cancellation
+drops queued work, kills a running neuocyte and asks the in-flight generation
+to stop between tokens. Durable state already committed stays committed, and
+cancelling an already-finished operation reports `already_terminal` rather than
+failing.
+→ `test_cancellation_does_not_undo_committed_state`,
+`test_cancel_is_idempotent_and_truthful_about_finished_work`
+
+**I28. Supervision must keep making passes.** A stalled supervision loop is the
+failure that hides every other one, so its pass counter is exposed in `health`.
+→ `test_supervision_keeps_making_passes`
+
 ---
 
 ## 3. Data model
@@ -205,11 +217,11 @@ a restart, a backend change or a model change.
 
 ---
 
-## 4. Worker lifecycle
+## 4. Neuocyte lifecycle
 
 1. The supervisor publishes (or reuses, if fresh) an Ego snapshot at an
    inference boundary — `ensure_snapshot`.
-2. The worker acquires a **reference** on that snapshot (refcount +1).
+2. The neuocyte acquires a **reference** on that snapshot (refcount +1).
 3. It instantiates a session from it:
    - `fork_prefix` when `kv_mode == "shared_prefix"` — a physically shared
      prefix, reported as `forked_shared_prefix`;
@@ -220,7 +232,7 @@ a restart, a backend change or a model change.
 5. It commits its finding with its fencing token and its pinned state version.
 6. It releases the reference, closes its session, and retires.
 
-Maintenance workers skip steps 1–3 entirely: they receive a narrow task plus
+Maintenance neuocytes skip steps 1–3 entirely: they receive a narrow task plus
 state references, never a snapshot of Id's private context.
 
 ---
@@ -244,7 +256,7 @@ the KV pool is shared, and attention is computed over its used extent, so a
 session that merely *exists* taxes every other decode. Measured: 63 idle
 sessions slow an unrelated probe session by 1.94x, recovering exactly on
 retirement ([BENCHMARKS §2](BENCHMARKS.md#2-resident-idle-sessions-tax-every-other-decode)).
-A worker that finishes but does not release its session slows the whole mind.
+A neuocyte that finishes but does not release its session slows the whole mind.
 
 ---
 
@@ -254,7 +266,7 @@ On supervisor start:
 
 1. Verify the hash chain and every committed content reference.
 2. Acquire the single-supervisor lock (stale-PID aware).
-3. Mark all `worker` agents crashed; mark `ego`/`id`/`inference` crashed so they
+3. Mark all `neuocyte` agents crashed; mark `ego`/`id`/`inference` crashed so they
    re-register with a new incarnation.
 4. Null every `backend_handle` and set those snapshots to `kv_mode=recomputed`.
 5. Release every outstanding snapshot reference; zero refcounts.
@@ -262,9 +274,28 @@ On supervisor start:
 7. Mark in-flight operations `interrupted` rather than reporting them complete.
 8. Emit `supervisor.recovery` and `run.started`.
 
-No step depends on a worker being alive.
+No step depends on a neuocyte being alive.
 
 Child processes are supervised by **reachability**, not only by process exit:
 on Windows the venv `python.exe` is a trampoline, so `Popen.pid` is not the pid
 of the interpreter that serves RPC, and a killed child can leave the trampoline
 behind with `poll()` still returning `None`.
+
+Three properties that took a real bug each to arrive at:
+
+- **Supervision runs on its own thread and starts before startup finishes.**
+  `start()` used to block up to 180 s per role waiting for its port, with
+  supervision beginning only afterwards — so a role that died inside that
+  window went unrestarted for three minutes while the supervisor sat blind.
+  Role readiness is now advisory logging; supervision brings up whatever is
+  not answering. → `test_a_role_that_dies_during_startup_is_still_restarted`
+- **Liveness probes and work calls use separate connection pools.** A probe
+  must fail fast (2 s, one attempt) or one dead child makes every `health`
+  call block on the patient reconnect window — including the supervision loop
+  trying to restart it. They must not share a pool either: a 2 s probe socket
+  reused for a minute-long call looks exactly like a dead child.
+  → `test_health_stays_fast_while_a_child_is_down`
+- **Termination actively obtains a connection to say `shutdown`.** Relying on
+  a cached work client meant that once health moved to the probe pool, no
+  shutdown was ever sent and every child had to be force-killed after a
+  timeout. → visible as a 3x slower test suite before the fix.

@@ -351,7 +351,7 @@ class ContextHomeostasis:
 
     def retire_session(self, *, session_id: str, reason: str,
                        operation_id: str | None = None) -> dict[str, Any]:
-        """Close one backend session. Safe for worker sessions at any time."""
+        """Close one backend session. Safe for neuocyte sessions at any time."""
         self._inference().call("close_session", session_id=session_id)
         self._emit(EventKind.SESSION_RETIRED,
                    {"session_id": session_id, "reason": reason},

@@ -6,12 +6,12 @@ from __future__ import annotations
 
 import pytest
 
-from synthetic_mind.errors import InvalidInput, NotFound
-from synthetic_mind.store.events import EventKind
+from amoeba.errors import InvalidInput, NotFound
+from amoeba.store.events import EventKind
 
 
 def post(mind, author, body, **kw):
-    kw.setdefault("author_kind", "worker")
+    kw.setdefault("author_kind", "neuocyte")
     kw.setdefault("post_type", "finding")
     return mind.board.post(author=author, body=body, **kw)[0]
 
@@ -21,14 +21,14 @@ def post(mind, author, body, **kw):
 # ---------------------------------------------------------------------------
 def test_post_carries_author_time_work_type_and_receipt(mind):
     pid, receipt = mind.board.post(
-        author="wk_1", author_kind="worker", post_type="finding",
+        author="wk_1", author_kind="neuocyte", post_type="finding",
         title="KV pool fills", body="Occupancy above 70% halves decode rate.",
         work_id="work_abc", confidence=0.8,
         evidence=[{"event_id": "ev_1", "note": "bench run"}],
     )
     assert receipt.outcome == "committed"
     p = mind.board.get_post(pid)
-    assert p["author"] == "wk_1" and p["author_kind"] == "worker"
+    assert p["author"] == "wk_1" and p["author_kind"] == "neuocyte"
     assert p["post_type"] == "finding" and p["work_id"] == "work_abc"
     assert p["confidence"] == 0.8 and p["created_at"] > 0
     assert p["evidence"][0]["event_id"] == "ev_1"
@@ -46,19 +46,19 @@ def test_posting_is_recorded_in_history(mind):
 
 def test_invalid_post_type_and_relation_rejected(mind):
     with pytest.raises(InvalidInput):
-        mind.board.post(author="a", author_kind="worker", post_type="gossip", body="x")
+        mind.board.post(author="a", author_kind="neuocyte", post_type="gossip", body="x")
     with pytest.raises(InvalidInput):
         mind.board.post(author="a", author_kind="alien", post_type="note", body="x")
     with pytest.raises(InvalidInput):
-        mind.board.post(author="a", author_kind="worker", post_type="note", body="  ")
+        mind.board.post(author="a", author_kind="neuocyte", post_type="note", body="  ")
     with pytest.raises(InvalidInput):
-        mind.board.post(author="a", author_kind="worker", post_type="note", body="x",
+        mind.board.post(author="a", author_kind="neuocyte", post_type="note", body="x",
                         confidence=5.0)
 
 
 def test_replies_and_relations_are_navigable(mind):
     a = post(mind, "wk_1", "the cache is the bottleneck")
-    b = mind.board.post(author="wk_2", author_kind="worker", post_type="challenge",
+    b = mind.board.post(author="wk_2", author_kind="neuocyte", post_type="challenge",
                         body="measured the opposite", thread_id=a,
                         relations=[{"to_post": a, "relation": "challenges"}])[0]
     pa, pb = mind.board.get_post(a), mind.board.get_post(b)
@@ -69,7 +69,7 @@ def test_replies_and_relations_are_navigable(mind):
 
 def test_supersede_marks_the_old_post_without_deleting_it(mind):
     a = post(mind, "wk_1", "first answer")
-    b = mind.board.post(author="wk_1", author_kind="worker", post_type="finding",
+    b = mind.board.post(author="wk_1", author_kind="neuocyte", post_type="finding",
                         body="corrected answer", supersedes=a)[0]
     assert mind.board.get_post(a)["status"] == "superseded"
     assert mind.board.get_post(a)["body"] == "first answer"   # still readable
@@ -186,14 +186,14 @@ def test_corroboration_separates_real_support_from_echo(mind):
 
     # wk_2 verifies without looking at the board: independent.
     indep = mind.board.post(
-        author="wk_2", author_kind="worker", post_type="finding",
+        author="wk_2", author_kind="neuocyte", post_type="finding",
         body="measured cell occupancy; shared", thread_id=claim,
         relations=[{"to_post": claim, "relation": "supports"}])[0]
 
     # wk_3 reads the board first, then agrees: an echo.
     mind.board.read(reader="wk_3", limit=10)
     echo = mind.board.post(
-        author="wk_3", author_kind="worker", post_type="note",
+        author="wk_3", author_kind="neuocyte", post_type="note",
         body="I concur with the above", thread_id=claim,
         relations=[{"to_post": claim, "relation": "supports"}])[0]
 
@@ -207,7 +207,7 @@ def test_corroboration_separates_real_support_from_echo(mind):
 
 def test_corroboration_counts_challenges_too(mind):
     claim = post(mind, "wk_1", "claim")
-    ch = mind.board.post(author="wk_2", author_kind="worker", post_type="challenge",
+    ch = mind.board.post(author="wk_2", author_kind="neuocyte", post_type="challenge",
                          body="no", relations=[{"to_post": claim,
                                                 "relation": "challenges"}])[0]
     assert mind.board.corroboration(claim)["challenges"] == [ch]
@@ -217,7 +217,7 @@ def test_corroboration_counts_challenges_too(mind):
 # Querying
 # ---------------------------------------------------------------------------
 def test_filter_by_type_and_query_and_since(mind):
-    q = mind.board.post(author="wk_1", author_kind="worker", post_type="question",
+    q = mind.board.post(author="wk_1", author_kind="neuocyte", post_type="question",
                         body="what limits concurrency?")[0]
     post(mind, "wk_1", "unrelated finding about caches")
     only_q = mind.board.read(reader="wk_9", post_types=["question"], record=False)

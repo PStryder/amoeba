@@ -116,7 +116,7 @@ Capacity is the evidence. `bench/prefix_sharing.py`:
 |---|---|
 | KV capacity | 2048 cells |
 | prefix | 900 tokens in Ego |
-| forks | 3 workers, each holding the same 900-token prefix |
+| forks | 3 neuocytes, each holding the same 900-token prefix |
 | tail tokens accommodated before exhaustion | **1136** |
 | cells occupied if shared | 900 + 1136 = **2036** (of 2048) |
 | cells that would be occupied if copied | 4 × 900 + 1136 = **4736** |
@@ -133,10 +133,10 @@ exactly what metadata-only sharing predicts.
 | context split | `n_ctx_per_seq = n_ctx / n_seq_max` — **not** a shared pool |
 | partial-prefix `seq_cp` | **aborts the process**: `GGML_ASSERT(is_full && "seq_cp() is only supported for full KV buffers")`, exit 127 |
 | full-sequence `seq_cp(-1,-1)` | succeeds, copies buffer data |
-| worker tail capacity after a 900-token copy into a 1024-cell stream | **120 tokens** (900 + 4 + 120 = 1024) |
+| neuocyte tail capacity after a 900-token copy into a 1024-cell stream | **120 tokens** (900 + 4 + 120 = 1024) |
 | **verdict** | **PHYSICALLY COPIED** |
 
-The worker consumed its own 900 cells. That is the difference between the two
+The neuocyte consumed its own 900 cells. That is the difference between the two
 modes, measured rather than asserted.
 
 The engine therefore **refuses** `fork_prefix` when `kv_unified=False` with
@@ -239,8 +239,8 @@ against an empty pool and **83.5 tok/s with 63 idle sessions resident** — a
 *exactly* (100.03%) once they retire. Roughly 1 tok/s lost per 1% of pool
 occupied.
 
-Two consequences. Worker retirement is a **throughput mechanism**, not
-hygiene: a worker that finishes without releasing its session slows the whole
+Two consequences. Neuocyte retirement is a **throughput mechanism**, not
+hygiene: a neuocyte that finishes without releasing its session slows the whole
 mind. And this explains the otherwise puzzling decline in *serial* aggregate
 throughput as session count rises (163 -> 133 tok/s, i.e. 6.13 -> 7.52
 ms/token), where per-sequence work is unchanged by construction.
@@ -250,7 +250,7 @@ ms/token), where per-sequence work is unchanged by construction.
 ## 5. Model quality
 
 Qwen3-4B-Instruct-2507 at Q5_K_M answers coherently and follows the
-three-line structured output format the workers and Id require. It was **not**
+three-line structured output format the neuocytes and Id require. It was **not**
 evaluated for whether a 4B model is good enough for genuine Ego synthesis or
 genuine Id audit — that remains an open question, and Id sharing the same model
 as Ego is a real independence concern (see [OPEN_QUESTIONS.md](OPEN_QUESTIONS.md)).

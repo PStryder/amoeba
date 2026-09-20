@@ -22,8 +22,8 @@ from pathlib import Path
 ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT / "src"))
 
-from synthetic_mind.backends.llama_engine import LlamaEngine  # noqa: E402
-from synthetic_mind.config import load_config  # noqa: E402
+from amoeba.backends.llama_engine import LlamaEngine  # noqa: E402
+from amoeba.config import load_config  # noqa: E402
 
 N_CTX = 32768
 N_SEQ_MAX = 64

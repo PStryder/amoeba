@@ -95,8 +95,8 @@ class Mind:
     def recover(self, *, actor: str = "supervisor") -> dict[str, Any]:
         """Bring durable state to a consistent, resumable point after a restart.
 
-        Nothing here depends on a disposable worker being alive. Anything a
-        worker held is released; anything it half-finished is requeued with a
+        Nothing here depends on a disposable neuocyte being alive. Anything a
+        neuocyte held is released; anything it half-finished is requeued with a
         fresh fencing token so its late result cannot commit.
         """
         report: dict[str, Any] = {"run_id": self.run_id, "started_at": time.time()}
@@ -109,10 +109,10 @@ class Mind:
             self.log.error("%d committed content references are unresolvable",
                            integrity["missing_content_count"])
 
-        # Workers never survive a supervisor restart.
-        stale_workers = [
+        # Neuocytes never survive a supervisor restart.
+        stale_neuocytes = [
             r["agent_id"] for r in self.db.conn.execute(
-                "SELECT agent_id FROM agents WHERE role = 'worker' AND status = 'alive'"
+                "SELECT agent_id FROM agents WHERE role = 'neuocyte' AND status = 'alive'"
             )
         ]
         # Long-lived roles are marked crashed; they re-register with a new
@@ -126,7 +126,7 @@ class Mind:
 
         def body(m: Mutation) -> dict[str, Any]:
             now = time.time()
-            for agent_id in stale_workers + stale_roles:
+            for agent_id in stale_neuocytes + stale_roles:
                 m.sql("UPDATE agents SET status = 'crashed', retired_at = ?,"
                       " detail = 'not alive after restart', session_handle = NULL"
                       " WHERE agent_id = ?", (now, agent_id))
@@ -167,7 +167,7 @@ class Mind:
                     " WHERE operation_id = ?", (now, row["operation_id"])
                 )
             summary = {
-                "crashed_workers": len(stale_workers),
+                "crashed_neuocytes": len(stale_neuocytes),
                 "crashed_roles": len(stale_roles),
                 "invalidated_backend_handles": invalidated,
                 "released_snapshot_refs": len(refs),

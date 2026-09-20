@@ -38,6 +38,8 @@ from .store.writer import Mutation
 SERVICE_NAME = "supervisor"
 CHILDREN = ("inference", "ego", "id")
 CHILD_GRACE_SECONDS = 8.0
+PROBE_TIMEOUT_SECONDS = 2.0
+"""A liveness probe must fail fast; see Supervisor.client."""
 """How long a child may be unreachable before it is treated as dead."""
 
 
@@ -117,8 +119,11 @@ class Supervisor:
         self.arbiter = Arbiter(cfg.arbiter)
         self.started_at = time.time()
         self.procs: dict[str, subprocess.Popen[bytes]] = {}
-        self.workers: dict[str, dict[str, Any]] = {}
+        self.neuocytes: dict[str, dict[str, Any]] = {}
         self.clients: dict[str, RpcClient] = {}
+        self._probes: dict[str, RpcClient] = {}
+        self._supervision_passes = 0
+        self._supervision_last = 0.0
         self._stop = threading.Event()
         self._sched_lock = threading.RLock()
         self._server: RpcServer | None = None
@@ -136,14 +141,14 @@ class Supervisor:
     def _spawn(self, name: str) -> subprocess.Popen[bytes]:
         env = dict(os.environ)
         if self.cfg.source_path:
-            env["SYNTHETIC_MIND_CONFIG"] = str(self.cfg.source_path)
+            env["AMOEBA_CONFIG"] = str(self.cfg.source_path)
         env["PYTHONPATH"] = os.pathsep.join(
             [str(Path(__file__).resolve().parents[1]), env.get("PYTHONPATH", "")]
         )
         if name == "inference":
-            cmd = [sys.executable, "-m", "synthetic_mind.inference_service"]
+            cmd = [sys.executable, "-m", "amoeba.inference_service"]
         elif name in ("ego", "id"):
-            cmd = [sys.executable, "-m", "synthetic_mind.roles", name]
+            cmd = [sys.executable, "-m", "amoeba.roles", name]
         else:
             raise InvalidInput("unknown child", name=name)
         if self.cfg.source_path:
@@ -163,16 +168,31 @@ class Supervisor:
         if proc is None or proc.poll() is not None:
             return
         # Cooperative first: the child returns its resources and deregisters.
+        # Actively obtain a connection rather than relying on a cached one --
+        # health checks use the probe pool, so the work pool is often empty,
+        # and skipping the shutdown here means every child has to be force
+        # killed after a timeout. That made teardown slow enough for
+        # consecutive stacks to overlap.
+        probe = self._probes.pop(name, None)
+        if probe is not None:
+            try:
+                probe.close()
+            except Exception:  # noqa: BLE001
+                pass
+        client = self.clients.pop(name, None)
         try:
-            client = self.clients.pop(name, None)
-            if client is not None:
-                try:
-                    client.call("shutdown")
-                except Exception:  # noqa: BLE001
-                    pass
-                client.close()
+            if client is None or not client.connected:
+                client = self.client(name, probe=True)
+                self._probes.pop(name, None)
+            client.call("shutdown")
         except Exception:  # noqa: BLE001
             pass
+        finally:
+            try:
+                if client is not None:
+                    client.close()
+            except Exception:  # noqa: BLE001
+                pass
         deadline = time.time() + timeout
         while time.time() < deadline and proc.poll() is None:
             time.sleep(0.1)
@@ -180,14 +200,31 @@ class Supervisor:
             self.log.warning("%s did not stop cooperatively; terminating tree", name)
             _kill_tree(proc.pid)
 
-    def client(self, name: str) -> RpcClient:
+    def client(self, name: str, *, probe: bool = False) -> RpcClient:
+        """Connection to a child.
+
+        ``probe=True`` is for liveness checks and must fail fast. The patient
+        path retries for ~20s, which is right when a caller genuinely needs a
+        restarting child -- but catastrophic for polling: health() touches all
+        three children, so one dead child would make every health call block
+        20s, including the supervision loop trying to restart it. A status
+        endpoint that takes 20s to say "it is down" is not responsive.
+        """
         port = {"inference": self.cfg.inference_port, "ego": self.cfg.ego_port,
                 "id": self.cfg.id_port}[name]
-        cl = self.clients.get(name)
+        # Probe and work connections are kept in SEPARATE pools. Sharing them
+        # would let a 2s probe socket be reused for a call that legitimately
+        # takes a minute, and the resulting timeout would look like the child
+        # had died.
+        pool = self._probes if probe else self.clients
+        cl = pool.get(name)
         if cl is None or not cl.connected:
-            cl = RpcClient(self.cfg.supervisor_host, port, self.token, name=f"sup->{name}")
-            cl.connect(retries=40, delay=0.5)
-            self.clients[name] = cl
+            cl = RpcClient(
+                self.cfg.supervisor_host, port, self.token,
+                timeout=PROBE_TIMEOUT_SECONDS if probe else 600.0,
+                name=f"sup->{name}{'/probe' if probe else ''}")
+            cl.connect(retries=1, delay=0.0) if probe else cl.connect(retries=40, delay=0.5)
+            pool[name] = cl
         return cl
 
     # ------------------------------------------------------------------
@@ -218,14 +255,18 @@ class Supervisor:
         self.log.info("supervisor listening on %s:%s",
                       self.cfg.supervisor_host, self.cfg.supervisor_port)
 
+        # The inference service is a hard dependency: the roles cannot register
+        # without it, so this one wait is worth blocking on.
         self._spawn("inference")
         if not wait_for_port(self.cfg.supervisor_host, self.cfg.inference_port, timeout=300):
             raise BackendUnavailable("inference service did not start")
         for role in ("ego", "id"):
             self._spawn(role)
-        for role, port in (("ego", self.cfg.ego_port), ("id", self.cfg.id_port)):
-            if not wait_for_port(self.cfg.supervisor_host, port, timeout=180):
-                self.log.error("%s did not start", role)
+        # Deliberately NOT blocking on role readiness here. Startup used to
+        # wait up to 180s per role, and supervision only began afterwards -- so
+        # a role that died inside that window was not restarted for three
+        # minutes, during which the supervisor was blind. Supervision starts
+        # first now and brings up whatever is not yet answering.
 
         self.cfg.ready_path.write_text(json.dumps({
             "pid": os.getpid(), "port": self.cfg.supervisor_port,
@@ -240,8 +281,8 @@ class Supervisor:
                 self._terminate(name)
             except Exception:  # noqa: BLE001
                 self.log.exception("failed stopping %s", name)
-        for wid in list(self.workers):
-            self._kill_worker(wid, reason="supervisor shutdown")
+        for wid in list(self.neuocytes):
+            self._kill_neuocyte(wid, reason="supervisor shutdown")
         if self.sandboxes is not None:
             killed = self.sandboxes.destroy_all()
             if killed:
@@ -263,7 +304,7 @@ class Supervisor:
     def resource_snapshot(self) -> ResourceSnapshot:
         assert self.mind is not None
         qs = self.mind.work.queue_stats()
-        active = [w for w in self.workers.values() if w["proc"].poll() is None]
+        active = [w for w in self.neuocytes.values() if w["proc"].poll() is None]
         inf_sessions, max_sessions, vram = 0, 0, 0
         try:
             health = self.client("inference").call("health")
@@ -273,9 +314,9 @@ class Supervisor:
         except Exception:  # noqa: BLE001
             pass
         return ResourceSnapshot(
-            active_workers=len(active),
-            active_user_workers=sum(1 for w in active if w["work_class"] == "user"),
-            active_maintenance_workers=sum(1 for w in active
+            active_neuocytes=len(active),
+            active_user_neuocytes=sum(1 for w in active if w["work_class"] == "user"),
+            active_maintenance_neuocytes=sum(1 for w in active
                                            if w["work_class"] == "maintenance"),
             queued_user=qs["by_class"].get("user:queued", 0),
             queued_maintenance=qs["by_class"].get("maintenance:queued", 0),
@@ -298,14 +339,14 @@ class Supervisor:
     def _scheduler_tick(self) -> None:
         assert self.mind is not None
         with self._sched_lock:
-            self._reap_workers()
+            self._reap_neuocytes()
             expired = self.mind.work.expire_leases()
             if expired:
                 self.log.info("expired leases requeued: %s", expired)
             snapshot = self.resource_snapshot()
             work_class = self.arbiter.next_class_to_serve(snapshot)
             if work_class is not None:
-                self._dispatch_worker(work_class)
+                self._dispatch_neuocyte(work_class)
             self._reclaim_snapshots()
             self._homeostasis_tick()
 
@@ -322,18 +363,18 @@ class Supervisor:
         except Exception:  # noqa: BLE001
             self.log.exception("homeostasis tick failed")
 
-    def _reap_workers(self) -> None:
-        for wid, info in list(self.workers.items()):
+    def _reap_neuocytes(self) -> None:
+        for wid, info in list(self.neuocytes.items()):
             proc = info["proc"]
             if proc.poll() is None:
                 if time.time() > info["hard_deadline"]:
-                    self._kill_worker(wid, reason="exceeded wall-clock budget")
+                    self._kill_neuocyte(wid, reason="exceeded wall-clock budget")
                 continue
-            self.workers.pop(wid, None)
+            self.neuocytes.pop(wid, None)
             if proc.returncode not in (0, None):
-                self.log.warning("worker %s exited rc=%s", wid, proc.returncode)
+                self.log.warning("neuocyte %s exited rc=%s", wid, proc.returncode)
 
-    def _dispatch_worker(self, work_class: str) -> None:
+    def _dispatch_neuocyte(self, work_class: str) -> None:
         assert self.mind is not None
         row = self.mind.db.conn.execute(
             "SELECT work_id FROM work_items WHERE status = 'queued' AND work_class = ?"
@@ -341,12 +382,12 @@ class Supervisor:
         ).fetchone()
         if row is None:
             return
-        worker_id = new_id("wk")
+        neuocyte_id = new_id("nc")
         env = dict(os.environ)
         env["PYTHONPATH"] = os.pathsep.join(
             [str(Path(__file__).resolve().parents[1]), env.get("PYTHONPATH", "")]
         )
-        cmd = [sys.executable, "-m", "synthetic_mind.worker", "--worker-id", worker_id,
+        cmd = [sys.executable, "-m", "amoeba.neuocyte", "--neuocyte-id", neuocyte_id,
                "--work-id", row["work_id"]]
         if self.cfg.source_path:
             cmd += ["--config", str(self.cfg.source_path)]
@@ -354,25 +395,25 @@ class Supervisor:
         proc = subprocess.Popen(cmd, env=env, creationflags=flags,
                                 stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
                                 cwd=str(Path(__file__).resolve().parents[2]))
-        self.workers[worker_id] = {
+        self.neuocytes[neuocyte_id] = {
             "proc": proc, "work_class": work_class, "work_id": row["work_id"],
             "started": time.time(),
-            "hard_deadline": time.time() + self.cfg.arbiter.worker_wall_seconds + 30,
+            "hard_deadline": time.time() + self.cfg.arbiter.neuocyte_wall_seconds + 30,
         }
         self.arbiter.note_served(work_class)
-        self.log.info("dispatched %s worker %s for %s", work_class, worker_id, row["work_id"])
+        self.log.info("dispatched %s neuocyte %s for %s", work_class, neuocyte_id, row["work_id"])
 
-    def _kill_worker(self, worker_id: str, *, reason: str) -> None:
-        info = self.workers.pop(worker_id, None)
+    def _kill_neuocyte(self, neuocyte_id: str, *, reason: str) -> None:
+        info = self.neuocytes.pop(neuocyte_id, None)
         if info is None:
             return
         _kill_tree(info["proc"].pid)
         assert self.mind is not None
         try:
-            self.mind.work.retire_agent(agent_id=worker_id, reason=reason, crashed=True)
+            self.mind.work.retire_agent(agent_id=neuocyte_id, reason=reason, crashed=True)
         except MindError:
-            self.log.debug("retire of %s failed", worker_id, exc_info=True)
-        self.log.warning("killed worker %s: %s", worker_id, reason)
+            self.log.debug("retire of %s failed", neuocyte_id, exc_info=True)
+        self.log.warning("killed neuocyte %s: %s", neuocyte_id, reason)
 
     def _reclaim_snapshots(self) -> None:
         """Release unreferenced old snapshots; never the newest, never one with
@@ -411,16 +452,64 @@ class Supervisor:
                 signal.signal(s, _sig)
             except (ValueError, OSError):
                 pass
+        threading.Thread(target=self.supervision_loop, daemon=True,
+                         name="supervision").start()
+        self._await_roles()
         try:
-            next_check = time.time() + CHILD_GRACE_SECONDS
             while not self._stop.is_set():
                 self._stop.wait(0.5)
-                if time.time() >= next_check:
-                    next_check = time.time() + 2.0
-                    self._supervise_children()
         finally:
             self.stop()
         return 0
+
+    def _await_roles(self, timeout: float = 60.0) -> None:
+        """Note when the roles come up. Advisory only.
+
+        Supervision is already running by the time this is called, so a role
+        that is slow or dead gets restarted regardless of what this observes.
+        It exists to put readiness in the log, not to gate anything.
+        """
+        deadline = time.time() + timeout
+        pending = {"ego": self.cfg.ego_port, "id": self.cfg.id_port}
+        while pending and time.time() < deadline and not self._stop.is_set():
+            for role, port in list(pending.items()):
+                if wait_for_port(self.cfg.supervisor_host, port, timeout=0.5):
+                    self.log.info("%s is listening", role)
+                    pending.pop(role)
+            if pending:
+                self._stop.wait(0.5)
+        for role in pending:
+            self.log.warning("%s not listening yet; supervision will restart it "
+                             "if it stays down", role)
+
+    def supervision_loop(self) -> None:
+        """Watch the children on a dedicated thread.
+
+        This used to run inline in the main loop. A single probe that blocked
+        longer than expected then stalled supervision entirely, and a child
+        that died during that window was never restarted -- the failure mode
+        looked like "the supervisor ignored it", which is much worse than a
+        slow restart. On its own thread, a stall costs one pass rather than the
+        whole mechanism, and the pass counter makes a stall visible.
+        """
+        # A short settle before the first pass: children need a moment to bind
+        # their ports, and restarting one that is merely still starting would
+        # be worse than waiting.
+        self._stop.wait(3.0)
+        passes = 0
+        while not self._stop.is_set():
+            started = time.time()
+            try:
+                self._supervise_children()
+            except Exception:  # noqa: BLE001
+                self.log.exception("supervision pass failed")
+            passes += 1
+            self._supervision_passes = passes
+            self._supervision_last = time.time()
+            elapsed = time.time() - started
+            if elapsed > CHILD_GRACE_SECONDS:
+                self.log.warning("supervision pass took %.1fs", elapsed)
+            self._stop.wait(max(0.5, 2.0 - elapsed))
 
     def _supervise_children(self) -> None:
         """Restart a child that has exited OR become unreachable.
@@ -452,12 +541,35 @@ class Supervisor:
             self._restart_child(name, reason)
 
     def _child_reachable(self, name: str) -> bool:
-        try:
-            self.client(name).call("health")
-            return True
-        except Exception:  # noqa: BLE001
-            self.clients.pop(name, None)
+        """Is this child answering right now?
+
+        Runs on a throwaway thread with a hard join deadline. A probe socket
+        can wedge in ways a socket timeout does not cover (a peer that accepts
+        and never replies, for instance), and a supervision pass must not be
+        hostage to that.
+        """
+        result: list[bool] = []
+
+        def probe() -> None:
+            try:
+                self.client(name, probe=True).call("health")
+                result.append(True)
+            except Exception:  # noqa: BLE001
+                result.append(False)
+
+        t = threading.Thread(target=probe, daemon=True, name=f"probe-{name}")
+        t.start()
+        t.join(timeout=PROBE_TIMEOUT_SECONDS * 2)
+        if not result:
+            # Still stuck: treat as unreachable and drop the connection so the
+            # next pass starts a fresh one.
+            self._probes.pop(name, None)
+            self.log.warning("%s health probe did not return within %.1fs",
+                             name, PROBE_TIMEOUT_SECONDS * 2)
             return False
+        if not result[0]:
+            self._probes.pop(name, None)
+        return result[0]
 
     def _restart_child(self, name: str, reason: str) -> None:
         assert self.mind is not None
@@ -479,6 +591,7 @@ class Supervisor:
             )
             self.log.warning("invalidated %d backend handles", n)
         self.clients.pop(name, None)
+        self._probes.pop(name, None)
         self.procs.pop(name, None)
         self._spawn(name)
 
@@ -512,8 +625,8 @@ def _kill_tree(pid: int) -> None:
 
 
 def main(argv: Sequence[str] | None = None) -> int:
-    ap = argparse.ArgumentParser(prog="synthetic_mind.supervisor")
-    ap.add_argument("--config", default=os.environ.get("SYNTHETIC_MIND_CONFIG"))
+    ap = argparse.ArgumentParser(prog="amoeba.supervisor")
+    ap.add_argument("--config", default=os.environ.get("AMOEBA_CONFIG"))
     args = ap.parse_args(list(argv) if argv is not None else None)
     cfg = load_config(args.config)
     setup_logging(cfg, "supervisor")

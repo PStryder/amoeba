@@ -1,24 +1,24 @@
-"""Disposable, Ego-derived workers.
+"""Disposable, Ego-derived neuocytes.
 
 Lifecycle, in the order the design requires:
 
 1. The supervisor publishes (or reuses) a consistent Ego snapshot taken at an
    inference boundary.
-2. The worker takes a reference on that snapshot so the published storage
+2. The neuocyte takes a reference on that snapshot so the published storage
    cannot be reclaimed while it is reading from it.
 3. It instantiates a session from the snapshot -- by forking the physically
    shared prefix when the backend supports it, otherwise by recomputing the
    exact recorded token prefix.
 4. It appends its own private instruction tail and lets that continuation
-   evolve. The tail is private: the source Ego session and sibling workers
+   evolve. The tail is private: the source Ego session and sibling neuocytes
    never see it.
 5. It stays pinned to that snapshot and model generation for its whole life.
-   It never reads a newer snapshot; a replacement worker is forked from the
+   It never reads a newer snapshot; a replacement neuocyte is forked from the
    newer one instead.
 6. It commits findings as evidence/proposals through a durable receipt, with
    its fencing token, and retires.
 
-Killing a worker is always safe: its lease expires, the fencing token advances,
+Killing a neuocyte is always safe: its lease expires, the fencing token advances,
 and its late result can no longer commit.
 """
 
@@ -38,7 +38,7 @@ from .logging_setup import get_logger, setup_logging
 from .rpc import RpcClient, read_or_create_token
 from .tools import parse_tool_calls, strip_tool_calls
 
-WORKER_INSTRUCTION = """You are a bounded worker forked from the mind's Ego context.
+WORKER_INSTRUCTION = """You are a bounded neuocyte forked from the mind's Ego context.
 You inherited the context above. Do one narrow task and stop.
 
 Task: {objective}
@@ -54,12 +54,12 @@ What other neuocytes have already posted about this:
 """
 
 NO_BOARD_BLOCK = """
-You have deliberately NOT been shown what other workers found. Answer from the
-context and the task alone, so that agreement with another worker means
+You have deliberately NOT been shown what other neuocytes found. Answer from the
+context and the task alone, so that agreement with another neuocyte means
 something.
 """
 
-MAINTENANCE_INSTRUCTION = """You are a bounded maintenance worker for a synthetic mind.
+MAINTENANCE_INSTRUCTION = """You are a bounded maintenance neuocyte for an amoeba.
 You were NOT given Ego's private context: you get a narrow task and references to
 durable state. Do the task and stop.
 
@@ -74,16 +74,16 @@ CONFIDENCE: <a number between 0 and 1>
 EVIDENCE: <which state references support it, or "none">"""
 
 
-class Worker:
-    def __init__(self, cfg: Config, *, worker_id: str) -> None:
+class Neuocyte:
+    def __init__(self, cfg: Config, *, neuocyte_id: str) -> None:
         self.cfg = cfg
-        self.worker_id = worker_id
-        self.log = get_logger("worker")
+        self.neuocyte_id = neuocyte_id
+        self.log = get_logger("neuocyte")
         self.token = read_or_create_token(cfg.token_path)
         self.sup = RpcClient(cfg.supervisor_host, cfg.supervisor_port, self.token,
-                             name=f"{worker_id}->supervisor")
+                             name=f"{neuocyte_id}->supervisor")
         self.inf = RpcClient(cfg.supervisor_host, cfg.inference_port, self.token,
-                             name=f"{worker_id}->inference")
+                             name=f"{neuocyte_id}->inference")
         self.session_id: str | None = None
         self.ref_id: str | None = None
         self.snapshot_id: str | None = None
@@ -97,28 +97,28 @@ class Worker:
         caps = self.inf.call("capabilities")
         self.model_generation = caps.get("model_generation", "")
 
-        item = self.sup.call("lease_work", worker_id=self.worker_id, work_id=work_id)
+        item = self.sup.call("lease_work", neuocyte_id=self.neuocyte_id, work_id=work_id)
         if not item:
-            self.log.info("%s: nothing to lease", self.worker_id)
+            self.log.info("%s: nothing to lease", self.neuocyte_id)
             return 0
         work_id = item["work_id"]
         fencing_token = item["fencing_token"]
         self.pinned_state_version = item.get("pinned_state_ver")
-        deadline = item.get("deadline") or (time.time() + self.cfg.arbiter.worker_wall_seconds)
-        budget = item.get("budget_tokens") or self.cfg.arbiter.worker_token_budget
+        deadline = item.get("deadline") or (time.time() + self.cfg.arbiter.neuocyte_wall_seconds)
+        budget = item.get("budget_tokens") or self.cfg.arbiter.neuocyte_token_budget
 
-        self.sup.call("register_agent", agent_id=self.worker_id, role="worker",
+        self.sup.call("register_agent", agent_id=self.neuocyte_id, role="neuocyte",
                       pid=os.getpid(), work_id=work_id,
                       model_generation=self.model_generation)
         try:
             result = self._execute(item, caps=caps, budget=budget, deadline=deadline)
-            self.sup.call("complete_work", work_id=work_id, worker_id=self.worker_id,
+            self.sup.call("complete_work", work_id=work_id, neuocyte_id=self.neuocyte_id,
                           fencing_token=fencing_token, result=result,
                           pinned_state_ver=self.pinned_state_version)
-            self.log.info("%s completed %s", self.worker_id, work_id)
+            self.log.info("%s completed %s", self.neuocyte_id, work_id)
             return 0
         except Fenced as exc:
-            self.log.warning("%s fenced on %s: %s", self.worker_id, work_id, exc.message)
+            self.log.warning("%s fenced on %s: %s", self.neuocyte_id, work_id, exc.message)
             return 0
         except MindError as exc:
             self._fail(work_id, fencing_token, exc.message)
@@ -132,7 +132,7 @@ class Worker:
 
     def _fail(self, work_id: str, fencing_token: int, message: str) -> None:
         try:
-            self.sup.call("fail_work", work_id=work_id, worker_id=self.worker_id,
+            self.sup.call("fail_work", work_id=work_id, neuocyte_id=self.neuocyte_id,
                           fencing_token=fencing_token, failure=message[:2000])
         except Exception:  # noqa: BLE001
             self.log.exception("could not report failure for %s", work_id)
@@ -149,7 +149,7 @@ class Worker:
     # -- user-directed work: forked from an Ego snapshot -----------------
     def _execute_ego_derived(self, item: dict[str, Any], *, caps: dict[str, Any],
                              budget: int, deadline: float) -> dict[str, Any]:
-        snapshot = self.sup.call("acquire_snapshot", holder=self.worker_id,
+        snapshot = self.sup.call("acquire_snapshot", holder=self.neuocyte_id,
                                  snapshot_id=item.get("snapshot_id"))
         self.snapshot_id = snapshot["snapshot_id"]
         self.ref_id = snapshot["ref_id"]
@@ -158,7 +158,7 @@ class Worker:
             # Cached tensors from another weight/tokenizer/positional
             # configuration are never reinterpreted.
             self.sup.call("release_snapshot_ref", ref_id=self.ref_id,
-                          actor=self.worker_id)
+                          actor=self.neuocyte_id)
             self.ref_id = None
             raise CapabilityUnsupported(
                 "snapshot belongs to a different model generation; refusing reuse",
@@ -200,23 +200,23 @@ class Worker:
                               for r in parse_tool_calls(out["text"])],
             "completion_tokens": out["completion_tokens"],
             "is_simulated": out.get("is_simulated", False),
-            "worker_id": self.worker_id,
+            "neuocyte_id": self.neuocyte_id,
         }
 
     def _board_context(self, item: dict[str, Any]) -> tuple[str, list[str]]:
-        """Show the worker the board only if its work item permits it.
+        """Show the neuocyte the board only if its work item permits it.
 
         A work item admitted with ``board_access="none"`` produces a
-        board-naive worker on purpose. That is what makes later agreement
-        between two workers evidence of independent replication rather than one
-        of them having read the other. Reading is recorded against this worker
+        board-naive neuocyte on purpose. That is what makes later agreement
+        between two neuocytes evidence of independent replication rather than one
+        of them having read the other. Reading is recorded against this neuocyte
         the moment it happens.
         """
         access = item.get("board_access", "read_write")
         if access == "none":
             return NO_BOARD_BLOCK, []
         try:
-            res = self.sup.call("board_read", reader=self.worker_id,
+            res = self.sup.call("board_read", reader=self.neuocyte_id,
                                 work_id=item["work_id"], limit=6,
                                 post_types=["finding", "hypothesis", "challenge"])
         except Exception:  # noqa: BLE001
@@ -238,7 +238,7 @@ class Worker:
             return None
         try:
             res = self.sup.call(
-                "board_post", author=self.worker_id, author_kind="worker",
+                "board_post", author=self.neuocyte_id, author_kind="neuocyte",
                 post_type="finding", body=parsed["finding"],
                 title=item["objective"][:120], work_id=item["work_id"],
                 confidence=parsed["confidence"],
@@ -264,7 +264,7 @@ class Worker:
             try:
                 sess = self.inf.call(
                     "fork_prefix", src_session_id=handle,
-                    prefix_len=snapshot["token_count"], role="worker",
+                    prefix_len=snapshot["token_count"], role="neuocyte",
                     snapshot_id=snapshot["snapshot_id"],
                 )
                 self.session_id = sess["session_id"]
@@ -274,7 +274,7 @@ class Worker:
             except Exception as exc:  # noqa: BLE001
                 self.log.warning("fork failed (%s); falling back to recomputation", exc)
 
-        sess = self.inf.call("open_session", role="worker")
+        sess = self.inf.call("open_session", role="neuocyte")
         self.session_id = sess["session_id"]
         tokens = self.sup.call("snapshot_tokens", snapshot_id=snapshot["snapshot_id"])
         t0 = time.perf_counter()
@@ -293,10 +293,10 @@ class Worker:
     # -- maintenance work: narrow task, no Ego snapshot -------------------
     def _execute_maintenance(self, item: dict[str, Any], *, budget: int,
                              deadline: float) -> dict[str, Any]:
-        """Id maintenance workers get references to state, never a snapshot of
+        """Id maintenance neuocytes get references to state, never a snapshot of
         Id's private context."""
         state = self.sup.call("maintenance_context", objective=item["objective"])
-        sess = self.inf.call("open_session", role="worker")
+        sess = self.inf.call("open_session", role="neuocyte")
         self.session_id = sess["session_id"]
         prompt = MAINTENANCE_INSTRUCTION.format(
             objective=item["objective"],
@@ -326,7 +326,7 @@ class Worker:
             "raw_text": out["text"],
             "completion_tokens": out["completion_tokens"],
             "is_simulated": out.get("is_simulated", False),
-            "worker_id": self.worker_id,
+            "neuocyte_id": self.neuocyte_id,
         }
 
     # ------------------------------------------------------------------
@@ -342,11 +342,11 @@ class Worker:
         try:
             if self.ref_id:
                 self.sup.call("release_snapshot_ref", ref_id=self.ref_id,
-                              actor=self.worker_id)
+                              actor=self.neuocyte_id)
         except Exception:  # noqa: BLE001
             self.log.debug("snapshot ref release failed", exc_info=True)
         try:
-            self.sup.call("retire_agent", agent_id=self.worker_id, reason="task complete")
+            self.sup.call("retire_agent", agent_id=self.neuocyte_id, reason="task complete")
         except Exception:  # noqa: BLE001
             pass
         self.sup.close()
@@ -369,20 +369,20 @@ def _parse_finding(text: str) -> dict[str, Any]:
         elif upper.startswith("EVIDENCE:"):
             evidence = line.split(":", 1)[1].strip()
     if not finding:
-        finding = clean.strip()[:400] or "(worker produced no parsable finding)"
+        finding = clean.strip()[:400] or "(neuocyte produced no parsable finding)"
     return {"finding": finding, "confidence": confidence, "evidence": evidence}
 
 
 def main(argv: Sequence[str] | None = None) -> int:
-    ap = argparse.ArgumentParser(prog="synthetic_mind.worker")
-    ap.add_argument("--config", default=os.environ.get("SYNTHETIC_MIND_CONFIG"))
-    ap.add_argument("--worker-id", default=None)
+    ap = argparse.ArgumentParser(prog="amoeba.neuocyte")
+    ap.add_argument("--config", default=os.environ.get("AMOEBA_CONFIG"))
+    ap.add_argument("--neuocyte-id", default=None)
     ap.add_argument("--work-id", default=None)
     args = ap.parse_args(list(argv) if argv is not None else None)
     cfg = load_config(args.config)
-    setup_logging(cfg, "worker")
-    worker_id = args.worker_id or new_id("wk")
-    return Worker(cfg, worker_id=worker_id).run(work_id=args.work_id)
+    setup_logging(cfg, "neuocyte")
+    neuocyte_id = args.neuocyte_id or new_id("nc")
+    return Neuocyte(cfg, neuocyte_id=neuocyte_id).run(work_id=args.work_id)
 
 
 if __name__ == "__main__":

@@ -123,5 +123,5 @@ auto_rejuvenate = true
 
 - **Compaction.** Nothing merges or rewrites context; `trim` only drops a span.
 - **Summarisation.** Refused by design, as above.
-- **Worker-session rejuvenation.** Neuocytes are mortal by design — the answer
-  for a worker with a stale context is retirement, not repair.
+- **Neuocyte-session rejuvenation.** Neuocytes are mortal by design — the answer
+  for a neuocyte with a stale context is retirement, not repair.

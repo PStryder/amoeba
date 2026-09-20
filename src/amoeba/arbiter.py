@@ -7,7 +7,7 @@ limit. Every admission decision is recorded.
 Scheduling balances two classes of work -- user-directed and Id-generated
 maintenance -- with two guarantees layered on top of the weights:
 
-* **No starvation.** Each class holds a reserved number of worker slots that
+* **No starvation.** Each class holds a reserved number of neuocyte slots that
   the other class can never consume.
 * **Bounded maintenance.** Maintenance work carries a recursion depth and is
   rate-limited per hour, so a maintenance job that spawns maintenance jobs
@@ -41,9 +41,9 @@ class AdmissionDecision:
 
 @dataclass(slots=True)
 class ResourceSnapshot:
-    active_workers: int = 0
-    active_user_workers: int = 0
-    active_maintenance_workers: int = 0
+    active_neuocytes: int = 0
+    active_user_neuocytes: int = 0
+    active_maintenance_neuocytes: int = 0
     queued_user: int = 0
     queued_maintenance: int = 0
     outstanding_work: int = 0
@@ -100,9 +100,9 @@ class Arbiter:
             cfg.maintenance_reserved_slots if work_class == "user"
             else cfg.user_reserved_slots
         )
-        usable = max(0, cfg.max_workers - reserved_for_other)
-        mine = (snapshot.active_user_workers if work_class == "user"
-                else snapshot.active_maintenance_workers)
+        usable = max(0, cfg.max_neuocytes - reserved_for_other)
+        mine = (snapshot.active_user_neuocytes if work_class == "user"
+                else snapshot.active_maintenance_neuocytes)
         # Admission puts work in the queue; slot pressure is advisory here and
         # enforced again at dispatch. Refuse only when this class is already
         # holding its whole usable share AND the queue for it is backing up.
@@ -115,9 +115,9 @@ class Arbiter:
             )
 
         budget = min(
-            requested_budget_tokens or cfg.worker_token_budget, cfg.worker_token_budget
+            requested_budget_tokens or cfg.neuocyte_token_budget, cfg.neuocyte_token_budget
         )
-        wall = min(requested_wall_seconds or cfg.worker_wall_seconds, cfg.worker_wall_seconds)
+        wall = min(requested_wall_seconds or cfg.neuocyte_wall_seconds, cfg.neuocyte_wall_seconds)
         return AdmissionDecision(
             True, "admitted", work_class,
             granted_budget_tokens=budget,
@@ -130,13 +130,13 @@ class Arbiter:
     # dispatch
     # ------------------------------------------------------------------
     def next_class_to_serve(self, snapshot: ResourceSnapshot) -> WorkClass | None:
-        """Pick which class gets the next free worker slot.
+        """Pick which class gets the next free neuocyte slot.
 
         Weighted fair with reserved slots and an age override so a starved
         class eventually wins regardless of weight.
         """
         cfg = self.cfg
-        if snapshot.active_workers >= cfg.max_workers:
+        if snapshot.active_neuocytes >= cfg.max_neuocytes:
             return None
         have_user = snapshot.queued_user > 0
         have_maint = snapshot.queued_maintenance > 0
@@ -158,9 +158,9 @@ class Arbiter:
 
         # Reserved-slot guarantee: if a class holds none of its reserved slots
         # while work is waiting, serve it now.
-        if snapshot.active_maintenance_workers < cfg.maintenance_reserved_slots:
+        if snapshot.active_maintenance_neuocytes < cfg.maintenance_reserved_slots:
             return "maintenance"
-        if snapshot.active_user_workers < cfg.user_reserved_slots:
+        if snapshot.active_user_neuocytes < cfg.user_reserved_slots:
             return "user"
 
         total_w = cfg.user_weight + cfg.maintenance_weight
@@ -175,11 +175,11 @@ class Arbiter:
         cfg = self.cfg
         reserved_for_other = (cfg.maintenance_reserved_slots if work_class == "user"
                               else cfg.user_reserved_slots)
-        other_active = (snapshot.active_maintenance_workers if work_class == "user"
-                        else snapshot.active_user_workers)
+        other_active = (snapshot.active_maintenance_neuocytes if work_class == "user"
+                        else snapshot.active_user_neuocytes)
         # Slots the other class still has a claim to.
         other_reserve_outstanding = max(0, reserved_for_other - other_active)
-        available = cfg.max_workers - snapshot.active_workers - other_reserve_outstanding
+        available = cfg.max_neuocytes - snapshot.active_neuocytes - other_reserve_outstanding
         return available > 0
 
     def note_served(self, work_class: str) -> None:
@@ -207,7 +207,7 @@ class Arbiter:
                 prompt_tokens=prompt_tokens, max_prompt_tokens=cfg.max_prompt_tokens,
             )
         capped = min(max_tokens or cfg.max_completion_tokens, cfg.max_completion_tokens)
-        wall_cap = time.time() + cfg.worker_wall_seconds
+        wall_cap = time.time() + cfg.neuocyte_wall_seconds
         return {
             "max_tokens": capped,
             "deadline": min(deadline, wall_cap) if deadline else wall_cap,

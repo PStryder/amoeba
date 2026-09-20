@@ -7,7 +7,7 @@ the *logical* serialized size of a sequence and is identical for a shared and a
 copied prefix.
 
 The decisive measurement is capacity. Build a prefix of P tokens, fork it to W
-workers, then keep appending tokens until the cache refuses a slot. Count how
+neuocytes, then keep appending tokens until the cache refuses a slot. Count how
 many cells the context actually accommodated:
 
 * physically shared -> occupancy is  P + (private tails)
@@ -30,11 +30,11 @@ from pathlib import Path
 ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT / "src"))
 
-from synthetic_mind.backends.llama_engine import LlamaEngine  # noqa: E402
-from synthetic_mind.errors import BackendUnavailable, ResourceExhausted  # noqa: E402
+from amoeba.backends.llama_engine import LlamaEngine  # noqa: E402
+from amoeba.errors import BackendUnavailable, ResourceExhausted  # noqa: E402
 
-RUNTIME = r"F:\hexylab\synthetic-mind-runtime\llama.cpp-b11057-win-cuda12.4"
-MODEL = r"F:\hexylab\synthetic-mind-models\Qwen3-4B-Instruct-2507-Q5_K_M.gguf"
+RUNTIME = r"F:\hexylab\amoeba-runtime\llama.cpp-b11057-win-cuda12.4"
+MODEL = r"F:\hexylab\amoeba-models\Qwen3-4B-Instruct-2507-Q5_K_M.gguf"
 
 N_CTX = 2048
 N_SEQ_MAX = 4
@@ -57,10 +57,10 @@ def probe(kv_unified: bool) -> dict:
         "n_ctx_per_seq": report["n_ctx_per_seq"],
         "vram_consumed_by_load": report["vram_consumed_by_load"],
         "prefix_len": PREFIX,
-        "workers": WORKERS,
+        "neuocytes": WORKERS,
     }
     try:
-        filler = eng.tokenize("The synthetic mind records evidence before it forms beliefs. ",
+        filler = eng.tokenize("The amoeba records evidence before it forms beliefs. ",
                               add_special=False)
         prefix_tokens = (filler * (PREFIX // len(filler) + 2))[:PREFIX]
 
@@ -76,7 +76,7 @@ def probe(kv_unified: bool) -> dict:
         for i in range(WORKERS):
             try:
                 forks.append(eng.fork_prefix(src_session_id=ego.session_id,
-                                             prefix_len=PREFIX, role="worker"))
+                                             prefix_len=PREFIX, role="neuocyte"))
             except Exception as exc:  # noqa: BLE001
                 fork_errors.append(repr(exc))
         out["fork_seconds_total"] = time.perf_counter() - t0

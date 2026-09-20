@@ -76,6 +76,9 @@ class SessionState:
     created_at: float = 0.0
     last_used: float = 0.0
     tokens_generated: int = 0
+    # Set from another thread to stop an in-flight generation. Checked between
+    # tokens, so cancellation lands within roughly one decode step.
+    cancel_requested: bool = False
     # Private copy of the logits row produced by this session's last decode.
     # llama_get_logits_ith() reads a buffer belonging to the CONTEXT, not to a
     # sequence: after any other session decodes, index -1 refers to that other
@@ -434,7 +437,7 @@ class LlamaEngine:
         Dropping the sequence from every cell it owns is always the right
         thing, including for a fork: reference counting lives in each cell's
         sequence bitset, so a cell is only reclaimed once its last owner lets
-        go. A worker retiring therefore frees exactly its private tail and
+        go. A neuocyte retiring therefore frees exactly its private tail and
         leaves a shared prefix intact for Ego and its siblings.
 
         ``keep_prefix`` is accepted for call-site clarity and has no effect for
@@ -456,6 +459,28 @@ class LlamaEngine:
         if sess is None:
             raise InvalidInput("unknown inference session", session_id=session_id)
         return sess
+
+    def request_cancel(self, session_id: str) -> bool:
+        """Ask an in-flight generation to stop. Safe from another thread.
+
+        Deliberately does NOT take the engine lock: the whole point is to be
+        callable while ``generate`` is holding it. Setting one attribute is
+        atomic under the GIL, and the generation loop reads it between tokens.
+
+        Granularity is one token (~6 ms), which is fine for a decode loop.
+        A long *prefill* is not interruptible this way -- that would need
+        llama.cpp's abort_callback on the compute path, which is not wired.
+        """
+        sess = self._sessions.get(session_id)
+        if sess is None:
+            return False
+        sess.cancel_requested = True
+        return True
+
+    def clear_cancel(self, session_id: str) -> None:
+        sess = self._sessions.get(session_id)
+        if sess is not None:
+            sess.cancel_requested = False
 
     def active_sessions(self) -> list[dict[str, Any]]:
         return [
@@ -721,6 +746,7 @@ class LlamaEngine:
         self._require()
         with self._lock:
             sess = self.get_session(session_id)
+            sess.cancel_requested = False
             rng = random.Random(seed)
             t0 = time.perf_counter()
             ttft = 0.0
@@ -731,6 +757,9 @@ class LlamaEngine:
             first_top: list[tuple[int, float]] = []
 
             for step in range(max_tokens):
+                if sess.cancel_requested:
+                    finish = "cancelled"
+                    break
                 logits = self._session_logits(sess)
                 if step == 0:
                     order = np.argsort(-logits)[:5]
@@ -807,6 +836,10 @@ class LlamaEngine:
                 })
             step = 0
             while any(not a["done"] for a in active) and step < max_tokens:
+                for a in active:
+                    if not a["done"] and a["sess"].cancel_requested:
+                        a["finish"] = "cancelled"
+                        a["done"] = True
                 pending = [a for a in active if not a["done"]]
                 sampled: list[tuple[dict[str, Any], int]] = []
                 for a in pending:

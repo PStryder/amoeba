@@ -1,12 +1,12 @@
 # MCP contract v1
 
-`schema_version: "1.0.0"` · transport: local stdio · server name `synthetic-mind`
+`schema_version: "1.0.0"` · transport: local stdio · server name `amoeba`
 
-The facade exposes **cognitive verbs**. It exposes no worker topology, no
+The facade exposes **cognitive verbs**. It exposes no neuocyte topology, no
 sequence ids, no KV handles and no snapshot controls. A client is a cognitive
 peer, not an operator of the machinery.
 
-A test asserts that no tool name contains `worker`, `snapshot`, `kv`, `fork`,
+A test asserts that no tool name contains `neuocyte`, `snapshot`, `kv`, `fork`,
 `lease` or `session`.
 
 ---
@@ -73,6 +73,10 @@ the arbiter actually accepted — which may be smaller than requested. Poll with
 | `id_disagreements` | `scope`, `limit` | competing claims with evidence on both sides |
 | `id_maintenance` | `objective`, `scope?`, `budget_tokens?` | accepted operation, or the arbiter's reason for refusing |
 | `mind_provenance` | `operation_id` | full event chain, receipts, conclusions, `hash_chain_ok`, `unresolved_content[]` |
+| `mind_cancel` | `operation_id`, `reason?` | what was stopped: cancelled work, killed neuocytes, generations halted |
+| `board_read` | `query?`, `post_types?`, `since_seq?`, `limit` | the swarm's discussion; **your reads are recorded** |
+| `board_post` | `body`, `post_type`, `replies_to?`, `relation?` | contribute as a peer; changes no belief |
+| `board_corroboration` | `post_id` | independent replication vs socially propagated agreement |
 
 ---
 
@@ -116,7 +120,7 @@ protocol `2025-11-25`:
 | Prompts | **not implemented** (0 served) | |
 | Progress notifications | **not implemented** | deliberate: the brief specifies durable handles polled via `ego_status`, not streamed progress |
 | Streaming / partial results | **not implemented** | `ego_converse` blocks for the whole completion (~2.4 s for 384 tokens at ~160 tok/s) |
-| Request cancellation (`notifications/cancelled`) | **not implemented** | the supervisor *has* `cancel_work` internally; it is simply not wired to MCP cancellation, so a client cannot abort a long `ego_investigate` |
+| Request cancellation (`notifications/cancelled`) | **implemented** | `mind_cancel`, plus automatic cancellation when a client aborts an in-flight call |
 | Sampling (server asks the client's model) | **not implemented** | see below — this is the most interesting gap |
 | Elicitation | **not implemented** | |
 | Logging notifications / `setLevel` | **not implemented** | diagnostics go to `state/logs/*.log` |
@@ -128,7 +132,7 @@ protocol `2025-11-25`:
 ### Three of these matter more than the rest
 
 **Cancellation** is the most defensible omission to close. The machinery exists
-(`cancel_work`, cooperative worker shutdown, wall-clock budgets); only the
+(`cancel_work`, cooperative neuocyte shutdown, wall-clock budgets); only the
 protocol wiring is missing. Today a client that walks away from a long
 investigation leaves it to run to its budget.
 
@@ -157,6 +161,37 @@ empty list — worse behaviour, not better. An empty list is the honest answer t
 
 ---
 
+## Cancellation
+
+Two routes, because a client can either change its mind or simply vanish.
+
+**Explicit.** `mind_cancel(operation_id)` stops an operation and everything
+downstream: queued work is cancelled so no neuocyte picks it up, a neuocyte
+already running is killed, and the in-flight generation is asked to stop.
+
+**Automatic.** `ego_converse`, `id_introspect` and `id_audit` are async and
+cancellable. If the client aborts the call or disconnects, the facade catches
+the cancellation and — under a shielded scope, so the cleanup survives the
+cancellation that triggered it — tells the supervisor to cancel the operation.
+The operation is addressed by idempotency key, because a cancellation can
+arrive before the operation id has reached the client.
+
+Three properties worth knowing:
+
+- **Granularity is one decode step (~6 ms).** The generation loop checks a flag
+  between tokens. A long *prefill* is not interruptible this way; that would
+  need llama.cpp's `abort_callback` on the compute path, which is not wired.
+- **Cancelling is not undoing.** Durable state already committed stays
+  committed. Cancellation stops future work, it does not roll back the past.
+- **Cancelling a finished operation is not an error.** You get
+  `already_terminal: true` and its final status, because a client that cancels
+  just as the work lands deserves the truth rather than a failure.
+
+Cancellation is receipted like any other consequential act, and emits
+`operation.cancelled` plus a `generation.cancelled` per stopped session.
+
+---
+
 ## Why the facade is disposable
 
 The mind lives in the supervisor. The facade holds no state and forwards over a
@@ -177,11 +212,11 @@ Localhost is not a remote deployment.
 ```jsonc
 {
   "mcpServers": {
-    "synthetic-mind": {
-      "command": "F:\\hexylab\\synthetic-mind-mcp\\.venv\\Scripts\\python.exe",
-      "args": ["-m", "synthetic_mind", "mcp",
-               "--config", "F:\\hexylab\\synthetic-mind-mcp\\config.toml"],
-      "cwd": "F:\\hexylab\\synthetic-mind-mcp"
+    "amoeba": {
+      "command": "F:\\hexylab\\amoeba\\.venv\\Scripts\\python.exe",
+      "args": ["-m", "amoeba", "mcp",
+               "--config", "F:\\hexylab\\amoeba\\config.toml"],
+      "cwd": "F:\\hexylab\\amoeba"
     }
   }
 }

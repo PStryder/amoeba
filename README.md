@@ -15,7 +15,7 @@ Amoeba turns that relationship around.
 
 The durable thing is the accumulated **state, history, knowledge, goals, artifacts, commitments, provenance, and organization** of the system. Model processes operate on that persistent substrate, contribute useful work to it, and can then disappear.
 
-Kill every worker.
+Kill every neuocyte.
 
 Start new ones.
 
@@ -29,7 +29,7 @@ Because this is the simple organism.
 
 Amoeba is intended to begin as a relatively primitive persistent cognitive architecture and become more capable through better models, better tools, accumulated knowledge, improved internal organization, and eventually mechanisms for proposing and evaluating improvements to itself.
 
-The disposable cognitive workers inside an Amoeba are called **neuocytes**.
+The disposable cognitive neuocytes inside an Amoeba are called **neuocytes**.
 
 An Amoeba may eventually be only one organism in a larger cognitive ecology.
 
@@ -85,7 +85,7 @@ The state they produce is not.
 
 # Neuocytes
 
-A **neuocyte** is an independent cognitive worker.
+A **neuocyte** is an independent cognitive neuocyte.
 
 Neuocytes may share the same underlying model weights while maintaining independent working contexts.
 
@@ -104,7 +104,7 @@ They can:
 
 Neuocytes are deliberately mortal.
 
-A worker accumulating too much context may become stale, biased by its own history, or simply inefficient. Rather than requiring a single agent to maintain indefinite continuity, Amoeba externalizes useful cognition into persistent state and replaces the worker.
+A neuocyte accumulating too much context may become stale, biased by its own history, or simply inefficient. Rather than requiring a single agent to maintain indefinite continuity, Amoeba externalizes useful cognition into persistent state and replaces the neuocyte.
 
 A neuocyte's death should therefore be boring.
 
@@ -149,7 +149,7 @@ Id may monitor things such as:
 - pathological consensus
 - memory fragmentation
 - queue starvation
-- worker utilization
+- neuocyte utilization
 - context utilization
 
 Id can create internal maintenance work even when no user is asking the system a question.
@@ -166,7 +166,7 @@ Neither owns reality.
 
 The authoritative continuity of an Amoeba does not live inside any single model context.
 
-Persistent state records the things the organism needs to continue functioning across worker replacement, process restarts, and eventually model upgrades.
+Persistent state records the things the organism needs to continue functioning across neuocyte replacement, process restarts, and eventually model upgrades.
 
 This may include:
 
@@ -252,7 +252,7 @@ Shared cognitive prefix
 
 Each neuocyte begins from a common cognitive foundation and then develops an independent private context.
 
-Where supported by the inference backend, Amoeba can exploit physical KV-cache prefix sharing rather than reproducing identical context for every worker.
+Where supported by the inference backend, Amoeba can exploit physical KV-cache prefix sharing rather than reproducing identical context for every neuocyte.
 
 This distinction matters.
 
@@ -403,7 +403,7 @@ A.Ego -> Harness -> B.Ego
 not:
 
 ```text
-A.worker -> B.database
+A.neuocyte -> B.database
 ```
 
 This preserves organism boundaries while allowing cognitive specialization.
@@ -596,7 +596,7 @@ The current implementation is focused on establishing the boring but essential m
 - durable state
 - append-only event history
 - receipts and provenance
-- worker lifecycle
+- neuocyte lifecycle
 - work scheduling and leasing
 - Ego and Id separation
 - inference backend abstraction
@@ -625,10 +625,10 @@ The architecture deliberately attempts to establish these invariants before addi
 | [MCP contract](docs/MCP_CONTRACT.md) | the cognitive verbs, and what of MCP is *not* implemented |
 | [Open questions](docs/OPEN_QUESTIONS.md) | unresolved design questions and known failure modes |
 
-A note on naming: this README calls the disposable workers **neuocytes**. The
-code currently calls them `worker` throughout (`src/synthetic_mind/worker.py`,
-the `work_items` table, `max_workers`). Same thing; the code has not been
-renamed yet -- nor has the Python package, which is still `synthetic_mind`.
+The code uses this vocabulary throughout: the Python package is `amoeba`, the
+disposable cognitive workers are `neuocyte` (`src/amoeba/neuocyte.py`,
+`max_neuocytes`, `role="neuocyte"`). `work_id` / `work_items` / `workspace`
+refer to *work*, not to neuocytes, and are deliberately unchanged.
 
 Two results worth pulling forward, because they constrain the design:
 
@@ -655,7 +655,7 @@ Two results worth pulling forward, because they constrain the design:
   Every read is recorded and every post snapshots what its author had already
   seen, so `board_corroboration` can split support into independent replication
   and socially propagated echo. Work can be admitted `board_access="none"` to
-  produce a board-naive worker by construction. See
+  produce a board-naive neuocyte by construction. See
   [BLACKBOARD](docs/BLACKBOARD.md).
 
 Genuinely overlapping independent inference execution — item 3 in the

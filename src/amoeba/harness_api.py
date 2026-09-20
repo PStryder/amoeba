@@ -4,7 +4,7 @@ Three rules hold across everything in this file:
 
 1. **A neuocyte proposes; the Harness disposes.** Promotion of a board post
    into memory, promotion of a sandbox artifact into the durable workspace, and
-   rejuvenation of a context are all acts of the Harness. The verbs a worker
+   rejuvenation of a context are all acts of the Harness. The verbs a neuocyte
    can reach create *proposals*.
 2. **Every consequential act returns a receipt.** Refusals are recorded too --
    a refused request is a fact about how the mind governed itself.
@@ -110,7 +110,7 @@ def build(sup: "Supervisor") -> dict[str, Any]:  # noqa: C901
                                 confidence: float | None = None,
                                 actor: str = "supervisor",
                                 operation_id: str | None = None) -> dict[str, Any]:
-        """Turn something a worker *said* into something the organism *believes*.
+        """Turn something a neuocyte *said* into something the organism *believes*.
 
         Deliberately an explicit Harness act with its own receipt. The post is
         not consumed: it keeps its identity on the board, and the new memory
@@ -210,7 +210,7 @@ def build(sup: "Supervisor") -> dict[str, Any]:  # noqa: C901
 
     def sandbox_run(*, sandbox_id: str, code: str | None = None,
                     script: str | None = None, argv: Sequence[str] = (),
-                    timeout: float | None = None, actor: str = "worker",
+                    timeout: float | None = None, actor: str = "neuocyte",
                     operation_id: str | None = None) -> dict[str, Any]:
         mgr = _sandbox_manager()
         t0 = time.perf_counter()

@@ -3,7 +3,7 @@
 Two layers live here:
 
 * **State operations** -- the only write path into durable state, used by Ego,
-  Id and workers. Every mutation returns a receipt.
+  Id and neuocytes. Every mutation returns a receipt.
 * **Cognitive verbs** -- ``ego_converse``, ``id_audit`` and friends. These
   proxy to the long-lived role processes and then commit the result. Because
   they run here rather than in the caller, an MCP client hanging up mid-call
@@ -46,7 +46,9 @@ def build(sup: "Supervisor") -> dict[str, Any]:
                 "running": bool(proc and proc.poll() is None),
             }
             try:
-                entry["reported"] = sup.client(name).call("health")
+                # probe=True: a down child must not make this call block for
+                # the patient reconnect window.
+                entry["reported"] = sup.client(name, probe=True).call("health")
             except Exception as exc:  # noqa: BLE001
                 entry["reported"] = None
                 entry["error"] = repr(exc)
@@ -61,9 +63,9 @@ def build(sup: "Supervisor") -> dict[str, Any]:
             "state_version": mind.state_version(),
             "children": children,
             "resources": {
-                "active_workers": snap.active_workers,
-                "active_user_workers": snap.active_user_workers,
-                "active_maintenance_workers": snap.active_maintenance_workers,
+                "active_neuocytes": snap.active_neuocytes,
+                "active_user_neuocytes": snap.active_user_neuocytes,
+                "active_maintenance_neuocytes": snap.active_maintenance_neuocytes,
                 "queued_user": snap.queued_user,
                 "queued_maintenance": snap.queued_maintenance,
                 "outstanding_work": snap.outstanding_work,
@@ -73,7 +75,7 @@ def build(sup: "Supervisor") -> dict[str, Any]:
                 "vram_free_bytes": snap.vram_free_bytes,
             },
             "limits": {
-                "max_workers": sup.cfg.arbiter.max_workers,
+                "max_neuocytes": sup.cfg.arbiter.max_neuocytes,
                 "max_outstanding_work": sup.cfg.arbiter.max_outstanding_work,
                 "max_prompt_tokens": sup.cfg.arbiter.max_prompt_tokens,
                 "max_completion_tokens": sup.cfg.arbiter.max_completion_tokens,
@@ -81,7 +83,31 @@ def build(sup: "Supervisor") -> dict[str, Any]:
                 "max_maintenance_per_hour": sup.cfg.arbiter.max_maintenance_per_hour,
             },
             "fairness": sup.arbiter.fairness_state(),
+            "supervision": {
+                "passes": sup._supervision_passes,
+                "seconds_since_last_pass": (time.time() - sup._supervision_last
+                                            if sup._supervision_last else None),
+            },
         }
+
+    def debug_threads() -> dict[str, Any]:
+        """Stack of every live thread in the supervisor.
+
+        A diagnostic for exactly the situation it was written for: a loop that
+        stops making progress and gives no clue why. Cheap, read-only, and far
+        better than inferring a deadlock from the outside.
+        """
+        import sys as _sys
+        import threading as _th
+        import traceback as _tb
+
+        names = {t.ident: t.name for t in _th.enumerate()}
+        out = {}
+        for ident, frame in _sys._current_frames().items():
+            out[names.get(ident, str(ident))] = [
+                f"{fn}:{ln} {func}" for fn, ln, func, _ in
+                _tb.extract_stack(frame)[-6:]]
+        return {"threads": out, "count": len(out)}
 
     def capabilities() -> dict[str, Any]:
         try:
@@ -250,10 +276,10 @@ def build(sup: "Supervisor") -> dict[str, Any]:
         return dossier
 
     def maintenance_context(*, objective: str) -> dict[str, Any]:
-        """Narrow state references for a maintenance worker.
+        """Narrow state references for a maintenance neuocyte.
 
         Deliberately NOT a snapshot of Id's private context: maintenance
-        workers get task instructions plus references, nothing more.
+        neuocytes get task instructions plus references, nothing more.
         """
         qs = mind.work.queue_stats()
         recent = read_events(mind.db.conn, kinds=[EventKind.WORK_FAILED,
@@ -273,7 +299,7 @@ def build(sup: "Supervisor") -> dict[str, Any]:
             ],
             "references": [f"event:{e.event_id}" for e in recent]
                           + [f"memory:{m['memory_id']}" for m in low_conf],
-            "note": "maintenance workers receive state references, never Ego or Id KV",
+            "note": "maintenance neuocytes receive state references, never Ego or Id KV",
         }
 
     # ------------------------------------------------------------------
@@ -316,28 +342,28 @@ def build(sup: "Supervisor") -> dict[str, Any]:
                 "deadline": decision.granted_deadline,
                 "state_version": receipt.result_version}
 
-    def lease_work(*, worker_id: str, work_id: str | None = None,
+    def lease_work(*, neuocyte_id: str, work_id: str | None = None,
                    work_class: str | None = None) -> dict[str, Any] | None:
-        # A dispatched worker asks for the item it was dispatched for. Passing
+        # A dispatched neuocyte asks for the item it was dispatched for. Passing
         # work_id down means it either claims that item or claims nothing --
-        # it never takes an item another worker is about to be dispatched for.
-        return mind.work.lease(worker_id=worker_id, work_class=work_class,
+        # it never takes an item another neuocyte is about to be dispatched for.
+        return mind.work.lease(neuocyte_id=neuocyte_id, work_class=work_class,
                                work_id=work_id,
                                lease_seconds=sup.cfg.arbiter.lease_seconds)
 
-    def complete_work(*, work_id: str, worker_id: str, fencing_token: int,
+    def complete_work(*, work_id: str, neuocyte_id: str, fencing_token: int,
                       result: Any, pinned_state_ver: int | None = None
                       ) -> dict[str, Any]:
         receipt = mind.work.complete(
-            work_id=work_id, worker_id=worker_id, fencing_token=fencing_token,
+            work_id=work_id, neuocyte_id=neuocyte_id, fencing_token=fencing_token,
             result=result, pinned_state_ver=pinned_state_ver,
         )
         return {"receipt_id": receipt.receipt_id, "state_version": receipt.result_version,
                 "replayed": receipt.replayed}
 
-    def fail_work(*, work_id: str, worker_id: str, fencing_token: int, failure: str,
+    def fail_work(*, work_id: str, neuocyte_id: str, fencing_token: int, failure: str,
                   requeue: bool = True) -> dict[str, Any]:
-        receipt = mind.work.fail(work_id=work_id, worker_id=worker_id,
+        receipt = mind.work.fail(work_id=work_id, neuocyte_id=neuocyte_id,
                                  fencing_token=fencing_token, failure=failure,
                                  requeue=requeue)
         return {"receipt_id": receipt.receipt_id}
@@ -353,13 +379,13 @@ def build(sup: "Supervisor") -> dict[str, Any]:
     def queue_stats() -> dict[str, Any]:
         return mind.work.queue_stats()
 
-    def kill_all_workers(*, reason: str = "operator request") -> dict[str, Any]:
-        """Kill every disposable worker. State and unfinished work must survive."""
-        killed = list(sup.workers)
+    def kill_all_neuocytes(*, reason: str = "operator request") -> dict[str, Any]:
+        """Kill every disposable neuocyte. State and unfinished work must survive."""
+        killed = list(sup.neuocytes)
         for wid in killed:
-            sup._kill_worker(wid, reason=reason)
+            sup._kill_neuocyte(wid, reason=reason)
         expired = mind.work.expire_leases()
-        return {"killed_workers": killed, "requeued_work": expired,
+        return {"killed_neuocytes": killed, "requeued_work": expired,
                 "state_version": mind.state_version()}
 
     # ------------------------------------------------------------------
@@ -384,7 +410,7 @@ def build(sup: "Supervisor") -> dict[str, Any]:
         """Take a reference to a published snapshot.
 
         With no id, the newest published snapshot is used -- a replacement
-        worker always starts from the newest, while running workers keep the
+        neuocyte always starts from the newest, while running neuocytes keep the
         one they were pinned to.
         """
         if snapshot_id:
@@ -393,7 +419,7 @@ def build(sup: "Supervisor") -> dict[str, Any]:
             snap = mind.work.latest_snapshot(actor="ego")
             if snap is None:
                 # Work can be admitted before Ego has ever published. Publishing
-                # is the harness's job, not the worker's, so do it here rather
+                # is the harness's job, not the neuocyte's, so do it here rather
                 # than failing work that is otherwise perfectly runnable.
                 published = ensure_snapshot(max_age_seconds=0.0)
                 snap = mind.work.get_snapshot(published["snapshot_id"])
@@ -692,6 +718,114 @@ def build(sup: "Supervisor") -> dict[str, Any]:
                               idempotency_key, run)
 
     # ------------------------------------------------------------------
+    # cancellation
+    # ------------------------------------------------------------------
+    def cancel_operation(*, operation_id: str | None = None,
+                         idempotency_key: str | None = None,
+                         reason: str = "client cancelled",
+                         actor: str = "client") -> dict[str, Any]:
+        """Stop an operation and everything downstream of it.
+
+        Cancellation is cooperative first and forceful second: the in-flight
+        generation is asked to stop between tokens, queued work is cancelled so
+        no neuocyte picks it up, and only a neuocyte already running is killed.
+
+        Idempotent. Cancelling a finished operation is not an error -- a client
+        that cancels just as the work lands should get a truthful "already
+        completed", not a failure.
+        """
+        if not operation_id and not idempotency_key:
+            raise InvalidInput("cancel needs an operation_id or an idempotency_key")
+        if not operation_id:
+            row = mind.db.conn.execute(
+                "SELECT operation_id FROM operations WHERE idempotency_key = ?",
+                (idempotency_key,)).fetchone()
+            if row is None:
+                # Nothing was ever registered under that key. Saying so beats
+                # inventing a failure for a client that gave up early.
+                return {"operation_id": None, "cancelled": False,
+                        "already_terminal": False,
+                        "detail": "no operation found for that idempotency key"}
+            operation_id = row["operation_id"]
+
+        op = mind.memory.get_operation(operation_id)
+        terminal = op["status"] in ("completed", "failed", "cancelled", "interrupted")
+
+        cancelled_work: list[str] = []
+        killed: list[str] = []
+        generations: list[dict[str, Any]] = []
+
+        if not terminal:
+            for row in mind.db.conn.execute(
+                    "SELECT work_id, status, lease_owner FROM work_items"
+                    " WHERE operation_id = ? AND status NOT IN ('done','failed','cancelled')",
+                    (operation_id,)):
+                mind.work.cancel(work_id=row["work_id"], actor=actor, reason=reason)
+                cancelled_work.append(row["work_id"])
+                owner = row["lease_owner"]
+                if owner and owner in sup.neuocytes:
+                    sup._kill_neuocyte(owner, reason=f"operation cancelled: {reason}")
+                    killed.append(owner)
+
+            # Ask whichever role is running this operation to stop generating.
+            for role in ("ego", "id"):
+                agent = next((a for a in mind.work.live_agents(role=role)), None)
+                handle = (agent or {}).get("session_handle")
+                if not handle:
+                    continue
+                try:
+                    out = sup.client("inference").call("cancel_generation",
+                                                       session_id=handle)
+                    if out.get("cancel_requested"):
+                        generations.append({"role": role, "session_id": handle})
+                except Exception:  # noqa: BLE001
+                    pass
+
+        def body(m: Mutation) -> None:
+            if not terminal:
+                m.sql("UPDATE operations SET status = 'cancelled', updated_at = ?"
+                      " WHERE operation_id = ?", (time.time(), operation_id))
+            m.emit(EventKind.OPERATION_CANCELLED, {
+                "operation_id": operation_id, "actor": actor, "reason": reason,
+                "already_terminal": terminal, "prior_status": op["status"],
+                "cancelled_work": cancelled_work, "killed_neuocytes": killed,
+                "generations_stopped": generations,
+            })
+            for g in generations:
+                m.emit(EventKind.GENERATION_CANCELLED, g)
+
+        receipt, _ = mind.writer.apply(
+            body, actor=actor, operation_id=operation_id, bump_version=not terminal,
+            mutation_id=f"cancel:{operation_id}")
+
+        return {
+            "operation_id": operation_id,
+            "cancelled": not terminal,
+            "already_terminal": terminal,
+            "prior_status": op["status"],
+            "cancelled_work": cancelled_work,
+            "killed_neuocytes": killed,
+            "generations_stopped": generations,
+            "receipt_id": receipt.receipt_id,
+            "detail": ("operation was already terminal; nothing to stop"
+                       if terminal else
+                       "queued work cancelled, running neuocytes killed, "
+                       "in-flight generation asked to stop between tokens"),
+        }
+
+    def cancel_generation(*, role: str, reason: str = "cancelled") -> dict[str, Any]:
+        """Stop a role's current generation without touching its operation."""
+        agent = next((a for a in mind.work.live_agents(role=role)), None)
+        handle = (agent or {}).get("session_handle")
+        if not handle:
+            raise NotFound("role has no live inference session", role=role)
+        out = sup.client("inference").call("cancel_generation", session_id=handle)
+        mind.writer.record_rejection(
+            actor="supervisor", reason=reason, kind=EventKind.GENERATION_CANCELLED,
+            payload={"role": role, "session_id": handle})
+        return out
+
+    # ------------------------------------------------------------------
     def side_channel(*, to_role: str, kind: str, payload: dict[str, Any] | None = None,
                      from_role: str = "supervisor") -> dict[str, Any]:
         if to_role not in ("ego", "id"):
@@ -706,6 +840,7 @@ def build(sup: "Supervisor") -> dict[str, Any]:
     return {
         # health / status
         "health": health, "capabilities": capabilities, "status": status,
+        "debug_threads": debug_threads,
         # agents
         "register_agent": register_agent, "heartbeat": heartbeat,
         "retire_agent": retire_agent,
@@ -722,7 +857,7 @@ def build(sup: "Supervisor") -> dict[str, Any]:
         "admit_work": admit_work, "lease_work": lease_work,
         "complete_work": complete_work, "fail_work": fail_work,
         "cancel_work": cancel_work, "get_work": get_work, "queue_stats": queue_stats,
-        "kill_all_workers": kill_all_workers,
+        "kill_all_neuocytes": kill_all_neuocytes,
         # snapshots
         "publish_ego_snapshot": publish_ego_snapshot,
         "acquire_snapshot": acquire_snapshot,
@@ -738,5 +873,7 @@ def build(sup: "Supervisor") -> dict[str, Any]:
         "id_introspect": id_introspect, "id_health": id_health, "id_audit": id_audit,
         "id_disagreements": id_disagreements, "id_maintenance": id_maintenance,
         # misc
+        "cancel_operation": cancel_operation,
+        "cancel_generation": cancel_generation,
         "side_channel": side_channel, "shutdown": shutdown,
     }

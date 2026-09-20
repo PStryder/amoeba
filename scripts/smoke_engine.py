@@ -13,10 +13,10 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "src"))
 
-from synthetic_mind.backends.llama_engine import LlamaEngine  # noqa: E402
+from amoeba.backends.llama_engine import LlamaEngine  # noqa: E402
 
-RUNTIME = r"F:\hexylab\synthetic-mind-runtime\llama.cpp-b11057-win-cuda12.4"
-MODEL = r"F:\hexylab\synthetic-mind-models\Qwen3-4B-Instruct-2507-Q5_K_M.gguf"
+RUNTIME = r"F:\hexylab\amoeba-runtime\llama.cpp-b11057-win-cuda12.4"
+MODEL = r"F:\hexylab\amoeba-models\Qwen3-4B-Instruct-2507-Q5_K_M.gguf"
 
 
 def main() -> int:
@@ -43,7 +43,7 @@ def main() -> int:
     print("\n=== ego session ===")
     ego = eng.open_session(role="ego")
     prompt = eng.apply_chat_template([
-        {"role": "system", "content": "You are Ego, the outward-facing half of a synthetic mind. Answer in one short sentence."},
+        {"role": "system", "content": "You are Ego, the outward-facing half of an amoeba. Answer in one short sentence."},
         {"role": "user", "content": "Name the capital of France and one reason it matters."},
     ])
     toks = eng.tokenize(prompt, add_special=False, parse_special=True)
@@ -66,26 +66,26 @@ def main() -> int:
     print(f"  text: {res_id.text.strip()!r}")
     print("  (isolation check: Id must NOT know about Paris unless it guesses)")
 
-    # ---- fork the Ego prefix into two workers --------------------------
-    print("\n=== fork ego prefix into 2 workers ===")
+    # ---- fork the Ego prefix into two neuocytes --------------------------
+    print("\n=== fork ego prefix into 2 neuocytes ===")
     prefix_len = ego.n_past
     vram_before = eng.vram_free()
-    w1 = eng.fork_prefix(src_session_id=ego.session_id, prefix_len=prefix_len, role="worker")
-    w2 = eng.fork_prefix(src_session_id=ego.session_id, prefix_len=prefix_len, role="worker")
+    w1 = eng.fork_prefix(src_session_id=ego.session_id, prefix_len=prefix_len, role="neuocyte")
+    w2 = eng.fork_prefix(src_session_id=ego.session_id, prefix_len=prefix_len, role="neuocyte")
     vram_after = eng.vram_free()
     print(f"  prefix_len={prefix_len}")
     print(f"  vram free before fork: {vram_before/2**20:.1f} MiB")
     print(f"  vram free after  fork: {vram_after/2**20:.1f} MiB")
     print(f"  delta: {(vram_before - vram_after)/2**20:.3f} MiB "
           f"(0 == physically shared prefix cells)")
-    print(f"  state_seq_get_size(worker1) = {eng.state_seq_size(w1.session_id)} bytes "
+    print(f"  state_seq_get_size(neuocyte1) = {eng.state_seq_size(w1.session_id)} bytes "
           f"(LOGICAL size -- not evidence of physical allocation)")
 
-    # workers append private tails
+    # neuocytes append private tails
     for w, instruction in ((w1, " Now list one risk."), (w2, " Now list one opportunity.")):
         eng.ingest(w.session_id, eng.tokenize(instruction, parse_special=False))
         r = eng.generate(w.session_id, max_tokens=32, temperature=0.0)
-        print(f"  worker {w.seq_id}: {r.text.strip()[:90]!r}")
+        print(f"  neuocyte {w.seq_id}: {r.text.strip()[:90]!r}")
 
     # ---- ego continues independently after publishing ------------------
     print("\n=== ego continues after snapshot ===")
@@ -96,11 +96,11 @@ def main() -> int:
     print(f"  seq_pos_max ego={eng.seq_pos_max(ego.session_id)} "
           f"w1={eng.seq_pos_max(w1.session_id)} w2={eng.seq_pos_max(w2.session_id)}")
 
-    # ---- retire workers, reclaim -------------------------------------
-    print("\n=== retire workers ===")
+    # ---- retire neuocytes, reclaim -------------------------------------
+    print("\n=== retire neuocytes ===")
     eng.close_session(w1.session_id)
     eng.close_session(w2.session_id)
-    print("  workers closed; ego prefix must survive")
+    print("  neuocytes closed; ego prefix must survive")
     eng.ingest(ego.session_id, eng.tokenize(" One more word:", parse_special=False))
     r = eng.generate(ego.session_id, max_tokens=12, temperature=0.0)
     print(f"  ego still alive: {r.text.strip()[:80]!r}")

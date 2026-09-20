@@ -10,8 +10,8 @@ from __future__ import annotations
 
 import pytest
 
-from synthetic_mind.errors import InvalidInput
-from synthetic_mind.tools import (
+from amoeba.errors import InvalidInput
+from amoeba.tools import (
     ToolParam, ToolRegistry, ToolSpec, build_default_registry,
     parse_tool_calls, strip_tool_calls,
 )

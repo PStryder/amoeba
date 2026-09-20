@@ -92,6 +92,10 @@ class EventKind:
     REJUVENATION_PERFORMED = "rejuvenation.performed"
     REJUVENATION_REFUSED = "rejuvenation.refused"
 
+    # cancellation
+    OPERATION_CANCELLED = "operation.cancelled"
+    GENERATION_CANCELLED = "generation.cancelled"
+
     # arbiter / side channel
     RESOURCE_DECISION = "resource.decision"
     SIDE_CHANNEL_SIGNAL = "side_channel.signal"

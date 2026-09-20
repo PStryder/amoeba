@@ -9,9 +9,9 @@ from __future__ import annotations
 
 import pytest
 
-from synthetic_mind.errors import CapabilityUnsupported, InvalidInput, NotFound
-from synthetic_mind.homeostasis import ContextHomeostasis, HomeostasisConfig
-from synthetic_mind.store.events import EventKind
+from amoeba.errors import CapabilityUnsupported, InvalidInput, NotFound
+from amoeba.homeostasis import ContextHomeostasis, HomeostasisConfig
+from amoeba.store.events import EventKind
 
 
 class FakeInference:
@@ -161,7 +161,7 @@ def test_rate_limit_stops_a_wedged_id_thrashing_contexts(homeo):
 
 def test_only_ego_and_id_have_rejuvenable_contexts(homeo):
     with pytest.raises(InvalidInput):
-        homeo.request_rejuvenation(role="worker", reason="x")
+        homeo.request_rejuvenation(role="neuocyte", reason="x")
 
 
 def test_checkpoint_requires_a_live_session(mind, homeo):
@@ -258,11 +258,11 @@ def test_tick_does_nothing_when_inference_is_unreachable(homeo):
 # The model never touches KV
 # ---------------------------------------------------------------------------
 def test_no_kv_verb_is_reachable_from_a_model_facing_tool():
-    """Neither the MCP surface nor the worker tool registry may expose a way to
+    """Neither the MCP surface nor the neuocyte tool registry may expose a way to
     manipulate a cache. Requesting rejuvenation is the only affordance."""
     import inspect
 
-    from synthetic_mind import mcp_api, tools
+    from amoeba import mcp_api, tools
 
     mcp_src = inspect.getsource(mcp_api)
     for forbidden in ("seq_cp", "memory_seq", "fork_prefix", "restore_prefix",

@@ -20,14 +20,14 @@ import numpy as np
 ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT / "src"))
 
-from synthetic_mind.backends.llama_engine import LlamaEngine  # noqa: E402
-from synthetic_mind.config import load_config  # noqa: E402
+from amoeba.backends.llama_engine import LlamaEngine  # noqa: E402
+from amoeba.config import load_config  # noqa: E402
 
 PROMPTS = [
     "The observatory logged three readings on the night of the storm: a pressure "
     "drop, an unexplained radio burst, and a power failure at 02:14. The duty "
     "officer was named Marguerite Olabode.",
-    "A synthetic mind keeps raw history as evidence and maintained beliefs as "
+    "An amoeba keeps raw history as evidence and maintained beliefs as "
     "memory. The two must never be confused, because evidence does not decay and "
     "interpretations do.",
 ]
@@ -52,8 +52,8 @@ def run() -> list[dict]:
             eng.ingest(src.session_id, tokens)
 
             forked = eng.fork_prefix(src_session_id=src.session_id,
-                                     prefix_len=src.n_past, role="worker")
-            recomp = eng.open_session(role="worker")
+                                     prefix_len=src.n_past, role="neuocyte")
+            recomp = eng.open_session(role="neuocyte")
             eng.restore_prefix(session_id=recomp.session_id, tokens=tokens)
 
             q = eng.tokenize(QUESTION, add_special=False)
@@ -78,7 +78,7 @@ def run() -> list[dict]:
             # into a different set of cells. If this also differs from the
             # first recomputation, the difference is a property of cache
             # position and kernel reduction order -- not of forking.
-            control = eng.open_session(role="worker")
+            control = eng.open_session(role="neuocyte")
             eng.restore_prefix(session_id=control.session_id, tokens=tokens)
             eng.ingest(control.session_id, q)
             lc = eng.get_session(control.session_id).logits.astype(np.float64)

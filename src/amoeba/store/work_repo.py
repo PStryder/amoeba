@@ -20,7 +20,7 @@ from .writer import Mutation, Receipt, StateWriter
 
 WORK_CLASSES = ("user", "maintenance")
 BOARD_ACCESS = ("none", "read", "read_write")
-"""'none' produces a board-naive worker. Two naive workers agreeing is
+"""'none' produces a board-naive neuocyte. Two naive neuocytes agreeing is
 independent replication; agreement after reading is not."""
 TERMINAL_WORK = ("done", "failed", "cancelled")
 
@@ -99,7 +99,7 @@ class WorkRepo:
     def lease(
         self,
         *,
-        worker_id: str,
+        neuocyte_id: str,
         work_class: str | None = None,
         work_id: str | None = None,
         lease_seconds: float = 90.0,
@@ -108,7 +108,7 @@ class WorkRepo:
         """Atomically claim a ready work item.
 
         ``work_id`` targets one specific item. The supervisor dispatches a
-        worker *for* a particular item, so without this the worker would claim
+        neuocyte *for* a particular item, so without this the neuocyte would claim
         whichever item happened to be at the head of the queue, then have to
         hand it back -- burning an attempt on an item nobody was running, until
         it exhausted its retries and failed.
@@ -141,16 +141,16 @@ class WorkRepo:
                     "UPDATE work_items SET status = 'leased', lease_owner = ?, lease_expires = ?,"
                     " attempt = attempt + 1, fencing_token = ?, updated_at = ?"
                     " WHERE work_id = ? AND status = 'queued'",
-                    (worker_id, now + lease_seconds, token, now, row["work_id"]),
+                    (neuocyte_id, now + lease_seconds, token, now, row["work_id"]),
                 )
                 m.emit(EventKind.WORK_LEASED, {
-                    "work_id": row["work_id"], "worker_id": worker_id,
+                    "work_id": row["work_id"], "neuocyte_id": neuocyte_id,
                     "fencing_token": token, "attempt": int(row["attempt"]) + 1,
                     "lease_expires": now + lease_seconds,
                 })
                 item = dict(row)
                 item.update({
-                    "status": "leased", "lease_owner": worker_id,
+                    "status": "leased", "lease_owner": neuocyte_id,
                     "lease_expires": now + lease_seconds,
                     "fencing_token": token, "attempt": int(row["attempt"]) + 1,
                     "depends_on": deps,
@@ -158,7 +158,7 @@ class WorkRepo:
                 return item
             return None
 
-        _receipt, claimed = self.writer.apply(body, actor=worker_id, bump_version=False)
+        _receipt, claimed = self.writer.apply(body, actor=neuocyte_id, bump_version=False)
         return claimed
 
     def _deps_satisfied(self, m: Mutation, deps: Sequence[str]) -> bool:
@@ -168,32 +168,32 @@ class WorkRepo:
                 return False
         return True
 
-    def renew_lease(self, *, work_id: str, worker_id: str, fencing_token: int,
+    def renew_lease(self, *, work_id: str, neuocyte_id: str, fencing_token: int,
                     lease_seconds: float = 90.0) -> bool:
         def body(m: Mutation) -> bool:
             cur = m.sql(
                 "UPDATE work_items SET lease_expires = ?, updated_at = ?"
                 " WHERE work_id = ? AND lease_owner = ? AND fencing_token = ? AND status = 'leased'",
-                (time.time() + lease_seconds, time.time(), work_id, worker_id, fencing_token),
+                (time.time() + lease_seconds, time.time(), work_id, neuocyte_id, fencing_token),
             )
             return cur.rowcount > 0
 
-        _r, ok = self.writer.apply(body, actor=worker_id, bump_version=False)
+        _r, ok = self.writer.apply(body, actor=neuocyte_id, bump_version=False)
         return bool(ok)
 
     def complete(
         self,
         *,
         work_id: str,
-        worker_id: str,
+        neuocyte_id: str,
         fencing_token: int,
         result: Any,
         operation_id: str | None = None,
         pinned_state_ver: int | None = None,
     ) -> Receipt:
-        """Commit a worker result. Idempotent by (work_id, fencing_token).
+        """Commit a neuocyte result. Idempotent by (work_id, fencing_token).
 
-        Rejects a result whose fencing token has been superseded — that worker
+        Rejects a result whose fencing token has been superseded — that neuocyte
         was replaced and its finding is stale.
         """
         mutation_id = f"work-complete:{work_id}:{fencing_token}"
@@ -207,11 +207,11 @@ class WorkRepo:
                 raise NotFound("unknown work item", work_id=work_id)
             if int(row["fencing_token"]) != int(fencing_token):
                 m.emit(EventKind.WORK_RESULT_FENCED, {
-                    "work_id": work_id, "worker_id": worker_id,
+                    "work_id": work_id, "neuocyte_id": neuocyte_id,
                     "presented_token": fencing_token, "current_token": row["fencing_token"],
                 })
                 raise Fenced(
-                    "worker result rejected: fencing token superseded",
+                    "neuocyte result rejected: fencing token superseded",
                     work_id=work_id, presented=fencing_token, current=row["fencing_token"],
                 )
             if row["status"] in TERMINAL_WORK:
@@ -229,16 +229,16 @@ class WorkRepo:
                 (blob, time.time(), work_id),
             )
             m.emit(EventKind.WORK_COMPLETED, {
-                "work_id": work_id, "worker_id": worker_id, "result_blob": blob,
+                "work_id": work_id, "neuocyte_id": neuocyte_id, "result_blob": blob,
                 "fencing_token": fencing_token, "stale_against": stale_against,
             })
 
         receipt, _ = self.writer.apply(
-            body, actor=worker_id, operation_id=operation_id, mutation_id=mutation_id,
+            body, actor=neuocyte_id, operation_id=operation_id, mutation_id=mutation_id,
         )
         return receipt
 
-    def fail(self, *, work_id: str, worker_id: str, fencing_token: int, failure: str,
+    def fail(self, *, work_id: str, neuocyte_id: str, fencing_token: int, failure: str,
              requeue: bool = True, operation_id: str | None = None) -> Receipt:
         mutation_id = f"work-fail:{work_id}:{fencing_token}"
         existing = self.writer.receipt_for(mutation_id)
@@ -258,12 +258,12 @@ class WorkRepo:
                 (status, failure, time.time(), work_id),
             )
             m.emit(EventKind.WORK_FAILED, {
-                "work_id": work_id, "worker_id": worker_id, "failure": failure,
+                "work_id": work_id, "neuocyte_id": neuocyte_id, "failure": failure,
                 "requeued": status == "queued", "attempt": row["attempt"],
             })
 
         receipt, _ = self.writer.apply(
-            body, actor=worker_id, operation_id=operation_id, mutation_id=mutation_id,
+            body, actor=neuocyte_id, operation_id=operation_id, mutation_id=mutation_id,
         )
         return receipt
 
@@ -293,7 +293,7 @@ class WorkRepo:
             expired = []
             for row in rows:
                 # Bumping the fencing token here is what makes a late result
-                # from the dead worker unable to commit.
+                # from the dead neuocyte unable to commit.
                 m.sql(
                     "UPDATE work_items SET status = 'queued', lease_owner = NULL,"
                     " lease_expires = NULL, fencing_token = fencing_token + 1, updated_at = ?"
@@ -504,7 +504,7 @@ class WorkRepo:
     def acquire_snapshot_ref(self, *, snapshot_id: str, holder: str,
                              operation_id: str | None = None) -> tuple[str, Receipt]:
         """Take a reference so the published storage is not reclaimed while a
-        worker is still reading from it."""
+        neuocyte is still reading from it."""
         ref_id = new_id("sref")
 
         def body(m: Mutation) -> None:
@@ -554,7 +554,7 @@ class WorkRepo:
 
     def reclaimable_snapshots(self, *, actor: str = "ego", keep_latest: int = 1) -> list[str]:
         """Published snapshots with no live references, excluding the newest
-        ``keep_latest`` which stay available for new workers."""
+        ``keep_latest`` which stay available for new neuocytes."""
         rows = self.conn.execute(
             "SELECT snapshot_id, version, refcount FROM snapshots"
             " WHERE actor = ? AND status = 'published' ORDER BY version DESC",
@@ -574,7 +574,7 @@ class WorkRepo:
                 raise NotFound("unknown snapshot", snapshot_id=snapshot_id)
             if int(row["refcount"]) > 0:
                 raise ResourceExhausted(
-                    "snapshot still referenced by live workers",
+                    "snapshot still referenced by live neuocytes",
                     snapshot_id=snapshot_id, refcount=row["refcount"],
                 )
             m.sql(

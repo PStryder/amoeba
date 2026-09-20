@@ -67,8 +67,8 @@ negligible, and every further session costs real time.
 - **TTFT is the real budget, not throughput.** It rises essentially linearly
   with n: 7 ms at n=1, 119 ms at n=32, 238 ms at n=64. For an interactive
   `ego_converse` turn that is the number that matters, and it argues for a
-  small batch on the interactive path and a large one for background workers.
-- The default `arbiter.max_workers = 3` sits far below the knee, which is the
+  small batch on the interactive path and a large one for background neuocytes.
+- The default `arbiter.max_neuocytes = 3` sits far below the knee, which is the
   right place for a desktop GPU shared with a compositor.
 
 ---
@@ -102,7 +102,7 @@ per-session one.
 
 Three consequences worth stating plainly:
 
-1. **Worker retirement is a throughput mechanism, not hygiene.** A worker that
+1. **Neuocyte retirement is a throughput mechanism, not hygiene.** A neuocyte that
    finishes but does not release its session silently slows the whole mind. The
    full recovery on retirement confirms reclamation works — and that forgetting
    to retire would be expensive.
@@ -167,7 +167,7 @@ implemented, for the thread-safety reason above.
 
 ## 4. Prefix sharing: cost and savings
 
-441-token Ego prefix, 4 workers:
+441-token Ego prefix, 4 neuocytes:
 
 | metric | value |
 |---|---:|

@@ -1,6 +1,6 @@
 """Acceptance tests 1, 2, 3, 4, 14 against a running multi-process mind.
 
-1.  Kill all disposable workers; state survives and unfinished work resumes.
+1.  Kill all disposable neuocytes; state survives and unfinished work resumes.
 2.  Restart Ego, Id, the inference service and the supervisor independently.
 3.  Call Ego and Id directly through a real MCP client.
 4.  Audit an Ego conclusion through Id.
@@ -26,10 +26,10 @@ from conftest import PYTHON, ROOT, LiveStack, start_stack
 
 
 # ---------------------------------------------------------------------------
-# Test 1: killing every worker preserves state and resumes work.
+# Test 1: killing every neuocyte preserves state and resumes work.
 # ---------------------------------------------------------------------------
 def test_killing_all_workers_preserves_state_and_resumes_work(stack: LiveStack):
-    mem = stack.call("remember", kind="belief", claim="survives worker death",
+    mem = stack.call("remember", kind="belief", claim="survives neuocyte death",
                      confidence=0.9, created_by="operator")
     version_before = mem["state_version"]
 
@@ -49,12 +49,12 @@ def test_killing_all_workers_preserves_state_and_resumes_work(stack: LiveStack):
             break
         time.sleep(0.3)
 
-    killed = stack.call("kill_all_workers", reason="acceptance test")
-    assert isinstance(killed["killed_workers"], list)
+    killed = stack.call("kill_all_neuocytes", reason="acceptance test")
+    assert isinstance(killed["killed_neuocytes"], list)
 
     # Durable state is intact.
     assert stack.call("get_memory", memory_id=mem["memory_id"])["claim"] == \
-        "survives worker death"
+        "survives neuocyte death"
     assert stack.call("status")["state_version"] >= version_before
 
     # Every work item still exists and none is silently lost.
@@ -62,7 +62,7 @@ def test_killing_all_workers_preserves_state_and_resumes_work(stack: LiveStack):
     assert set(statuses) == set(work_ids)
     assert all(s in ("queued", "leased", "done", "failed") for s in statuses.values())
 
-    # Unfinished work drains once workers come back.
+    # Unfinished work drains once neuocytes come back.
     deadline = time.time() + 90
     while time.time() < deadline:
         remaining = [w for w in work_ids
@@ -81,14 +81,14 @@ def test_stale_worker_cannot_commit_after_replacement(stack: LiveStack):
     a = stack.call("admit_work", objective="fence me", work_class="user",
                    origin_actor="ego")
     work_id = a["work_id"]
-    first = stack.call("lease_work", worker_id="ghost")
+    first = stack.call("lease_work", neuocyte_id="ghost")
     if first is None or first["work_id"] != work_id:
         pytest.skip("scheduler leased a different item first")
     time.sleep(stack.cfg.arbiter.lease_seconds + 2)
     second = None
     deadline = time.time() + 30
     while time.time() < deadline and second is None:
-        item = stack.call("lease_work", worker_id="replacement")
+        item = stack.call("lease_work", neuocyte_id="replacement")
         if item and item["work_id"] == work_id:
             second = item
             break
@@ -97,7 +97,7 @@ def test_stale_worker_cannot_commit_after_replacement(stack: LiveStack):
         pytest.skip("replacement lease not obtained in time")
     assert second["fencing_token"] > first["fencing_token"]
     with pytest.raises(Exception):
-        stack.call("complete_work", work_id=work_id, worker_id="ghost",
+        stack.call("complete_work", work_id=work_id, neuocyte_id="ghost",
                    fencing_token=first["fencing_token"], result={"stale": True})
 
 
@@ -200,12 +200,12 @@ def test_supervisor_restart_recovers_state(tmp_path: Path):
 
     env = dict(os.environ)
     env["PYTHONPATH"] = os.pathsep.join([str(ROOT / "src"), env.get("PYTHONPATH", "")])
-    env["SYNTHETIC_MIND_STDERR_LOG"] = "0"
+    env["AMOEBA_STDERR_LOG"] = "0"
     proc = subprocess.Popen(
-        [PYTHON, "-m", "synthetic_mind.supervisor", "--config", str(cfg_path)],
+        [PYTHON, "-m", "amoeba.supervisor", "--config", str(cfg_path)],
         env=env, cwd=str(ROOT), stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
     )
-    from synthetic_mind.rpc import wait_for_port
+    from amoeba.rpc import wait_for_port
 
     assert wait_for_port(s1.cfg.supervisor_host, s1.cfg.supervisor_port, timeout=180)
     s2 = LiveStack(s1.cfg, proc)
@@ -229,9 +229,9 @@ def test_supervisor_restart_recovers_state(tmp_path: Path):
 def test_second_supervisor_refuses_the_same_state_dir(stack: LiveStack):
     env = dict(os.environ)
     env["PYTHONPATH"] = os.pathsep.join([str(ROOT / "src"), env.get("PYTHONPATH", "")])
-    env["SYNTHETIC_MIND_STDERR_LOG"] = "0"
+    env["AMOEBA_STDERR_LOG"] = "0"
     out = subprocess.run(
-        [PYTHON, "-m", "synthetic_mind.supervisor", "--config",
+        [PYTHON, "-m", "amoeba.supervisor", "--config",
          str(stack.cfg.source_path)],
         env=env, cwd=str(ROOT), capture_output=True, timeout=120,
     )
@@ -303,8 +303,8 @@ def test_health_reports_capabilities_without_conflating_them(stack: LiveStack):
     assert caps["kv_mode"] == "simulated"
     assert "SIMULATED" in caps["banner"]
     # Limits and resource accounting are reported, not implied.
-    assert health["limits"]["max_workers"] >= 1
-    assert "active_workers" in health["resources"]
+    assert health["limits"]["max_neuocytes"] >= 1
+    assert "active_neuocytes" in health["resources"]
 
 
 def test_health_stays_answerable_when_inference_is_down(stack: LiveStack):
@@ -370,10 +370,10 @@ def test_real_mcp_client_calls_both_halves(stack: LiveStack):
         env = dict(os.environ)
         env["PYTHONPATH"] = os.pathsep.join([str(ROOT / "src"),
                                              env.get("PYTHONPATH", "")])
-        env["SYNTHETIC_MIND_STDERR_LOG"] = "0"
+        env["AMOEBA_STDERR_LOG"] = "0"
         params = StdioServerParameters(
             command=PYTHON,
-            args=["-m", "synthetic_mind.mcp_api", "--config",
+            args=["-m", "amoeba.mcp_api", "--config",
                   str(stack.cfg.source_path)],
             env=env, cwd=str(ROOT),
         )
@@ -402,15 +402,15 @@ def test_real_mcp_client_calls_both_halves(stack: LiveStack):
 
     out = anyio.run(run)
 
-    assert out["server_name"] == "synthetic-mind"
+    assert out["server_name"] == "amoeba"
     # Both halves are directly callable and discovery lists the cognitive verbs.
     for expected in ("ego_converse", "ego_investigate", "ego_recall", "ego_status",
                      "id_introspect", "id_health", "id_audit", "id_disagreements",
                      "id_maintenance"):
         assert expected in out["tool_names"], out["tool_names"]
-    # No worker, cache or snapshot controls are exposed.
+    # No neuocyte, cache or snapshot controls are exposed.
     assert not any(bad in name for name in out["tool_names"]
-                   for bad in ("worker", "snapshot", "kv", "fork", "lease", "session"))
+                   for bad in ("neuocyte", "snapshot", "kv", "fork", "lease", "session"))
 
     ego = out["ego"]
     for field in ("schema_version", "operation_id", "status", "receipt_id",
@@ -443,10 +443,10 @@ def test_mcp_client_disconnect_does_not_kill_the_mind(stack: LiveStack):
         env = dict(os.environ)
         env["PYTHONPATH"] = os.pathsep.join([str(ROOT / "src"),
                                              env.get("PYTHONPATH", "")])
-        env["SYNTHETIC_MIND_STDERR_LOG"] = "0"
+        env["AMOEBA_STDERR_LOG"] = "0"
         params = StdioServerParameters(
             command=PYTHON,
-            args=["-m", "synthetic_mind.mcp_api", "--config",
+            args=["-m", "amoeba.mcp_api", "--config",
                   str(stack.cfg.source_path)],
             env=env, cwd=str(ROOT),
         )
@@ -463,3 +463,60 @@ def test_mcp_client_disconnect_does_not_kill_the_mind(stack: LiveStack):
     assert after["status"] == "alive"
     assert {k: v["pid"] for k, v in after["children"].items()} == before_pids
     assert after["state_version"] >= before["state_version"]
+
+
+def test_health_stays_fast_while_a_child_is_down(stack: LiveStack):
+    """Responsive means fast, not merely eventually answering.
+
+    health() touches every child. Before the liveness probe was split from the
+    patient reconnect path, one dead child made every health call block for the
+    full ~20s retry window -- including the supervision loop trying to restart
+    it, which is how a restart could miss a 150s deadline.
+    """
+    before = _wait_child(stack, "id")
+    subprocess.run(["taskkill", "/PID", str(before["pid"]), "/T", "/F"],
+                   capture_output=True, check=False)
+    try:
+        slowest = 0.0
+        for _ in range(4):
+            t0 = time.time()
+            health = stack.call("health")
+            slowest = max(slowest, time.time() - t0)
+            assert health["status"] == "alive"
+            time.sleep(0.2)
+        assert slowest < 8.0, f"health took {slowest:.1f}s with one child down"
+    finally:
+        _wait_child(stack, "id", timeout=180)
+
+
+def test_a_role_that_dies_during_startup_is_still_restarted(stack: LiveStack):
+    """Regression: supervision must not wait for startup to finish.
+
+    start() used to block up to 180s per role in wait_for_port, and the
+    supervision thread only began afterwards. A role killed inside that window
+    went unnoticed for three minutes while the supervisor sat blind. The test
+    kills a role as early as possible, which is precisely that window.
+    """
+    before = _wait_child(stack, "id")
+    subprocess.run(["taskkill", "/PID", str(before["pid"]), "/T", "/F"],
+                   capture_output=True, check=False)
+
+    after, deadline = None, time.time() + 60
+    while time.time() < deadline:
+        cand = stack.call("health")["children"].get("id", {}).get("reported")
+        if cand and cand["incarnation"] > before["incarnation"]:
+            after = cand
+            break
+        time.sleep(0.5)
+    assert after is not None, "a role killed during startup was never restarted"
+    assert after["pid"] != before["pid"]
+
+
+def test_supervision_keeps_making_passes(stack: LiveStack):
+    """A stalled supervision loop is the failure that hides every other one."""
+    first = stack.call("health")["supervision"]
+    assert first["passes"] >= 0
+    time.sleep(6)
+    second = stack.call("health")["supervision"]
+    assert second["passes"] > first["passes"], "supervision stopped making passes"
+    assert second["seconds_since_last_pass"] < 10

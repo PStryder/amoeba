@@ -47,18 +47,18 @@ class BackendConfig:
 
 @dataclass(slots=True)
 class ArbiterConfig:
-    max_workers: int = 4
+    max_neuocytes: int = 4
     max_outstanding_work: int = 64
     max_prompt_tokens: int = 6144
     max_completion_tokens: int = 512
-    worker_wall_seconds: float = 180.0
-    worker_token_budget: int = 2048
-    worker_max_age_seconds: float = 900.0
+    neuocyte_wall_seconds: float = 180.0
+    neuocyte_token_budget: int = 2048
+    neuocyte_max_age_seconds: float = 900.0
     lease_seconds: float = 90.0
     # Weighted-fair split between user-directed work and Id maintenance.
     user_weight: float = 0.7
     maintenance_weight: float = 0.3
-    # Neither class may be starved: each is guaranteed this many worker slots.
+    # Neither class may be starved: each is guaranteed this many neuocyte slots.
     user_reserved_slots: int = 1
     maintenance_reserved_slots: int = 1
     max_maintenance_depth: int = 2
@@ -87,9 +87,9 @@ class RoleConfig:
 
 @dataclass(slots=True)
 class Config:
-    state_dir: Path = Path("F:/hexylab/synthetic-mind-state")
-    runtime_dir: Path = Path("F:/hexylab/synthetic-mind-runtime")
-    models_dir: Path = Path("F:/hexylab/synthetic-mind-models")
+    state_dir: Path = Path("F:/hexylab/amoeba-state")
+    runtime_dir: Path = Path("F:/hexylab/amoeba-runtime")
+    models_dir: Path = Path("F:/hexylab/amoeba-models")
     supervisor_host: str = "127.0.0.1"
     supervisor_port: int = 8711
     inference_port: int = 8712
@@ -161,7 +161,7 @@ def _apply(obj: Any, data: dict[str, Any], where: str) -> None:
 def load_config(path: str | os.PathLike[str] | None = None) -> Config:
     cfg = Config()
     if path is None:
-        env = os.environ.get("SYNTHETIC_MIND_CONFIG")
+        env = os.environ.get("AMOEBA_CONFIG")
         path = env if env else None
     if path is None:
         cfg.ensure_dirs()

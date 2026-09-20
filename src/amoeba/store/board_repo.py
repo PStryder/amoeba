@@ -1,6 +1,6 @@
 """The cognitive blackboard: how neuocytes talk to each other.
 
-**The board is communication, not Mind State.** A post is something a worker
+**The board is communication, not Mind State.** A post is something a neuocyte
 *said*. A memory item is something the organism *believes*. Nothing crosses
 that line implicitly: promoting a post into maintained memory is a separate,
 receipted act performed by the Harness, and the post keeps its own identity
@@ -45,7 +45,7 @@ POST_TYPES = (
     "note", "retraction",
 )
 RELATIONS = ("reply_to", "challenges", "supports", "refines", "duplicates", "answers")
-AUTHOR_KINDS = ("ego", "id", "worker", "operator")
+AUTHOR_KINDS = ("ego", "id", "neuocyte", "operator")
 POST_STATUSES = ("open", "resolved", "retracted", "superseded")
 
 
@@ -76,7 +76,7 @@ class BoardRepo:
 
         ``record=False`` exists for the Harness and for audit paths, which must
         be able to inspect the board without contaminating the independence
-        record of any worker. It is never used on behalf of a neuocyte.
+        record of any neuocyte. It is never used on behalf of a neuocyte.
         """
         clauses = ["status != 'retracted'"]
         params: list[Any] = []
@@ -413,7 +413,7 @@ class BoardRepo:
         return [self._hydrate(r) for r in rows]
 
     def latest_seq(self) -> int:
-        """The cursor a worker should remember to poll for new posts."""
+        """The cursor a neuocyte should remember to poll for new posts."""
         row = self.conn.execute(
             "SELECT COALESCE(MAX(seq), 0) AS s FROM board_posts").fetchone()
         return int(row["s"])

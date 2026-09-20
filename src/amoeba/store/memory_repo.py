@@ -274,7 +274,7 @@ class MemoryRepo:
         min_confidence: float = 0.0,
     ) -> list[dict[str, Any]]:
         """Search maintained memory. Never searches raw history: an audit does
-        that explicitly through :mod:`synthetic_mind.store.events`."""
+        that explicitly through :mod:`amoeba.store.events`."""
         clauses: list[str] = ["confidence >= ?"]
         params: list[Any] = [min_confidence]
         if scope == "active":

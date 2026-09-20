@@ -13,8 +13,8 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "src"))
 
-from synthetic_mind.config import load_config  # noqa: E402
-from synthetic_mind.rpc import RpcClient, read_or_create_token  # noqa: E402
+from amoeba.config import load_config  # noqa: E402
+from amoeba.rpc import RpcClient, read_or_create_token  # noqa: E402
 
 
 def show(label: str, obj: object, limit: int = 700) -> None:
@@ -69,13 +69,13 @@ def main() -> int:
               f"audit_id={res.get('audit_id')} disagreement={res.get('disagreement_id')}")
         show("audit limitations", audit.get("limitations"))
 
-    # 5. investigation: publishes an Ego snapshot and admits worker work
+    # 5. investigation: publishes an Ego snapshot and admits neuocyte work
     inv = c.call("ego_investigate",
                  question="What limits concurrent sessions on this machine?",
                  constraints="one paragraph")
     show("ego_investigate", inv, 900)
 
-    # 6. wait for a worker to pick it up and commit a finding
+    # 6. wait for a neuocyte to pick it up and commit a finding
     work = ((inv.get("result") or {}).get("work") or {})
     work_id = work.get("work_id")
     if work_id:
@@ -89,7 +89,7 @@ def main() -> int:
                             "snapshot_id", "failure")})
         if item.get("result"):
             r = item["result"]
-            print(f"  worker instantiation: {r.get('instantiation', {}).get('method')}")
+            print(f"  neuocyte instantiation: {r.get('instantiation', {}).get('method')}")
             print(f"  finding: {str(r.get('finding'))[:160]}")
 
     # 7. provenance chain for the conversational operation
