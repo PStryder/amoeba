@@ -8,6 +8,7 @@ not merely be documented incorrectly.
 from __future__ import annotations
 
 import os
+import subprocess
 import sys
 import time
 from pathlib import Path
@@ -27,6 +28,12 @@ PROJECT_FILE = str(Path(__file__).resolve().parents[1] / "config.toml")
 @pytest.fixture(scope="module")
 def manager(tmp_path_factory):
     root = tmp_path_factory.mktemp("sbxroot")
+    # Reproduce the condition the real deployment is in: the sandbox root sits
+    # under a world-writable parent. Without this the ACL tests below would
+    # pass on a temp directory that was never exposed in the first place, and
+    # prove nothing about hardening.
+    subprocess.run(["icacls", str(root), "/grant", "*S-1-1-0:(OI)(CI)(F)", "/Q"],
+                   capture_output=True, text=True, check=True)
     m = SandboxManager(root)
     ok, detail = m.available()
     if not ok:
@@ -290,3 +297,120 @@ def test_runtime_has_no_third_party_packages(manager):
             assert line.endswith("False"), f"third-party module reachable: {line}"
     finally:
         manager.destroy(r.sandbox_id)
+
+
+# ---------------------------------------------------------------------------
+# The inward boundary: what the rest of the machine can do to the sandbox.
+#
+# Everything above asks whether sandboxed code can reach out. These ask the
+# opposite question, which was open until filesystem hardening existed. See
+# tests/test_filesystem_hardening.py for the mechanism itself; these assert it
+# is actually applied to the directories that matter.
+# ---------------------------------------------------------------------------
+def _dacl(path):
+    from amoeba.security import read_dacl
+    return " ".join(read_dacl(Path(path))).lower()
+
+
+def _open_to_outsiders(path):
+    t = _dacl(path)
+    return any(k in t for k in ("everyone", "s-1-1-0", "builtin\\users",
+                                "authenticated users"))
+
+
+def test_scratch_is_not_readable_by_processes_outside_amoeba(manager, sb):
+    """Exfiltration.
+
+    Whatever a neuocyte is asked to work on lands here. If any process on the
+    machine can read it, the sandbox has contained the code and leaked the
+    data.
+    """
+    manager.write_file(sb.sandbox_id, "work/secret.txt", "sensitive")
+    assert not _open_to_outsiders(sb.root), (
+        f"sandbox scratch is open to outsiders: {_dacl(sb.root)}")
+    assert not _open_to_outsiders(sb.root / "work" / "secret.txt")
+
+
+def test_the_sandbox_runtime_is_not_writable_by_outsiders(manager):
+    """Injection, from outside.
+
+    The runtime is a copied CPython tree that executes *inside* the container.
+    A writable stdlib file there is arbitrary code execution with the
+    container's rights on the next run -- and the AppContainer does not help,
+    because it bounds what the code reaches, not which code runs.
+    """
+    runtime = manager.ensure_runtime()
+    for target in (runtime.parent, runtime.parent / "Lib"):
+        assert not _open_to_outsiders(target), (
+            f"sandbox runtime is writable by outsiders: {target} -> {_dacl(target)}")
+
+
+def test_sandboxed_code_cannot_modify_its_own_runtime(manager, sb):
+    """Injection, from inside -- and this is the one that persists.
+
+    Scratch is destroyed with the sandbox, so code written there dies with it.
+    The runtime is *shared across every sandbox*. A neuocyte that could append
+    to a stdlib module would be running that code in every future sandbox,
+    including ones created for different work. The container is granted read
+    and execute on the runtime for exactly this reason.
+
+    Asserted by attempting the write from inside the container rather than by
+    reading the ACL, because the kernel's answer is the guarantee and the ACL
+    string is only the means.
+    """
+    runtime = manager.ensure_runtime()
+    targets = [str(runtime.parent / "Lib" / "os.py"),
+               str(runtime.parent / "injected.py"),
+               str(runtime.parent / "Lib" / "site-packages" / "evil.py")]
+    out = run(manager, sb, (
+        "import pathlib\n"
+        f"for t in {targets!r}:\n"
+        "    try:\n"
+        "        with open(t, 'a') as f:\n"
+        "            f.write('# injected')\n"
+        "        print('WROTE', t)\n"
+        "    except OSError as e:\n"
+        "        print('denied', type(e).__name__)\n"
+    ))
+    assert out.exit_code == 0, out.stderr
+    assert "WROTE" not in out.stdout, (
+        f"sandboxed code modified the shared runtime: {out.stdout}")
+    assert out.stdout.count("denied") == len(targets)
+
+
+def test_the_scratch_dacl_names_only_its_own_container(manager):
+    """One sandbox's container SID must not appear on another's scratch.
+
+    Isolation between sandboxes is tested above by trying to read across them;
+    this asserts the same thing one layer down, where the grant is made.
+    """
+    a = manager.create(owner="wk_acl_a")
+    b = manager.create(owner="wk_acl_b")
+    try:
+        assert a.container_sid.lower() in _dacl(a.root)
+        assert b.container_sid.lower() not in _dacl(a.root), (
+            "another sandbox's container SID is on this scratch DACL")
+        assert a.container_sid.lower() not in _dacl(b.root)
+    finally:
+        manager.destroy(a.sandbox_id)
+        manager.destroy(b.sandbox_id)
+
+
+def test_destroying_a_sandbox_revokes_its_grant_on_the_shared_runtime(manager):
+    """Scratch is deleted on destroy; the runtime is shared and is not.
+
+    Without explicit revocation the runtime DACL gains one ACE per sandbox ever
+    created, and a retired container's SID keeps read+execute on the
+    interpreter. AppContainer SIDs derive from the container name, so a stale
+    grant is a grant to whoever next claims that name.
+    """
+    runtime = manager.ensure_runtime()
+    s = manager.create(owner="wk_revoke")
+    sid = s.container_sid
+    assert sid.lower() in _dacl(runtime.parent), (
+        "the container was never granted access to the runtime; "
+        "this test is not observing what it claims to")
+
+    manager.destroy(s.sandbox_id)
+    assert sid.lower() not in _dacl(runtime.parent), (
+        "a destroyed sandbox's container SID still has access to the runtime")

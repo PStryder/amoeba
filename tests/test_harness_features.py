@@ -186,7 +186,7 @@ def test_artifact_promotion_is_proposal_then_harness_decision(stack: LiveStack):
                               decided_by="supervisor")
         assert promoted["status"] == "promoted"
         assert promoted["sha256"] == proposed["sha256"]
-        assert promoted["content_changed_since_proposal"] is False
+        assert promoted["content_verified"] is True
         after = set(workspace.glob("*"))
         assert len(after) == len(before) + 1
         landed = (after - before).pop()
@@ -213,6 +213,50 @@ def test_the_harness_can_refuse_a_promotion(stack: LiveStack):
         assert out["status"] == "rejected" and out["receipt_id"]
         listing = stack.call("artifact_list", status="rejected")
         assert any(a["artifact_id"] == art["artifact_id"] for a in listing)
+    finally:
+        stack.call("sandbox_destroy", sandbox_id=sid)
+
+
+@pytest.mark.skipif(sys.platform != "win32", reason="AppContainer is Windows-only")
+def test_promotion_refuses_content_that_changed_after_it_was_proposed(stack: LiveStack):
+    """Promotion is hash-checked at the moment of copying, and fails closed.
+
+    There is a real gap between proposing an artifact and the Harness deciding
+    on it, and the file sits in a sandbox the neuocyte can still write to. The
+    reviewer approves a digest; what gets copied has to be that digest and not
+    whatever is on disk when the decision lands.
+
+    The failure condition is the point: nothing may reach the workspace. An
+    earlier version reported the change in its return value and copied the file
+    anyway, which is a note in a receipt nobody reads, not a control.
+    """
+    if not _sandbox_ok(stack):
+        pytest.skip("sandbox unavailable")
+    sid = stack.call("sandbox_create", owner="wk_1")["sandbox_id"]
+    try:
+        stack.call("sandbox_write", sandbox_id=sid, path="work/checker.py",
+                   content="def check(x):\n    return x > 0\n")
+        art = stack.call("artifact_propose", sandbox_id=sid, path="work/checker.py",
+                         rationale="reviewed and sound", proposed_by="wk_1")
+
+        # The swap a compromised or over-eager neuocyte would make.
+        stack.call("sandbox_write", sandbox_id=sid, path="work/checker.py",
+                   content="import os\nos.system('calc')\n")
+
+        workspace = Path(stack.cfg.workspace_dir)
+        before = set(workspace.glob("*")) if workspace.exists() else set()
+
+        with pytest.raises(Exception):
+            stack.call("artifact_promote", artifact_id=art["artifact_id"],
+                       decided_by="supervisor")
+
+        assert set(workspace.glob("*")) == before, (
+            "substituted content reached the durable workspace")
+        listing = stack.call("artifact_list", status="rejected")
+        assert any(a["artifact_id"] == art["artifact_id"] for a in listing), (
+            "the artifact was neither promoted nor recorded as rejected")
+        kinds = [e["kind"] for e in stack.call("history", limit=400)]
+        assert "artifact.rejected" in kinds
     finally:
         stack.call("sandbox_destroy", sandbox_id=sid)
 

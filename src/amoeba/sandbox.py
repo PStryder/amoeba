@@ -57,6 +57,7 @@ from typing import Any, Sequence
 from .errors import CapabilityUnsupported, InvalidInput, ResourceExhausted
 from .ids import new_id, sha256_hex
 from .logging_setup import get_logger
+from .security import audit_path, harden, revoke
 
 IS_WINDOWS = sys.platform == "win32"
 
@@ -200,6 +201,9 @@ class SandboxManager:
         self._lock = threading.RLock()
         self._sandboxes: dict[str, Sandbox] = {}
         self.root.mkdir(parents=True, exist_ok=True)
+        # The sandbox root inherits its parent's DACL, which on this machine
+        # granted Everyone full control. Harden before anything is written.
+        harden(self.root, log_name="sandbox")
 
     # -- capability -----------------------------------------------------
     def available(self) -> tuple[bool, str]:
@@ -220,7 +224,14 @@ class SandboxManager:
             "host_filesystem": "blocked except world-readable Windows system files",
             "credentials": "unreachable (no user-profile access)",
             "third_party_libraries": "none (stdlib-only runtime, no site-packages)",
-            "promotion": "proposal only; the Harness copies, hashes and receipts",
+            "promotion": "proposal only; the Harness copies, re-hashes and "
+                         "refuses content that changed since it was proposed",
+            "scratch_isolation": ("inheritance removed; DACL grants only this "
+                                  "container, the Amoeba account, SYSTEM and "
+                                  "Administrators"),
+            "residual_risk": ("a process running as the Amoeba account owns "
+                              "these directories and can rewrite the DACL; a "
+                              "dedicated service account is the fix"),
             "caveat": ("an AppContainer must read system DLLs to start, so parts of "
                        "C:\\Windows remain readable; nothing user-specific is"),
         }
@@ -267,8 +278,15 @@ class SandboxManager:
 
         sid_str = self._create_container(container_name)
         runtime = self.ensure_runtime()
-        self._grant(runtime.parent, sid_str, "(OI)(CI)(RX)")
-        self._grant(scratch, sid_str, "(OI)(CI)(F)")
+        # Runtime: read+execute for the container, and nothing for anyone
+        # outside Amoeba. A writable runtime is a code-injection path straight
+        # into the container -- the AppContainer bounds what the code can
+        # reach, not which code runs.
+        harden(runtime.parent, container_sid=sid_str,
+               container_rights="(OI)(CI)(RX)", log_name="sandbox")
+        # Scratch: full control for its own container only.
+        harden(scratch, container_sid=sid_str, container_rights="(OI)(CI)(F)",
+               log_name="sandbox")
 
         sb = Sandbox(sandbox_id=sandbox_id, owner=owner, root=scratch,
                      container_name=container_name, container_sid=sid_str,
@@ -295,18 +313,6 @@ class SandboxManager:
         advapi.ConvertSidToStringSidW(sid, ctypes.byref(s))
         return s.value
 
-    @staticmethod
-    def _grant(path: Path, sid: str, perms: str) -> None:
-        # PowerShell rather than a bare icacls call: a POSIX-style shell mangles
-        # the /grant switch into a path.
-        r = subprocess.run(
-            ["powershell", "-NoProfile", "-NonInteractive", "-Command",
-             f"icacls '{path}' /grant '*{sid}:{perms}' /T /Q"],
-            capture_output=True, text=True, timeout=300)
-        if r.returncode != 0:
-            raise SandboxUnavailable("could not ACL sandbox path", path=str(path),
-                                     stderr=(r.stderr or r.stdout)[:200])
-
     def get(self, sandbox_id: str) -> Sandbox:
         sb = self._sandboxes.get(sandbox_id)
         if sb is None or sb.destroyed:
@@ -328,6 +334,11 @@ class SandboxManager:
                 userenv.DeleteAppContainerProfile(ctypes.c_wchar_p(sb.container_name))
             except Exception:  # noqa: BLE001
                 self.log.debug("profile delete failed for %s", sb.container_name)
+            # The runtime is shared, so its grant to this container is not
+            # removed by deleting the scratch. Left in place it would accumulate
+            # one dead ACE per sandbox and keep a retired container's SID
+            # able to read and execute the interpreter.
+            revoke(self.runtime_dir, sb.container_sid, log_name="sandbox")
             if not keep_scratch:
                 shutil.rmtree(sb.root, ignore_errors=True)
             sb.destroyed = True
@@ -387,12 +398,24 @@ class SandboxManager:
                 "content": data[:max_bytes].decode("utf-8", "replace")}
 
     def list_files(self, sandbox_id: str, *, limit: int = 200) -> list[dict[str, Any]]:
+        """Files in the scratch tree.
+
+        Skips anything that resolves outside the root. Sandboxed code can
+        create a junction inside its own scratch, and rglob will happily walk
+        through it -- which would leak names and sizes from wherever it points.
+        """
         sb = self.get(sandbox_id)
         root = sb.root.resolve()
         out = []
         for p in sorted(root.rglob("*")):
-            if not p.is_file():
+            if p.is_symlink() or not p.is_file():
                 continue
+            try:
+                real = p.resolve()
+            except OSError:
+                continue
+            if real != root and root not in real.parents:
+                continue        # a junction pointing out of the sandbox
             if len(out) >= limit:
                 break
             out.append({"path": p.relative_to(root).as_posix(),
@@ -401,8 +424,23 @@ class SandboxManager:
         return out
 
     def scratch_bytes(self, sandbox_id: str) -> int:
+        """Bytes under scratch, not following links out of it."""
         sb = self.get(sandbox_id)
-        return sum(p.stat().st_size for p in sb.root.rglob("*") if p.is_file())
+        root = sb.root.resolve()
+        total = 0
+        for p in root.rglob("*"):
+            if p.is_symlink() or not p.is_file():
+                continue
+            try:
+                if p.resolve().parents and root in p.resolve().parents:
+                    total += p.stat().st_size
+            except OSError:
+                continue
+        return total
+
+    def audit(self, sandbox_id: str) -> dict[str, Any]:
+        """Who can reach this sandbox's scratch, according to the filesystem."""
+        return audit_path(self.get(sandbox_id).root)
 
     # -- execution ------------------------------------------------------
     def run_python(self, sandbox_id: str, *, code: str | None = None,

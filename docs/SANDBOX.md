@@ -125,6 +125,82 @@ neuocyte through the Harness. An external client can see the consequences
 (`id_health` reports sandbox capabilities; artifacts appear in the event log)
 but cannot ask the mind to run code on its behalf.
 
+## The other direction: protecting the sandbox from the host
+
+Everything above is about what code inside the container can reach. The
+opposite question — what the rest of the machine can do to the sandbox — was
+open until filesystem hardening was added, and it mattered more than it looks.
+
+The sandbox root is created under `F:\hexylab`, which grants
+`Everyone:(OI)(CI)(F)`. Directories inherit their parent's DACL, so *measured,
+not assumed*, every Amoeba directory was world-writable. Three consequences:
+
+| | What it meant |
+|---|---|
+| **Injection** | The runtime is a copied CPython tree. Any process could overwrite a stdlib `.py` file or DLL, and the next neuocyte run would execute it *inside* the container, with the container's rights. The AppContainer bounds what that code reaches; it says nothing about which code runs. |
+| **Exfiltration** | Scratch contents — including whatever a neuocyte was asked to work on — were readable by any process on the machine. The containment boundary held the code and leaked the data. |
+| **Tampering** | The event log, the content-addressed blobs and the promoted workspace were writable by any process. The hash chain detects that, but detection after the fact is not prevention. |
+
+### What hardening does
+
+Each Amoeba directory has inheritance removed and an explicit DACL:
+
+| Principal | Gets |
+|---|---|
+| The account Amoeba runs as | full control |
+| `SYSTEM` | full control |
+| `Administrators` | full control |
+| The AppContainer SID | full control on **its own** scratch; read+execute on the shared runtime |
+| Everyone / Users / Authenticated Users | **nothing** |
+
+Two details are load-bearing and both were learned by getting them wrong:
+
+* It is **one** `icacls` invocation. Splitting it into `/inheritance:r` then
+  `/grant` leaves a window in which a failure strips the DACL and locks out the
+  owner. That is not hypothetical — it happened during development and
+  recovering needed `/reset /T`.
+* It is applied to the **directory only**, never with `/T`. `(OI)(CI)` are
+  *inheritance* flags and convey nothing on a file, so applying the grant to
+  children produces files with an ACE that grants no access while `icacls`
+  reports success. Children re-inherit from the hardened directory instead, and
+  the permissive ACEs vanish with the inheritance that carried them.
+
+Hardening is verified immediately after it is applied. If the Amoeba account
+can no longer use the directory, inheritance is restored — fail safe, not fail
+locked.
+
+### The runtime is shared; scratch is not
+
+Scratch dies with its sandbox, so code a neuocyte writes there cannot outlive
+it. The runtime is shared by every sandbox, which makes it the only
+*persistent* injection path available from inside: a neuocyte that could append
+to a stdlib module would be running that code in every future sandbox,
+including ones created for unrelated work. The container therefore gets
+read+execute, never write, and that grant is revoked when the container is
+destroyed — otherwise the runtime DACL would accumulate one ACE per sandbox
+ever created, and a retired container's SID would keep access. AppContainer
+SIDs derive from the container name, so a stale grant is a grant to whoever
+next claims that name.
+
+This is asserted by attempting the write *from inside the container* and
+requiring the kernel to refuse it, rather than by reading back the ACL we just
+wrote.
+
+### Residual risk, stated plainly
+
+**A process running as the same account can undo all of this.** The Amoeba user
+owns these directories, and on Windows an object's owner implicitly holds
+`WRITE_DAC`: it can rewrite the ACL and restore its own access. Hardening
+therefore stops *other* accounts, and stops casual or accidental access from
+this one — a backup agent, a search indexer, a careless script, another tool.
+It is not a boundary against a determined process running as you.
+
+The fix for that threat is a dedicated low-privilege service account for
+Amoeba, which is a deployment decision rather than something the code can
+impose on its own host. Until then `audit_paths` reports the exposure — it is
+surfaced in `id_health` under `filesystem` — so the gap stays visible instead
+of being quietly assumed away.
+
 ## What this is not
 
 This is a containment boundary against a **mistaken or over-eager model**,

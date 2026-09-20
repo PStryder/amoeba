@@ -642,6 +642,14 @@ def build(sup: "Supervisor") -> dict[str, Any]:
             base["context"] = {"unavailable": repr(exc)}
         base["board"] = mind.board.stats()
         try:
+            from .security import audit_paths
+
+            base["filesystem"] = audit_paths(
+                [sup.cfg.state_dir, sup.cfg.blob_dir, sup.cfg.sandbox_dir,
+                 sup.cfg.workspace_dir])
+        except Exception as exc:  # noqa: BLE001
+            base["filesystem"] = {"error": repr(exc)}
+        try:
             base["sandbox"] = (sup.sandboxes.capabilities() if sup.sandboxes
                                else {"sandbox_available": False})
         except Exception as exc:  # noqa: BLE001

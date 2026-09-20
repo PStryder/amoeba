@@ -32,6 +32,7 @@ from .homeostasis import ContextHomeostasis, HomeostasisConfig
 from .mind import Mind
 from .rpc import RpcClient, RpcServer, read_or_create_token, wait_for_port
 from .sandbox import SandboxManager
+from .security import audit_paths, harden_state_tree
 from .store.events import read_events
 from .store.writer import Mutation
 
@@ -232,6 +233,13 @@ class Supervisor:
     # ------------------------------------------------------------------
     def start(self) -> None:
         self.lock.acquire()
+        # Before opening the database: these directories inherit their parent's
+        # DACL, and a permissive parent leaves the event log, the blobs and the
+        # sandbox runtime writable by anyone on the machine.
+        hardening = harden_state_tree(self.cfg)
+        if hardening["audit"]["exposed_count"]:
+            self.log.error("state tree exposed to %s after hardening",
+                           hardening["audit"]["exposed_paths"])
         self.mind = Mind(self.cfg)
         self.homeostasis.mind = self.mind
         if self.cfg.sandbox.enabled:

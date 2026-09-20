@@ -19,7 +19,7 @@ import shutil
 import time
 from typing import TYPE_CHECKING, Any, Sequence
 
-from .errors import InvalidInput, NotFound, ResourceExhausted
+from .errors import IntegrityError, InvalidInput, NotFound, ResourceExhausted
 from .ids import new_id, sha256_hex
 from .sandbox import SandboxLimits
 from .store.events import EventKind
@@ -329,12 +329,36 @@ def build(sup: "Supervisor") -> dict[str, Any]:  # noqa: C901
             raise InvalidInput("file type is not promotable",
                                suffix=suffix, allowed=sorted(PROMOTABLE_SUFFIXES))
 
+        data = src.read_bytes()
+        digest = sha256_hex(data)
+        if digest != row["sha256"]:
+            # Fail closed. The rationale the Harness is acting on describes the
+            # bytes that were proposed; promoting different bytes under that
+            # approval is the whole shape of a time-of-check/time-of-use
+            # attack. Re-propose instead.
+            def rejected(m: Mutation) -> None:
+                m.sql("UPDATE artifacts SET status = 'rejected', decided_by = ?,"
+                      " decided_at = ?, reason = ? WHERE artifact_id = ?",
+                      (decided_by, time.time(),
+                       "content changed after proposal", artifact_id))
+                m.emit(EventKind.ARTIFACT_REJECTED, {
+                    "artifact_id": artifact_id, "decided_by": decided_by,
+                    "reason": "content changed between proposal and promotion",
+                    "sha256_at_proposal": row["sha256"],
+                    "sha256_on_arrival": digest})
+
+            mind.writer.apply(rejected, actor=decided_by, operation_id=operation_id,
+                              mutation_id=f"art-tamper:{artifact_id}")
+            raise IntegrityError(
+                "artifact content changed between proposal and promotion; "
+                "refusing to promote bytes the Harness did not review",
+                artifact_id=artifact_id, sha256_at_proposal=row["sha256"],
+                sha256_on_arrival=digest)
+
         workspace = sup.cfg.workspace_dir
         workspace.mkdir(parents=True, exist_ok=True)
         # The Harness names the destination: artifact id + original basename.
         dest = workspace / f"{artifact_id}_{src.name}"
-        data = src.read_bytes()
-        digest = sha256_hex(data)
         dest.write_bytes(data)
         blob = mind.blobs.put(data)
 
@@ -355,8 +379,8 @@ def build(sup: "Supervisor") -> dict[str, Any]:  # noqa: C901
                                        mutation_id=f"art-promote:{artifact_id}")
         return {"artifact_id": artifact_id, "status": "promoted",
                 "workspace_path": dest.name, "bytes": len(data), "sha256": digest,
-                "content_changed_since_proposal": digest != row["sha256"],
-                "blob": blob, "receipt_id": receipt.receipt_id}
+                "content_verified": True, "blob": blob,
+                "receipt_id": receipt.receipt_id}
 
     def artifact_reject(*, artifact_id: str, reason: str,
                         decided_by: str = "supervisor",

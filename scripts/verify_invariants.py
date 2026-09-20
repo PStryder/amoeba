@@ -240,6 +240,89 @@ MUTATIONS: list[Mutation] = [
         ["test_path_traversal_is_rejected"],
         layer="SandboxManager.resolve_inside (the path check)",
     ),
+    Mutation(
+        "I29", "Hardening severs inheritance, so a parent cannot re-grant",
+        "src/amoeba/security.py",
+        '    cmd = [str(path), "/inheritance:r"]',
+        '    cmd = [str(path)]  # MUTANT: inheritance left live',
+        ["test_hardening_removes_every_ace_for_everyone",
+         "test_hardening_removes_inheritance_so_the_parent_cannot_regrant",
+         "test_children_lose_the_permissive_access_they_inherited"],
+        layer="security.harden (the icacls invocation itself)",
+        note="the grants still apply; only the severing is removed. If the "
+             "tests stay green they are asserting our return value rather "
+             "than the DACL the OS reports.",
+    ),
+    Mutation(
+        "I30", "Hardening that would lock the account out is rolled back",
+        "src/amoeba/security.py",
+        '        _icacls([str(path), "/reset", "/Q"])',
+        '        pass  # MUTANT: no rollback; directory left unopenable',
+        ["test_hardening_rolls_back_rather_than_locking_the_account_out"],
+        layer="security.harden (the post-hardening self-check)",
+    ),
+    Mutation(
+        "I30b", "Hardening is a single atomic icacls call",
+        "src/amoeba/security.py",
+        "    r = _icacls(cmd)",
+        '    _icacls([str(path), "/inheritance:r", "/Q"])  # MUTANT: two-step\n'
+        "    r = _icacls([c for c in cmd if c != \"/inheritance:r\"])",
+        ["test_hardening_is_one_atomic_icacls_call"],
+        layer="security.harden (call structure)",
+        note="reproduces the two-step form that locked the state tree out "
+             "when the second call failed. The end state is identical, so "
+             "only a test counting calls can catch it.",
+    ),
+    Mutation(
+        "I31", "Every state directory is hardened, not just the root",
+        "src/amoeba/security.py",
+        "    for t in targets:\n        results.append(harden(t, log_name=log_name))",
+        "    for t in targets[:1]:  # MUTANT: root only, trust inheritance\n"
+        "        results.append(harden(t, log_name=log_name))",
+        ["test_every_state_directory_is_hardened_including_ones_outside_the_root"],
+        layer="security.harden_state_tree (which directories are covered)",
+    ),
+    Mutation(
+        "I32", "A destroyed container loses its grant on the shared runtime",
+        "src/amoeba/sandbox.py",
+        '            revoke(self.runtime_dir, sb.container_sid, log_name="sandbox")',
+        "            pass  # MUTANT: stale grant left on the runtime",
+        ["test_destroying_a_sandbox_revokes_its_grant_on_the_shared_runtime"],
+        layer="SandboxManager.destroy (teardown of the shared grant)",
+    ),
+    Mutation(
+        "I32b", "Sandboxed code gets execute, not write, on its runtime",
+        "src/amoeba/sandbox.py",
+        '               container_rights="(OI)(CI)(RX)", log_name="sandbox")',
+        '               container_rights="(OI)(CI)(F)", log_name="sandbox")',
+        ["test_sandboxed_code_cannot_modify_its_own_runtime"],
+        layer="SandboxManager.create (the rights granted to the container)",
+        note="the injection path that persists across sandboxes. Asserted "
+             "from inside the container, so the kernel decides, not the ACL "
+             "string we wrote.",
+    ),
+    Mutation(
+        "I33", "The audit states residual exposure rather than claiming safety",
+        "src/amoeba/security.py",
+        '        "owner_can_restore_access": True,',
+        '        "owner_can_restore_access": False,  # MUTANT: overclaim',
+        ["test_the_audit_does_not_claim_protection_it_does_not_have"],
+        layer="security.audit_path (the report itself)",
+        note="honesty is a guarantee here like any other. The failure mode "
+             "this defends against is the report quietly becoming an "
+             "assertion of safety once the hardening starts working.",
+    ),
+    Mutation(
+        "I34", "Promotion copies the reviewed bytes or refuses",
+        "src/amoeba/harness_api.py",
+        '        if digest != row["sha256"]:',
+        '        if False:  # MUTANT: promote whatever is on disk now',
+        ["test_promotion_refuses_content_that_changed_after_it_was_proposed"],
+        layer="artifact_promote (the re-hash at time of copy)",
+        note="a time-of-check/time-of-use swap. The file stays writable by "
+             "the neuocyte between proposal and decision, so the digest has "
+             "to be re-checked when the bytes are actually read.",
+    ),
 ]
 
 

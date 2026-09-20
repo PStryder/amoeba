@@ -211,6 +211,46 @@ failing.
 failure that hides every other one, so its pass counter is exposed in `health`.
 → `test_supervision_keeps_making_passes`
 
+**I29. Amoeba's directories are not reachable from outside Amoeba.** Every
+state directory has inheritance removed and an explicit DACL naming only the
+Amoeba account, `SYSTEM` and `Administrators`. Removing the ACEs without
+severing inheritance is not enough: any later grant on the parent would flow
+straight back down.
+→ `test_hardening_removes_every_ace_for_everyone`,
+`test_hardening_removes_inheritance_so_the_parent_cannot_regrant`
+
+**I30. Hardening fails safe, never locked.** It is one atomic `icacls`
+invocation, so no failure can leave a directory with a stripped DACL, and the
+result is verified afterwards — if the Amoeba account can no longer use the
+directory, inheritance is restored rather than the state being left unopenable.
+→ `test_hardening_is_one_atomic_icacls_call`,
+`test_hardening_rolls_back_rather_than_locking_the_account_out`
+
+**I31. Every state directory is hardened, not just the root.** `blob_dir` and
+its siblings are separately configurable, so relying on inheritance from
+`state_dir` would silently leave a relocated blob store world-writable.
+→ `test_every_state_directory_is_hardened_including_ones_outside_the_root`
+
+**I32. Sandboxed code cannot modify the interpreter it runs on.** Scratch dies
+with its sandbox; the runtime is shared across all of them, so a write there
+would execute in every future sandbox. The container gets read+execute, and
+that grant is revoked when the container is destroyed.
+→ `test_sandboxed_code_cannot_modify_its_own_runtime`,
+`test_destroying_a_sandbox_revokes_its_grant_on_the_shared_runtime`
+
+**I33. Filesystem hardening is reported, not assumed.** `audit_paths` states
+the residual exposure — a process running as the Amoeba account owns these
+directories and can rewrite their DACLs — so the boundary is never described
+as stronger than it is.
+→ `test_the_audit_does_not_claim_protection_it_does_not_have`,
+`test_audit_reports_exposure_instead_of_asserting_safety`
+
+**I34. The Harness promotes the bytes it reviewed, or none.** Content is
+re-hashed at the moment of copying; if it differs from the digest that was
+proposed, the artifact is rejected and nothing reaches the workspace. Reporting
+the change while copying anyway is a note in a receipt, not a control.
+→ `test_promotion_refuses_content_that_changed_after_it_was_proposed`
+
 ---
 
 ## 3. Data model
