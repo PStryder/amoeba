@@ -358,6 +358,9 @@ def build(sup: "Supervisor") -> dict[str, Any]:
             work_id=work_id, neuocyte_id=neuocyte_id, fencing_token=fencing_token,
             result=result, pinned_state_ver=pinned_state_ver,
         )
+        # Scratch does not outlive the work that produced it. Anything worth
+        # keeping had to be proposed and promoted, which is the only way out.
+        sup.release_work_sandbox(work_id, reason="work completed")
         return {"receipt_id": receipt.receipt_id, "state_version": receipt.result_version,
                 "replayed": receipt.replayed}
 
@@ -366,11 +369,13 @@ def build(sup: "Supervisor") -> dict[str, Any]:
         receipt = mind.work.fail(work_id=work_id, neuocyte_id=neuocyte_id,
                                  fencing_token=fencing_token, failure=failure,
                                  requeue=requeue)
+        sup.release_work_sandbox(work_id, reason="work failed")
         return {"receipt_id": receipt.receipt_id}
 
     def cancel_work(*, work_id: str, actor: str = "supervisor", reason: str = ""
                     ) -> dict[str, Any]:
         receipt = mind.work.cancel(work_id=work_id, actor=actor, reason=reason)
+        sup.release_work_sandbox(work_id, reason=f"work cancelled: {reason}"[:200])
         return {"receipt_id": receipt.receipt_id}
 
     def get_work(*, work_id: str) -> dict[str, Any]:

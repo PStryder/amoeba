@@ -348,6 +348,78 @@ MUTATIONS: list[Mutation] = [
              "claim is the absence of serialisation, so the mutation has to "
              "introduce it.",
     ),
+    Mutation(
+        "I23", "A role may only call tools its role permits",
+        "src/amoeba/tools.py",
+        "        if role not in spec.allowed_roles:",
+        "        if False:  # MUTANT: role permissions ignored",
+        ["test_role_permissions_are_enforced"],
+        layer="ToolRegistry.execute (the role check)",
+    ),
+    Mutation(
+        "I23b", "A neuocyte cannot grant itself a capability by asking",
+        "src/amoeba/tools.py",
+        "    if not sandbox_allowed:\n        return reg",
+        "    if False:  # MUTANT: register sandbox tools regardless\n        return reg",
+        ["test_a_neuocyte_cannot_grant_itself_the_sandbox",
+         "test_sandbox_tools_are_absent_when_the_work_item_did_not_allow_them"],
+        layer="build_neuocyte_registry (where the work row's grant is applied)",
+        note="the load-bearing one. If a model can talk its way into a "
+             "sandbox there is no boundary, so the gate must come from the "
+             "work row and not from the request.",
+    ),
+    Mutation(
+        "I23c", "No neuocyte tool lets a model name a sandbox",
+        "src/amoeba/tools.py",
+        '        params=[ToolParam("code", "string", "Python source to execute",\n'
+        '                          required=True, max_length=20000)],',
+        '        params=[ToolParam("code", "string", "Python source to execute",\n'
+        '                          required=True, max_length=20000),\n'
+        '                ToolParam("sandbox_id", "string", "MUTANT: model-named sandbox",\n'
+        '                          max_length=64)],',
+        ["test_no_neuocyte_tool_accepts_a_sandbox_id"],
+        layer="the run_code tool schema (what the model can address)",
+    ),
+    Mutation(
+        "I23d", "A fenced neuocyte cannot still run code",
+        "src/amoeba/store/work_repo.py",
+        '        if int(row["fencing_token"]) != int(fencing_token):',
+        "        if False:  # MUTANT: stale tokens accepted",
+        ["test_a_fenced_neuocyte_cannot_invoke_a_tool"],
+        layer="WorkRepo.authorise_tool_call (the fencing check)",
+    ),
+    Mutation(
+        "I23e", "The tool loop is bounded by its turn limit",
+        "src/amoeba/neuocyte.py",
+        "        for turn in range(max_turns):",
+        "        for turn in range(10_000):  # MUTANT: turn limit removed",
+        ["test_the_tool_loop_stops_at_the_turn_limit"],
+        layer="Neuocyte._generate_with_tools (both turn bounds)",
+        note="defended twice, for two different reasons that happen to "
+             "overlap: range(max_turns) bounds the loop, and the "
+             "turn == max_turns - 1 check refuses to execute a tool whose "
+             "result the model would never get to read. Removing either alone "
+             "leaves the other stopping the loop, so negating the claim needs "
+             "both -- do not 'simplify' one away.",
+        also=[("            if turn == max_turns - 1:",
+               "            if False:  # MUTANT: last-turn guard removed")],
+    ),
+    Mutation(
+        "I23e2", "The tool loop is bounded by the token budget",
+        "src/amoeba/neuocyte.py",
+        "            if remaining <= 0:",
+        "            if False:  # MUTANT: budget ignored",
+        ["test_the_tool_loop_stops_when_the_token_budget_is_exhausted"],
+        layer="Neuocyte._generate_with_tools (the budget bound)",
+    ),
+    Mutation(
+        "I23e3", "The tool loop is bounded by the wall-clock deadline",
+        "src/amoeba/neuocyte.py",
+        "            if time.time() >= deadline:",
+        "            if False:  # MUTANT: deadline ignored",
+        ["test_the_tool_loop_stops_at_the_deadline"],
+        layer="Neuocyte._generate_with_tools (the deadline bound)",
+    ),
 ]
 
 

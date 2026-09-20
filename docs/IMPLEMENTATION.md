@@ -40,7 +40,7 @@ Read this before trusting anything below it.
 | Fork agrees with exact recomputation | **Implemented, measured with a caveat** | same top-1, KL < 0.007; **not** bit-identical — see [RUNTIME §3](RUNTIME.md#3-fork-vs-exact-recomputation) |
 | Cross-neuocyte / Ego-neuocyte cache isolation | **Implemented, tested** | `test_worker_tails_are_private` |
 | Tool-call schema + permission validation | **Implemented, tested** | `tests/test_tools.py` |
-| Tool *execution* loop (model requests -> harness runs -> result returned) | **Not wired** | registry works and is tested; nothing calls it. Requests are parsed and reported, never run |
+| Tool *execution* loop (model requests -> harness runs -> result returned) | **Wired** | multi-turn loop in the neuocyte; execution happens in the Harness via `tool_invoke`, gated on the work row's `sandbox_allowed`, bounded by turns/budget/deadline, every call receipted |
 | Cognitive blackboard: posts, threads, relations, receipts | **Implemented, tested** | `tests/test_blackboard.py` |
 | Independent replication vs socially propagated agreement | **Implemented, tested** | every read recorded; `board_corroboration` splits the two |
 | Board-naive neuocytes (`board_access="none"`) | **Implemented, tested** | `test_a_naive_worker_posts_without_having_read_the_board` |

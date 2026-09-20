@@ -47,6 +47,7 @@ class DeterministicBackend:
         self._free_seq: list[int] = []
         self._loaded = False
         self._used_cells = 0
+        self._scripted: list[str] = []
 
     # -- lifecycle ------------------------------------------------------
     def load(self) -> dict[str, Any]:
@@ -247,6 +248,24 @@ class DeterministicBackend:
                     completion_tokens=0, time_to_first_token=0.0,
                     total_seconds=0.0)
             t0 = time.perf_counter()
+            if self._scripted:
+                # Still labelled as simulated: a scripted reply is no more
+                # model inference than a hashed one, and the label is what
+                # stops either being mistaken for it.
+                text = f"{SIM_PREFIX} {self._scripted.pop(0)}"
+                out_tokens = self.tokenize(text)
+                sess.tokens.extend(out_tokens)
+                self._used_cells += len(out_tokens)
+                sess.tokens_generated += len(out_tokens)
+                elapsed = time.perf_counter() - t0
+                if on_token is not None:
+                    on_token(text)
+                return GenerationResult(
+                    session_id=session_id, text=text, tokens=out_tokens,
+                    finish_reason="scripted",
+                    prompt_tokens=sess.n_past - len(out_tokens),
+                    completion_tokens=len(out_tokens),
+                    time_to_first_token=elapsed, total_seconds=elapsed)
             seed_material = f"{sess.role}|{seed}|{','.join(map(str, sess.tokens))}"
             digest = hashlib.sha256(seed_material.encode()).hexdigest()
             n_words = max(1, min(max_tokens // 4, 16))
@@ -268,6 +287,20 @@ class DeterministicBackend:
                 time_to_first_token=elapsed, total_seconds=elapsed,
                 first_token_logprob_top=self.top_logits(session_id, 3),
             )
+
+    def script_responses(self, responses: Sequence[str]) -> int:
+        """Queue exact replies for the next generations.
+
+        Only the deterministic backend has this, and the inference service
+        exposes it only if the backend does -- so it does not exist when a real
+        model is loaded. It is here because the tool-execution loop cannot be
+        exercised end to end otherwise: hashed text never contains a tool call,
+        so the loop would be tested only against inputs that never take its
+        interesting branch.
+        """
+        with self._lock:
+            self._scripted = list(responses)
+            return len(self._scripted)
 
     def generate_batched(self, requests: Sequence[dict[str, Any]], **kwargs: Any
                          ) -> dict[str, GenerationResult]:

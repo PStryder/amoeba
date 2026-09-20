@@ -181,6 +181,44 @@ class WorkRepo:
         _r, ok = self.writer.apply(body, actor=neuocyte_id, bump_version=False)
         return bool(ok)
 
+    def authorise_tool_call(self, *, work_id: str, neuocyte_id: str,
+                            fencing_token: int) -> dict[str, Any]:
+        """What is this neuocyte permitted to do, according to durable state?
+
+        The permissions returned here are read from the work row, never from
+        anything the neuocyte sent. A neuocyte that asks for a capability it
+        was not admitted with is refused, and asking is not a way to acquire
+        one -- which is the whole point of admitting work with an explicit
+        ``sandbox_allowed`` rather than letting a model decide.
+
+        The lease is checked at the same time and on the same row, so a
+        neuocyte that was killed, expired or superseded cannot still be running
+        code: its fencing token no longer matches and the call is refused
+        before any tool is reached.
+        """
+        row = self.db.conn.execute(
+            "SELECT status, lease_owner, fencing_token, sandbox_allowed, board_access,"
+            " objective FROM work_items WHERE work_id = ?", (work_id,)).fetchone()
+        if row is None:
+            raise NotFound("no such work item", work_id=work_id)
+        if row["status"] != "leased":
+            raise Fenced("work item is not leased; refusing tool call",
+                         work_id=work_id, status=row["status"])
+        if row["lease_owner"] != neuocyte_id:
+            raise Fenced("work item is leased to another neuocyte",
+                         work_id=work_id, owner=row["lease_owner"],
+                         presented=neuocyte_id)
+        if int(row["fencing_token"]) != int(fencing_token):
+            raise Fenced("stale fencing token; this neuocyte has been superseded",
+                         work_id=work_id, presented=fencing_token,
+                         current=row["fencing_token"])
+        return {
+            "work_id": work_id,
+            "objective": row["objective"],
+            "sandbox_allowed": bool(row["sandbox_allowed"]),
+            "board_access": row["board_access"],
+        }
+
     def complete(
         self,
         *,

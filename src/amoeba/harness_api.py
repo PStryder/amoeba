@@ -23,6 +23,7 @@ from .errors import IntegrityError, InvalidInput, NotFound, ResourceExhausted
 from .ids import new_id, sha256_hex
 from .sandbox import SandboxLimits
 from .store.events import EventKind
+from .tools import ToolCallRequest, build_neuocyte_registry
 from .store.writer import Mutation
 
 if TYPE_CHECKING:
@@ -32,6 +33,22 @@ SCHEMA_VERSION = "1.0.0"
 PROMOTABLE_SUFFIXES = {".py", ".txt", ".md", ".json", ".csv", ".yaml", ".yml",
                        ".toml", ".sql", ".log", ".tsv", ".ini", ".cfg"}
 MAX_PROMOTED_BYTES = 16 * 1024 * 1024
+# Tool arguments are model-generated and can carry a whole file. The event
+# log keeps the shape and a digest, not the payload; the payload lives in
+# the sandbox, which is where it belongs.
+MAX_LOGGED_ARG_CHARS = 500
+
+
+def _redact(arguments: dict) -> dict:
+    out = {}
+    for k, v in arguments.items():
+        if isinstance(v, str) and len(v) > MAX_LOGGED_ARG_CHARS:
+            out[k] = {"truncated": True, "chars": len(v),
+                      "sha256": sha256_hex(v.encode("utf-8", "replace")),
+                      "head": v[:MAX_LOGGED_ARG_CHARS]}
+        else:
+            out[k] = v
+    return out
 
 
 def build(sup: "Supervisor") -> dict[str, Any]:  # noqa: C901
@@ -248,7 +265,8 @@ def build(sup: "Supervisor") -> dict[str, Any]:  # noqa: C901
         return _sandbox_manager().list()
 
     def sandbox_destroy(*, sandbox_id: str, actor: str = "supervisor",
-                        operation_id: str | None = None) -> dict[str, Any]:
+                        reason: str = "", operation_id: str | None = None
+                        ) -> dict[str, Any]:
         mgr = _sandbox_manager()
         out = mgr.destroy(sandbox_id)
 
@@ -256,7 +274,8 @@ def build(sup: "Supervisor") -> dict[str, Any]:  # noqa: C901
             m.sql("UPDATE sandboxes SET status = 'destroyed', destroyed_at = ?"
                   " WHERE sandbox_id = ?", (time.time(), sandbox_id))
             m.emit(EventKind.SANDBOX_DESTROYED,
-                   {"sandbox_id": sandbox_id, "actor": actor})
+                   {"sandbox_id": sandbox_id, "actor": actor,
+                    "reason": reason})
 
         receipt, _ = mind.writer.apply(body, actor=actor, operation_id=operation_id,
                                        bump_version=False,
@@ -417,6 +436,91 @@ def build(sup: "Supervisor") -> dict[str, Any]:  # noqa: C901
     # ==================================================================
     # Context homeostasis
     # ==================================================================
+    # ==================================================================
+    # Tool execution
+    # ==================================================================
+    def tool_invoke(*, neuocyte_id: str, work_id: str, fencing_token: int,
+                    name: str, arguments: dict[str, Any] | None = None,
+                    turn: int = 0, operation_id: str | None = None
+                    ) -> dict[str, Any]:
+        """Execute one tool call on behalf of a neuocyte.
+
+        The neuocyte parses a request out of generated text and sends it here.
+        It does not execute it: this is the only path, and it runs in the
+        Harness rather than in the process holding the model's output.
+
+        Three things are established before any handler runs, all from durable
+        state rather than from the request:
+
+        * the work item is still leased to this neuocyte with this fencing
+          token, so a killed or superseded neuocyte cannot still be running code;
+        * the capabilities come from the work row, so asking for the sandbox is
+          not a way to be granted it;
+        * the sandbox, if any, is resolved from ``work_id``, so a model cannot
+          name one.
+
+        Both outcomes are recorded. A refusal is a fact about how the mind
+        governed itself, so it gets an event too, not just a return value.
+        """
+        arguments = arguments or {}
+        perms = mind.work.authorise_tool_call(
+            work_id=work_id, neuocyte_id=neuocyte_id, fencing_token=fencing_token)
+
+        registry = build_neuocyte_registry(
+            sup, work_id=work_id, neuocyte_id=neuocyte_id,
+            sandbox_allowed=perms["sandbox_allowed"])
+        request = ToolCallRequest(name=name, arguments=arguments, raw="")
+
+        def requested(m: Mutation) -> None:
+            m.emit(EventKind.TOOL_REQUESTED, {
+                "neuocyte_id": neuocyte_id, "work_id": work_id, "tool": name,
+                "arguments": _redact(arguments), "turn": turn,
+                "sandbox_allowed": perms["sandbox_allowed"]})
+
+        mind.writer.apply(requested, actor=neuocyte_id, operation_id=operation_id,
+                          bump_version=False)
+
+        outcome = registry.execute(request, role="neuocyte",
+                                   context={"work_id": work_id,
+                                            "neuocyte_id": neuocyte_id})
+
+        def recorded(m: Mutation) -> None:
+            if not outcome.accepted:
+                m.emit(EventKind.TOOL_REJECTED, {
+                    "neuocyte_id": neuocyte_id, "work_id": work_id, "tool": name,
+                    "reason": outcome.reason, "turn": turn,
+                    "arguments": _redact(arguments)})
+            else:
+                m.emit(EventKind.TOOL_RESULT, {
+                    "neuocyte_id": neuocyte_id, "work_id": work_id, "tool": name,
+                    "turn": turn, "error": outcome.error,
+                    "duration_seconds": round(outcome.duration_seconds, 4),
+                    "result_digest": sha256_hex(
+                        repr(outcome.result).encode("utf-8", "replace"))})
+
+        receipt, _ = mind.writer.apply(recorded, actor=neuocyte_id,
+                                       operation_id=operation_id,
+                                       bump_version=outcome.accepted
+                                       and not outcome.error)
+        return {**outcome.to_dict(), "receipt_id": receipt.receipt_id,
+                "turn": turn,
+                "available_tools": registry.names(role="neuocyte")}
+
+    def tool_schemas(*, work_id: str | None = None, role: str = "neuocyte"
+                     ) -> dict[str, Any]:
+        """What a role may call. Reflects the work item's real permissions."""
+        sandbox_allowed = False
+        if work_id:
+            row = mind.db.conn.execute(
+                "SELECT sandbox_allowed FROM work_items WHERE work_id = ?",
+                (work_id,)).fetchone()
+            sandbox_allowed = bool(row["sandbox_allowed"]) if row else False
+        reg = build_neuocyte_registry(sup, work_id=work_id or "", neuocyte_id="",
+                                      sandbox_allowed=sandbox_allowed)
+        return {"role": role, "sandbox_allowed": sandbox_allowed,
+                "tools": reg.schemas(role=role),
+                "prompt_block": reg.prompt_block(role=role)}
+
     def context_report() -> dict[str, Any]:
         return sup.homeostasis.measure().to_dict()
 
@@ -458,6 +562,8 @@ def build(sup: "Supervisor") -> dict[str, Any]:  # noqa: C901
         "sandbox_destroy": sandbox_destroy,
         "artifact_propose": artifact_propose, "artifact_promote": artifact_promote,
         "artifact_reject": artifact_reject, "artifact_list": artifact_list,
+        # tool execution
+        "tool_invoke": tool_invoke, "tool_schemas": tool_schemas,
         # homeostasis
         "context_report": context_report, "context_assess": context_assess,
         "context_rejuvenate": context_rejuvenate,

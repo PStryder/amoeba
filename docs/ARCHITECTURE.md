@@ -169,18 +169,38 @@ receipt-free; consequential changes go through the writer.
 
 **I23. A model can request a tool call; it cannot perform one.** Requests are
 parsed out of generated text, validated against a declared schema, checked
-against role permissions, and reported. No tool in the registry can reach a
-shell, the network, or the filesystem outside the state directory.
+against role permissions, executed **by the Harness**, and receipted. The
+neuocyte process that holds the model's output never executes anything: it
+sends the request to `tool_invoke` and receives a result.
 → `test_role_permissions_are_enforced`,
 `test_no_registered_tool_can_reach_a_shell_or_the_network`,
-`test_the_tool_execution_loop_is_not_wired_and_the_docs_say_so`
+`test_the_neuocyte_process_never_executes_a_tool_itself`
 
-*Wiring status:* the registry is implemented and tested, but **no production
-code path calls `ToolRegistry.execute`**. `ego_converse` parses tool requests,
-returns them in `tool_requests`, and says so in its `limitations`. So the
-enforcement is real and the execution loop is not built — a model's request is
-recorded and ignored, which is the safe direction to be incomplete in, but it
-is not the same as "the harness executes it".
+**I23b. A neuocyte cannot widen its own permissions.** `sandbox_allowed` is
+read from the work row at the moment of the call, never from the request. When
+it is false the sandbox tools are not registered at all, so there is no handler
+to reach. Asking is not a way to be granted.
+→ `test_a_neuocyte_cannot_grant_itself_the_sandbox`,
+`test_sandbox_tools_are_absent_when_the_work_item_did_not_allow_them`
+
+**I23c. A model cannot name a sandbox.** No tool takes a sandbox id: the
+sandbox is resolved from `work_id` server-side and created on first use, so
+there is no argument in which to put another neuocyte's sandbox.
+→ `test_no_neuocyte_tool_accepts_a_sandbox_id`,
+`test_two_work_items_get_different_sandboxes`
+
+**I23d. A fenced neuocyte cannot still run code.** The lease, owner and fencing
+token are checked on the work row before any tool runs, so a neuocyte that was
+killed, expired or superseded is refused rather than left executing.
+→ `test_a_fenced_neuocyte_cannot_invoke_a_tool`
+
+**I23e. The tool loop is bounded three ways.** Turns, token budget and
+wall-clock deadline each terminate it independently, and the binding reason is
+reported rather than swallowed. A model that keeps calling tools is an expected
+outcome, not a malfunction.
+→ `test_the_tool_loop_stops_at_the_turn_limit`,
+`test_the_tool_loop_stops_when_the_token_budget_is_exhausted`,
+`test_the_tool_loop_stops_at_the_deadline`
 
 ### Reporting
 

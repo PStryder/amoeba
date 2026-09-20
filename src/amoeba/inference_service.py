@@ -123,6 +123,13 @@ class InferenceService:
             "context_report": self.context_report,
             "stats": lambda: dict(self._stats),
             "shutdown": self.shutdown,
+            # Only present when the backend offers it, which is only the
+            # deterministic one. With a real model loaded this key does not
+            # exist and the verb is simply unknown -- there is no way to make
+            # an actual model return a canned string.
+            **({"script_responses":
+                lambda responses: {"queued": b.script_responses(responses)}}
+               if hasattr(b, "script_responses") else {}),
         }
 
     def cancel_generation(self, *, session_id: str) -> dict[str, Any]:

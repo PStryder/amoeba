@@ -46,8 +46,12 @@ def _declared_tests() -> dict[str, str]:
 def _invariants() -> list[tuple[str, str, list[str]]]:
     text = ARCH.read_text(encoding="utf-8")
     out = []
-    for block in re.split(r"\n(?=\*\*I\d+\.)", text):
-        m = re.match(r"\*\*(I\d+)\.\s*(.+?)\*\*", block, re.S)
+    # Suffixed ids (I23b) are separate claims, not decoration. Without the
+    # suffix in these patterns they fold silently into the preceding invariant
+    # and stop being checked at all -- which is how four of them were briefly
+    # documented with nothing enforcing that they named a real test.
+    for block in re.split(r"\n(?=\*\*I\d+[a-z]?\.)", text):
+        m = re.match(r"\*\*(I\d+[a-z]?)\.\s*(.+?)\*\*", block, re.S)
         if not m:
             continue
         tail = block.split("→", 1)[1] if "→" in block else ""
@@ -143,7 +147,11 @@ def test_the_cheaply_negatable_invariants_are_covered_by_the_harness():
     scope for source mutation and are listed here explicitly, so the exemption
     is a decision on the record rather than an omission.
     """
-    covered = {m["invariant"].rstrip("b") for m in _harness_mutations()}
+    covered = {m["invariant"] for m in _harness_mutations()}
+    # "I19b" defends "I19"; "I23e2" defends "I23e". A suffixed mutation
+    # covers the claim it is a further defence of, as well as itself.
+    covered |= {re.sub(r"(?<=\d)[a-z]?\d*$", "", c) for c in covered}
+    covered |= {re.sub(r"\d+$", "", c) for c in covered}
     exempt = {
         "I3":  "history/memory separation is asserted directly and has no guard to remove",
         "I9":  "needs a live process stack",
@@ -157,7 +165,6 @@ def test_the_cheaply_negatable_invariants_are_covered_by_the_harness():
         "I20": "needs a live process stack",
         "I21": "needs a live process stack",
         "I22": "needs a live process stack",
-        "I23": "the execution loop is not wired; there is no guarantee to negate",
         "I25": "needs a live process stack",
         "I26": "needs a live process stack",
         "I27": "needs a live process stack",

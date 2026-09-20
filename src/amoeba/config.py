@@ -55,6 +55,10 @@ class ArbiterConfig:
     neuocyte_token_budget: int = 2048
     neuocyte_max_age_seconds: float = 900.0
     lease_seconds: float = 90.0
+    # Tool turns per neuocyte. One of three independent bounds on the tool
+    # loop, alongside the token budget and the wall-clock deadline; a model
+    # that keeps calling tools is an expected outcome, not a malfunction.
+    max_tool_turns: int = 6
     # Weighted-fair split between user-directed work and Id maintenance.
     user_weight: float = 0.7
     maintenance_weight: float = 0.3

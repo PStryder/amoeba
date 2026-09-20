@@ -42,11 +42,24 @@ WORKER_INSTRUCTION = """You are a bounded neuocyte forked from the mind's Ego co
 You inherited the context above. Do one narrow task and stop.
 
 Task: {objective}
-{board}
+{board}{tools}
 Reply with exactly three lines:
 FINDING: <one sentence, the thing you actually determined>
 CONFIDENCE: <a number between 0 and 1>
 EVIDENCE: <what in the context above supports it, or "none in context">"""
+
+TOOLS_BLOCK = """
+{prompt_block}
+
+A tool call is a request, not an action: the Harness validates it, decides
+whether you may make it, runs it, and returns the result to you. Call a tool
+only when you need its result to answer; otherwise answer directly.
+"""
+
+TOOL_RESULT_BLOCK = """<tool_result name="{name}">
+{result}
+</tool_result>
+Continue. Use this result, or call another tool if you still need one."""
 
 BOARD_BLOCK = """
 What other neuocytes have already posted about this:
@@ -168,17 +181,18 @@ class Neuocyte:
 
         instantiation = self._instantiate_from_snapshot(snapshot, caps=caps)
         board_block, board_seen = self._board_context(item)
+        tools_block, tool_names = self._tools_block(item)
         prompt = WORKER_INSTRUCTION.format(objective=item["objective"],
-                                           board=board_block)
+                                           board=board_block, tools=tools_block)
         rendered = self.inf.call(
             "apply_chat_template",
             messages=[{"role": "user", "content": prompt}], add_assistant=True,
         )
         self.inf.call("ingest_text", session_id=self.session_id, text=rendered,
                       parse_special=True)
-        out = self.inf.call("generate", session_id=self.session_id,
-                            max_tokens=min(budget, 256), temperature=0.0,
-                            deadline=deadline)
+        out, tool_trace = self._generate_with_tools(
+            item, budget=budget, deadline=deadline,
+            max_turns=self.cfg.arbiter.max_tool_turns)
         parsed = _parse_finding(out["text"])
         post_id = self._publish_finding(item, parsed, out)
         return {
@@ -196,12 +210,128 @@ class Neuocyte:
             "confidence": parsed["confidence"],
             "evidence_note": parsed["evidence"],
             "raw_text": out["text"],
-            "tool_requests": [{"name": r.name, "arguments": r.arguments}
-                              for r in parse_tool_calls(out["text"])],
-            "completion_tokens": out["completion_tokens"],
+            "tools_offered": tool_names,
+            "tool_calls": tool_trace,
+            "tool_call_count": len(tool_trace),
+            "stop_reason": out["stop_reason"],
+            "completion_tokens": out["tokens_spent"],
             "is_simulated": out.get("is_simulated", False),
             "neuocyte_id": self.neuocyte_id,
         }
+
+    # -- the tool execution loop ----------------------------------------
+    def _generate_with_tools(self, item: dict[str, Any], *, budget: int,
+                             deadline: float, max_turns: int
+                             ) -> tuple[dict[str, Any], list[dict[str, Any]]]:
+        """Generate, execute any requested tool call, resume, repeat.
+
+        The loop lives here, but the *authority* does not. This process parses
+        a request out of generated text and sends it to the Harness, which
+        decides whether it is permitted and runs it. Nothing is executed in
+        this process, so a neuocyte cannot reach a capability by deciding it
+        may.
+
+        Three independent bounds, because a model that keeps calling tools is
+        an expected outcome rather than a bug: turns, the token budget, and the
+        wall-clock deadline. Whichever binds first ends the loop, and the reason
+        is recorded rather than silently swallowed.
+        """
+        trace: list[dict[str, Any]] = []
+        spent = 0
+        out: dict[str, Any] = {}
+        stop_reason = "answered"
+
+        for turn in range(max_turns):
+            remaining = budget - spent
+            if remaining <= 0:
+                stop_reason = "token_budget_exhausted"
+                break
+            if time.time() >= deadline:
+                stop_reason = "deadline_reached"
+                break
+
+            out = self.inf.call("generate", session_id=self.session_id,
+                                max_tokens=min(remaining, 256), temperature=0.0,
+                                deadline=deadline)
+            spent += int(out.get("completion_tokens") or 0)
+
+            requests = parse_tool_calls(out["text"], limit=1)
+            if not requests:
+                stop_reason = "answered"
+                break
+            if turn == max_turns - 1:
+                # Asked for a tool on the last turn it had: do not execute
+                # something whose result it will never get to use.
+                stop_reason = "turn_limit_reached"
+                trace.append({"turn": turn, "tool": requests[0].name,
+                              "executed": False,
+                              "reason": "turn limit reached before execution"})
+                break
+
+            req = requests[0]
+            try:
+                res = self.sup.call(
+                    "tool_invoke", neuocyte_id=self.neuocyte_id,
+                    work_id=item["work_id"], fencing_token=item["fencing_token"],
+                    name=req.name, arguments=req.arguments, turn=turn)
+            except Fenced:
+                raise
+            except Exception as exc:  # noqa: BLE001
+                # A transport or handler failure is reported back to the model
+                # as a failed tool call rather than killing the neuocyte: the
+                # model may well be able to proceed without it.
+                res = {"name": req.name, "accepted": False,
+                       "reason": f"{type(exc).__name__}: {exc}", "result": None,
+                       "error": None}
+
+            trace.append({"turn": turn, "tool": req.name, "executed": True,
+                          "accepted": res.get("accepted"),
+                          "reason": res.get("reason"),
+                          "error": res.get("error"),
+                          "receipt_id": res.get("receipt_id"),
+                          "duration_seconds": res.get("duration_seconds")})
+            self._feed_tool_result(req.name, res)
+        else:
+            stop_reason = "turn_limit_reached"
+
+        return {**out, "stop_reason": stop_reason, "tokens_spent": spent}, trace
+
+    def _feed_tool_result(self, name: str, res: dict[str, Any]) -> None:
+        """Append the outcome to the session so the model can use it.
+
+        A rejection is fed back just as faithfully as a result. The model is
+        told it was refused and why, because hiding the refusal would leave it
+        guessing at why its request vanished.
+        """
+        if res.get("accepted") and not res.get("error"):
+            body = json.dumps(res.get("result"), default=str)[:2000]
+        elif res.get("accepted"):
+            body = f"the tool ran but failed: {res.get('error')}"
+        else:
+            body = f"refused: {res.get('reason')}"
+        rendered = self.inf.call(
+            "apply_chat_template",
+            messages=[{"role": "user",
+                       "content": TOOL_RESULT_BLOCK.format(name=name, result=body)}],
+            add_assistant=True)
+        self.inf.call("ingest_text", session_id=self.session_id, text=rendered,
+                      parse_special=True)
+
+    def _tools_block(self, item: dict[str, Any]) -> tuple[str, list[str]]:
+        """Describe the tools this work item actually permits.
+
+        Asked of the Harness rather than assembled here, so the prompt cannot
+        advertise a capability the work row does not carry.
+        """
+        try:
+            res = self.sup.call("tool_schemas", work_id=item["work_id"],
+                                role="neuocyte")
+        except Exception:  # noqa: BLE001
+            self.log.debug("tool schema fetch failed", exc_info=True)
+            return "", []
+        block = res.get("prompt_block") or ""
+        names = [t["name"] for t in res.get("tools", [])]
+        return (TOOLS_BLOCK.format(prompt_block=block) if block else ""), names
 
     def _board_context(self, item: dict[str, Any]) -> tuple[str, list[str]]:
         """Show the neuocyte the board only if its work item permits it.
@@ -308,12 +438,15 @@ class Neuocyte:
         )
         self.inf.call("ingest_text", session_id=self.session_id, text=rendered,
                       parse_special=True)
-        out = self.inf.call("generate", session_id=self.session_id,
-                            max_tokens=min(budget, 256), temperature=0.0,
-                            deadline=deadline)
+        out, tool_trace = self._generate_with_tools(
+            item, budget=budget, deadline=deadline,
+            max_turns=self.cfg.arbiter.max_tool_turns)
         parsed = _parse_finding(out["text"])
         return {
             "kind": "maintenance_finding",
+            "tool_calls": tool_trace,
+            "tool_call_count": len(tool_trace),
+            "stop_reason": out["stop_reason"],
             "objective": item["objective"],
             "snapshot_id": None,
             "received_ego_snapshot": False,
@@ -324,7 +457,7 @@ class Neuocyte:
             "confidence": parsed["confidence"],
             "evidence_note": parsed["evidence"],
             "raw_text": out["text"],
-            "completion_tokens": out["completion_tokens"],
+            "completion_tokens": out["tokens_spent"],
             "is_simulated": out.get("is_simulated", False),
             "neuocyte_id": self.neuocyte_id,
         }

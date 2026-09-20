@@ -216,13 +216,17 @@ def test_ego_converse_records_tool_requests_without_executing_them(stack):
     assert isinstance(turn["result"]["tool_requests"], list)
 
 
-def test_the_tool_execution_loop_is_not_wired_and_the_docs_say_so():
-    """Guard against silently re-claiming a capability that is not connected.
+def test_the_execution_loop_is_wired_and_the_docs_say_so():
+    """The inverse of the guard this replaces.
 
-    The registry validates and can execute, but no production path calls
-    ToolRegistry.execute: a model's tool request is parsed, reported and
-    ignored. If that changes, this test should fail and the docs should be
-    updated in the same commit rather than drifting.
+    This file used to assert that nothing called `ToolRegistry.execute`, so
+    that the capability could not be re-claimed in docs before it existed. It
+    exists now, so the assertion flips: the registry must actually be reached
+    from production code, and the docs must no longer say it is not.
+
+    Keeping the check rather than deleting it is the point. The failure mode it
+    guards against is symmetric -- docs drifting away from the code in either
+    direction.
     """
     import pathlib
 
@@ -231,19 +235,37 @@ def test_the_tool_execution_loop_is_not_wired_and_the_docs_say_so():
     for py in src.rglob("*.py"):
         if py.name == "tools.py":
             continue
-        text = py.read_text(encoding="utf-8")
-        if "build_default_registry" in text or "ToolRegistry(" in text:
+        if "build_neuocyte_registry" in py.read_text(encoding="utf-8"):
             callers.append(py.name)
-    assert callers == [], (
-        f"the tool registry is now used by {callers}; wire the execution loop "
-        "and update docs/IMPLEMENTATION.md and ARCHITECTURE I23")
+    assert "harness_api.py" in callers, (
+        "the tool registry is not reached from the Harness; the execution "
+        "loop is not actually wired")
 
     docs = pathlib.Path(__file__).resolve().parents[1] / "docs"
     impl = (docs / "IMPLEMENTATION.md").read_text(encoding="utf-8")
-    assert "Not wired" in impl, "the capability table must say it is not wired"
-    # Normalise whitespace: the claim is prose and wraps across lines.
+    row = [ln for ln in impl.splitlines() if "Tool *execution* loop" in ln]
+    assert row and "**Wired**" in row[0], (
+        "the capability table still says the loop is not wired")
     arch = " ".join((docs / "ARCHITECTURE.md").read_text(encoding="utf-8").split())
-    assert "no production code path calls `ToolRegistry.execute`" in arch
+    assert "no production code path calls `ToolRegistry.execute`" not in arch, (
+        "ARCHITECTURE.md still claims nothing executes tools")
+
+
+def test_execution_stays_out_of_the_neuocyte_process():
+    """Wiring the loop must not move the authority into the neuocyte.
+
+    The neuocyte parses a request and sends it to the Harness. If it ever
+    builds a registry or calls `execute` itself, the separation that makes
+    `sandbox_allowed` meaningful is gone.
+    """
+    import pathlib
+
+    src = pathlib.Path(__file__).resolve().parents[1] / "src" / "amoeba"
+    worker = (src / "neuocyte.py").read_text(encoding="utf-8")
+    for forbidden in ("build_neuocyte_registry", "ToolRegistry", ".execute("):
+        assert forbidden not in worker, (
+            f"neuocyte.py references {forbidden}; tool execution belongs to "
+            "the Harness, not the process holding the model output")
 
 
 def test_ego_converse_reports_tool_requests_as_unexecuted(stack):

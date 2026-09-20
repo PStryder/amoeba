@@ -131,6 +131,12 @@ class Supervisor:
         self._last_snapshot_publish = 0.0
         self._unreachable_since: dict[str, float] = {}
         self.sandboxes: SandboxManager | None = None
+        self._method_cache: dict[str, Any] | None = None
+        # One sandbox per work item, owned by the Harness. A neuocyte never
+        # names a sandbox and never creates or destroys one: it is resolved
+        # from the work id, so there is no identifier for a model to forge.
+        self._work_sandboxes: dict[str, str] = {}
+        self._work_sandbox_lock = threading.RLock()
         self.homeostasis = ContextHomeostasis(
             HomeostasisConfig(**{k: getattr(cfg.homeostasis, k)
                                  for k in HomeostasisConfig.__slots__}),
@@ -605,11 +611,64 @@ class Supervisor:
 
     # ------------------------------------------------------------------
     def methods(self) -> dict[str, Any]:
-        from . import harness_api, supervisor_api
+        # Cached: the handlers are closures, and the tool registry looks them
+        # up per call. Rebuilding would make every lookup a fresh closure set.
+        if self._method_cache is None:
+            from . import harness_api, supervisor_api
 
-        methods = supervisor_api.build(self)
-        methods.update(harness_api.build(self))
-        return methods
+            methods = supervisor_api.build(self)
+            methods.update(harness_api.build(self))
+            self._method_cache = methods
+        return self._method_cache
+
+    # ------------------------------------------------------------------
+    # Per-work sandboxes, owned by the Harness
+    # ------------------------------------------------------------------
+    def sandbox_for_work(self, work_id: str, *, owner: str) -> str:
+        """The sandbox for one work item, created on first use.
+
+        Resolved from ``work_id`` rather than accepted as an argument. That is
+        what stops one neuocyte reaching another's scratch: there is no
+        parameter in which to name a sandbox, so a model cannot ask for one it
+        does not own.
+        """
+        with self._work_sandbox_lock:
+            existing = self._work_sandboxes.get(work_id)
+            if existing is not None:
+                try:
+                    self.sandboxes.get(existing)  # type: ignore[union-attr]
+                    return existing
+                except Exception:  # noqa: BLE001
+                    self._work_sandboxes.pop(work_id, None)
+            res = self.methods()["sandbox_create"](owner=owner, work_id=work_id)
+            self._work_sandboxes[work_id] = res["sandbox_id"]
+            self.log.info("sandbox %s opened for work %s", res["sandbox_id"], work_id)
+            return res["sandbox_id"]
+
+    def release_work_sandbox(self, work_id: str, *, reason: str) -> str | None:
+        """Destroy a work item's sandbox when the work item finishes.
+
+        Scratch does not outlive the work that produced it. Anything worth
+        keeping had to be proposed and promoted, which is the only path out.
+        """
+        with self._work_sandbox_lock:
+            sandbox_id = self._work_sandboxes.pop(work_id, None)
+        if sandbox_id is None:
+            return None
+        try:
+            self.methods()["sandbox_destroy"](sandbox_id=sandbox_id,
+                                              actor="supervisor", reason=reason)
+        except Exception:  # noqa: BLE001
+            # Loud on purpose. Scratch that survives its work item is live
+            # state nobody owns, and this failing quietly is how it would
+            # accumulate unnoticed -- which is exactly what happened when this
+            # call was made with an argument the handler did not accept.
+            self.log.warning("could not destroy sandbox %s for work %s",
+                             sandbox_id, work_id, exc_info=True)
+            with self._work_sandbox_lock:
+                self._work_sandboxes[work_id] = sandbox_id
+            raise
+        return sandbox_id
 
 
 def _kill_tree(pid: int) -> None:

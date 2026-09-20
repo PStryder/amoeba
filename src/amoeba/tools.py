@@ -324,3 +324,93 @@ def build_default_registry(mind: Any) -> ToolRegistry:
         handler=current_state_version,
     ))
     return reg
+
+
+def build_neuocyte_registry(sup: Any, *, work_id: str, neuocyte_id: str,
+                            sandbox_allowed: bool) -> ToolRegistry:
+    """The tools one neuocyte may call, for one work item.
+
+    Built per call from the *durable* work row. ``sandbox_allowed`` comes from
+    what the work item was admitted with; a neuocyte cannot widen it by asking.
+    When it is false the sandbox tools are not registered at all, so the
+    request fails with "no such tool" before any handler exists to reach.
+
+    No tool takes a sandbox id. The sandbox for this work item is resolved
+    server-side from ``work_id``, so a model cannot name another neuocyte's
+    sandbox -- there is no argument in which to put one. It is created on first
+    use and destroyed when the work item finishes.
+    """
+    reg = build_default_registry(sup.mind)
+
+    if not sandbox_allowed:
+        return reg
+
+    def _sbx() -> str:
+        return sup.sandbox_for_work(work_id, owner=neuocyte_id)
+
+    def run_code(code: str, _context: dict[str, Any] | None = None):
+        out = sup.methods()["sandbox_run"](sandbox_id=_sbx(), code=code,
+                                           actor=neuocyte_id)
+        return {k: out[k] for k in ("exit_code", "stdout", "stderr", "timed_out",
+                                    "seconds", "stdout_truncated")
+                if k in out}
+
+    def write_file(path: str, content: str, _context: dict[str, Any] | None = None):
+        return sup.methods()["sandbox_write"](sandbox_id=_sbx(), path=path,
+                                            content=content)
+
+    def read_file(path: str, _context: dict[str, Any] | None = None):
+        return sup.methods()["sandbox_read"](sandbox_id=_sbx(), path=path)
+
+    def list_files(_context: dict[str, Any] | None = None):
+        return sup.methods()["sandbox_files"](sandbox_id=_sbx(), limit=100)
+
+    def propose_artifact(path: str, rationale: str,
+                         _context: dict[str, Any] | None = None):
+        return sup.methods()["artifact_propose"](
+            sandbox_id=_sbx(), path=path, rationale=rationale,
+            proposed_by=neuocyte_id, work_id=work_id)
+
+    reg.register(ToolSpec(
+        name="run_code",
+        description=("Run Python in your isolated scratch sandbox. No network, no "
+                     "host filesystem, no credentials. Returns stdout and stderr."),
+        params=[ToolParam("code", "string", "Python source to execute",
+                          required=True, max_length=20000)],
+        handler=run_code, allowed_roles=("neuocyte",), timeout_seconds=90.0,
+    ))
+    reg.register(ToolSpec(
+        name="write_file",
+        description="Write a file into your sandbox scratch directory.",
+        params=[ToolParam("path", "string", "relative path inside the sandbox",
+                          required=True, max_length=512),
+                ToolParam("content", "string", "file contents", required=True,
+                          max_length=200000)],
+        handler=write_file, allowed_roles=("neuocyte",), timeout_seconds=30.0,
+    ))
+    reg.register(ToolSpec(
+        name="read_file",
+        description="Read a file back from your sandbox scratch directory.",
+        params=[ToolParam("path", "string", "relative path inside the sandbox",
+                          required=True, max_length=512)],
+        handler=read_file, allowed_roles=("neuocyte",), timeout_seconds=30.0,
+    ))
+    reg.register(ToolSpec(
+        name="list_files",
+        description="List the files in your sandbox scratch directory.",
+        params=[], handler=list_files, allowed_roles=("neuocyte",),
+        timeout_seconds=30.0,
+    ))
+    reg.register(ToolSpec(
+        name="propose_artifact",
+        description=("Propose a sandbox file for promotion into durable state. "
+                     "This only proposes: the Harness decides, and nothing is "
+                     "copied until it does."),
+        params=[ToolParam("path", "string", "relative path inside the sandbox",
+                          required=True, max_length=512),
+                ToolParam("rationale", "string", "why this is worth keeping",
+                          required=True, max_length=2000)],
+        handler=propose_artifact, allowed_roles=("neuocyte",),
+        timeout_seconds=30.0, mutates_state=True,
+    ))
+    return reg
