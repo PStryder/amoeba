@@ -367,16 +367,20 @@ check the Harness performs on itself proves only that the Harness is
 self-consistent. The first `file_attach` passed every Harness-side check while
 handing the sandbox different bytes.
 
-The single exception is declared rather than hidden: `read_file` returns text,
-so a non-UTF-8 file cannot round-trip through it. Such a read sets
-`lossy_decode` and still reports the true digest, so the discrepancy is
-detectable by the neuocyte itself.
+There is no lossy surface and no exception. `read_file` returns text, so it
+returns *exact* text or refuses: if the bytes are not UTF-8 there is no correct
+string to hand back, and a flagged rendering is still something a model will
+reason about as though it were the file. The refusal carries the size, the
+digest and the verb that does work, so nothing is hidden except the bytes.
+Arbitrary bytes are read through `run_code`, which sees them exactly.
 → `test_an_attached_files_digest_is_what_the_neuocyte_can_hash`,
 `test_the_durable_event_carries_the_same_digest`,
 `test_a_digest_a_neuocyte_was_told_it_wrote_is_what_is_on_disk`,
 `test_a_proposed_artifacts_digest_matches_what_the_sandbox_holds`,
-`test_a_lossy_read_declares_itself_and_still_reports_the_true_digest`,
-`test_a_text_read_is_not_marked_lossy`
+`test_a_non_text_read_is_refused_not_rendered`,
+`test_a_host_file_read_refuses_non_text_too`,
+`test_exact_text_reads_still_work_including_non_ascii`,
+`test_truncation_does_not_make_a_text_file_look_like_binary`
 
 ---
 

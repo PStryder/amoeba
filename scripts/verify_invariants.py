@@ -524,15 +524,29 @@ MUTATIONS: list[Mutation] = [
              "which is why the tests do it there.",
     ),
     Mutation(
-        "I41c", "A lossy rendering says so instead of passing as the content",
-        "src/amoeba/sandbox.py",
-        "        lossy = text.encode(\"utf-8\") != head",
-        "        lossy = False  # MUTANT: silently claim fidelity",
-        ["test_a_lossy_read_declares_itself_and_still_reports_the_true_digest"],
-        layer="SandboxManager.read_file (the honesty flag on a text rendering)",
-        note="the declared exception to I41. If read_file may return something "
-             "other than the bytes, it has to say so -- otherwise a model "
-             "reasons about U+FFFD soup as though it were the file.",
+        "I41c", "A read returns exact text or refuses; it never renders",
+        "src/amoeba/filespace.py",
+        '    try:\n        return head.decode("utf-8")\n    except UnicodeDecodeError as exc:',
+        '    try:\n        return head.decode("utf-8", "replace")  # MUTANT: render it\n'
+        '    except UnicodeDecodeError as exc:',
+        ["test_a_non_text_read_is_refused_not_rendered",
+         "test_a_host_file_read_refuses_non_text_too",
+         "test_reading_a_non_text_file_is_refused"],
+        layer="decode_exact_text (the only place bytes become a string)",
+        note="restores the lossy rendering. It used to be allowed if flagged; "
+             "it is not allowed at all now, because a flag does not stop a "
+             "model reasoning about U+FFFD soup as though it were the file.",
+    ),
+    Mutation(
+        "I41d", "Truncation does not make a text file look like binary",
+        "src/amoeba/filespace.py",
+        "    head = data\n    if truncated:",
+        "    head = data\n    if False:  # MUTANT: no character-boundary trim",
+        ["test_truncation_does_not_make_a_text_file_look_like_binary"],
+        layer="decode_exact_text (the boundary trim before decoding)",
+        note="the edge the strict rule introduces. A cap landing mid-sequence "
+             "would refuse an ordinary UTF-8 file, which would make the rule "
+             "look broken rather than strict.",
     ),
     Mutation(
         "I37d", "A hard link is not a way to reach a file outside a root",

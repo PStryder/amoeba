@@ -124,6 +124,49 @@ def _reject_component(part: str) -> None:
         raise FilespaceDenied("invalid character in path", component=part)
 
 
+class NotTextContent(InvalidInput):
+    """The bytes are not UTF-8 text, so there is no honest text to return."""
+
+
+def decode_exact_text(data: bytes, *, truncated: bool, where: str,
+                      digest: str, total_bytes: int) -> str:
+    """Decode strictly, or refuse.
+
+    A read verb returns text. If the bytes are not text there is no correct
+    string to hand back, and the previous behaviour -- decoding with
+    ``errors="replace"`` and flagging it -- was still handing a model a
+    rendering it could reason about as though it were the file. Refusing is the
+    only answer that cannot be misread.
+
+    The refusal carries the size and digest, so a caller learns everything
+    except the bytes themselves and can go get those the right way.
+
+    A truncated read is trimmed to a character boundary first: cutting at a
+    fixed byte count can land mid-sequence, and a perfectly ordinary UTF-8 file
+    must not look like binary because of where the cap fell.
+    """
+    head = data
+    if truncated:
+        for back in range(0, 4):
+            candidate = data[:len(data) - back] if back else data
+            try:
+                candidate.decode("utf-8")
+            except UnicodeDecodeError:
+                continue
+            head = candidate
+            break
+    try:
+        return head.decode("utf-8")
+    except UnicodeDecodeError as exc:
+        raise NotTextContent(
+            "this file is not UTF-8 text, so it cannot be returned as text; "
+            "use the run_code tool to read the bytes, e.g. "
+            "pathlib.Path(name).read_bytes()",
+            path=where, bytes=total_bytes, sha256=digest,
+            invalid_at=exc.start,
+        ) from exc
+
+
 def _link_count(path: Path) -> int:
     """How many names this file record has.
 

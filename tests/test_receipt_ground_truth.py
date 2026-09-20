@@ -18,11 +18,10 @@ The invariant, stated once:
     If a receipt claims a neuocyte received bytes with digest D, then hashing
     the bytes actually available to that neuocyte must produce D.
 
-`read_file` is the one surface where what a neuocyte *sees* legitimately
-differs, because it returns text and a non-UTF-8 file cannot round-trip through
-text. That is allowed, but it must be declared and the true digest must still
-be reported, so the neuocyte can detect the discrepancy itself rather than
-reasoning about U+FFFD soup as though it were the file.
+There is no lossy surface. `read_file` returns exact text or refuses: if the
+bytes are not text there is no correct string to hand back, and a flagged
+rendering is still something a model will reason about as though it were the
+file. Arbitrary bytes are read through `run_code`, which sees them exactly.
 """
 
 from __future__ import annotations
@@ -204,13 +203,14 @@ def test_a_proposed_artifacts_digest_matches_what_the_sandbox_holds(gstack):
         gstack.call("cancel_work", work_id=work_id, reason="test")
 
 
-def test_a_lossy_read_declares_itself_and_still_reports_the_true_digest(gstack):
-    """The one surface where what a neuocyte sees legitimately differs.
+def test_a_non_text_read_is_refused_not_rendered(gstack):
+    """There is no lossy surface. Refusal is the only honest answer.
 
-    `read_file` returns text, so a non-UTF-8 file cannot round-trip through it.
-    Allowed -- but it must say so, and the digest it reports must still be the
-    real one, so the neuocyte can notice the discrepancy rather than reasoning
-    about U+FFFD soup as though it were the file.
+    `read_file` returns text. If the bytes are not text there is no correct
+    string to hand back, and returning a U+FFFD rendering -- even a flagged one
+    -- still puts something in front of a model that it can reason about as
+    though it were the file. The refusal carries the size and digest, so the
+    caller learns everything except the bytes and knows where to get those.
     """
     payload = bytes([0x89]) + b"PNG" + bytes(range(200, 240))
     (gstack.src / "img.bin").write_bytes(payload)
@@ -218,36 +218,69 @@ def test_a_lossy_read_declares_itself_and_still_reports_the_true_digest(gstack):
     try:
         att = gstack.call("file_attach", path=str(gstack.src / "img.bin"),
                           work_id=work_id, actor="pete")
+
         seen = gstack.call("tool_invoke", neuocyte_id="nc_lr", work_id=work_id,
                            fencing_token=token, name="read_file",
                            arguments={"path": "work/img.bin"})
-        assert seen["accepted"], seen
-        res = seen["result"]
+        # The tool call itself is accepted; the handler refuses, and the model
+        # is told why rather than being handed something wrong.
+        assert seen["error"] is not None, seen
+        assert "not UTF-8 text" in seen["error"]
+        assert "run_code" in seen["error"]
+        assert "content" not in (seen.get("result") or {})
 
-        assert res["lossy_decode"] is True
-        assert "not what the file contains" in res["note"]
-        assert res["content"].encode("utf-8") != payload, (
-            "premise: this payload should not survive a text round trip")
-
-        # The digest is the real one, so the discrepancy is detectable.
-        observed, _n = sandbox_digest(gstack, work_id, token, "nc_lr", "img.bin")
-        assert res["sha256"] == att["sha256"] == observed
+        # And the bytes really are reachable the way the refusal says.
+        observed, n = sandbox_digest(gstack, work_id, token, "nc_lr", "img.bin")
+        assert observed == att["sha256"]
+        assert n == len(payload)
     finally:
         gstack.call("cancel_work", work_id=work_id, reason="test")
 
 
-def test_a_text_read_is_not_marked_lossy(gstack):
-    """Control: the flag must discriminate, not always fire."""
+def test_a_host_file_read_refuses_non_text_too(gstack):
+    """Same rule on the host side, not only inside the sandbox."""
+    (gstack.out / "blob.bin").write_bytes(bytes(range(256)))
+    with pytest.raises(Exception) as exc:
+        gstack.call("file_read", root="out", path="blob.bin")
+    assert "not UTF-8 text" in str(exc.value)
+
+
+def test_exact_text_reads_still_work_including_non_ascii(gstack):
+    """The capability that must survive the restriction."""
+    body = "naïve résumé — café\nsecond line\n"
+    (gstack.out / "notes.md").write_bytes(body.encode("utf-8"))
+    r = gstack.call("file_read", root="out", path="notes.md")
+    assert r["content"] == body
+    assert r["truncated"] is False
+
+
+def test_truncation_does_not_make_a_text_file_look_like_binary(gstack):
+    """The edge this restriction introduces, handled rather than discovered.
+
+    A cap that falls mid-character would leave a dangling UTF-8 sequence and
+    make an ordinary text file fail a strict decode. The read is trimmed back
+    to a character boundary first, so truncation costs at most a character.
+    """
+    body = ("é" * 4000)                     # 2 bytes each; any odd cap splits one
+    (gstack.out / "wide.txt").write_bytes(body.encode("utf-8"))
+    r = gstack.call("file_read", root="out", path="wide.txt", max_bytes=1001)
+    assert r["truncated"] is True
+    assert r["content"] and r["content"].startswith("é")
+    assert chr(0xFFFD) not in r["content"]
+
+
+def test_a_text_attachment_reads_back_exactly(gstack):
+    """Control: the ordinary path is unaffected by the restriction."""
     (gstack.src / "plain.txt").write_bytes(b"hello\n")
     work_id, token = admit_and_lease(gstack, "read text", "nc_tr")
     try:
-        gstack.call("file_attach", path=str(gstack.src / "plain.txt"),
-                    work_id=work_id, actor="pete")
+        att = gstack.call("file_attach", path=str(gstack.src / "plain.txt"),
+                          work_id=work_id, actor="pete")
         seen = gstack.call("tool_invoke", neuocyte_id="nc_tr", work_id=work_id,
                            fencing_token=token, name="read_file",
                            arguments={"path": "work/plain.txt"})
-        assert seen["result"]["lossy_decode"] is False
-        assert seen["result"]["note"] == ""
+        assert seen["accepted"] and seen["error"] is None, seen
         assert seen["result"]["content"] == "hello\n"
+        assert seen["result"]["sha256"] == att["sha256"]
     finally:
         gstack.call("cancel_work", work_id=work_id, reason="test")

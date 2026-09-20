@@ -350,16 +350,21 @@ def test_attaching_a_binary_file_lands_the_exact_bytes(fstack):
         fstack.call("cancel_work", work_id=work_id, reason="test")
 
 
-def test_reading_a_non_text_file_says_the_content_is_lossy(fstack):
-    """A model must not be handed U+FFFD soup as though it were the file."""
+def test_reading_a_non_text_file_is_refused(fstack):
+    """`file_read` returns text, so it returns exact text or nothing.
+
+    A U+FFFD rendering is something a model will reason about as though it
+    were the file, and flagging it does not change that. The refusal names the
+    size, the digest and how to get the bytes properly.
+    """
     raw = bytes([0x89]) + b"PNG" + bytes(range(200, 240))
     (fstack.out / "blob.bin").write_bytes(raw)
 
-    r = fstack.call("file_read", root="out", path="blob.bin")
-    assert r["sha256"] == __import__("hashlib").sha256(raw).hexdigest()
-    assert r["lossy_decode"] is True
-    assert "not what the file contains" in r["note"]
+    with pytest.raises(Exception) as exc:
+        fstack.call("file_read", root="out", path="blob.bin")
+    assert "not UTF-8 text" in str(exc.value)
+    assert "run_code" in str(exc.value)
 
+    # Text still reads, unchanged.
     text = fstack.call("file_read", root="out", path="report.md")
-    assert text["lossy_decode"] is False
-    assert text["note"] == ""
+    assert text["content"] == "# v1\n"

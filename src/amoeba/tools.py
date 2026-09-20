@@ -390,7 +390,9 @@ def build_neuocyte_registry(sup: Any, *, work_id: str, neuocyte_id: str,
     ))
     reg.register(ToolSpec(
         name="read_file",
-        description="Read a file back from your sandbox scratch directory.",
+        description=("Read a UTF-8 text file from your sandbox scratch "
+                     "directory. Returns the exact text, or refuses if the "
+                     "file is not text -- use run_code to read raw bytes."),
         params=[ToolParam("path", "string", "relative path inside the sandbox",
                           required=True, max_length=512)],
         handler=read_file, allowed_roles=("neuocyte",), timeout_seconds=30.0,

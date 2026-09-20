@@ -24,6 +24,7 @@ from .errors import IntegrityError, InvalidInput, NotFound, ResourceExhausted
 from .ids import new_id, sha256_hex
 from .sandbox import SandboxLimits
 from .store.events import EventKind
+from .filespace import decode_exact_text
 from .tools import ToolCallRequest, build_neuocyte_registry
 from .store.writer import Mutation
 
@@ -524,14 +525,12 @@ def build(sup: "Supervisor") -> dict[str, Any]:  # noqa: C901
                                        "operation": "read"})
             raise
         data, truncated = fs.read_bytes(resolved, max_bytes=max_bytes)
-        text = data.decode("utf-8", "replace")
-        lossy = text.encode("utf-8") != data
+        digest = sha256_hex(data)
+        text = decode_exact_text(data, truncated=truncated,
+                                 where=resolved.relpath, digest=digest,
+                                 total_bytes=len(data))
         return {**resolved.to_dict(), "bytes": len(data), "truncated": truncated,
-                "sha256": sha256_hex(data), "lossy_decode": lossy,
-                "note": ("this file is not UTF-8 text; the content is a lossy "
-                         "rendering and is not what the file contains"
-                         if lossy else ""),
-                "content": text}
+                "sha256": digest, "content": text}
 
     def file_write(*, root: str, path: str, content: str,
                    actor: str = "supervisor", rationale: str = "",

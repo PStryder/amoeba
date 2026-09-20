@@ -57,6 +57,7 @@ from typing import Any, Sequence
 from .errors import CapabilityUnsupported, InvalidInput, ResourceExhausted
 from .ids import new_id, sha256_hex
 from .logging_setup import get_logger
+from .filespace import decode_exact_text
 from .security import audit_path, harden, revoke
 
 IS_WINDOWS = sys.platform == "win32"
@@ -411,17 +412,14 @@ class SandboxManager:
             raise InvalidInput("no such file in sandbox", path=relpath)
         data = target.read_bytes()
         truncated = len(data) > max_bytes
-        head = data[:max_bytes]
-        text = head.decode("utf-8", "replace")
-        # Say when the text is not the file. A model handed U+FFFD soup with no
-        # indication would reason about it as though it were the content.
-        lossy = text.encode("utf-8") != head
+        digest = sha256_hex(data)
+        # Exact text or nothing. Anything else hands a model a rendering it
+        # will reason about as though it were the file.
+        text = decode_exact_text(data[:max_bytes], truncated=truncated,
+                                 where=relpath, digest=digest,
+                                 total_bytes=len(data))
         return {"path": relpath, "bytes": len(data), "truncated": truncated,
-                "sha256": sha256_hex(data), "lossy_decode": lossy,
-                "note": ("this file is not UTF-8 text; the content below is a "
-                         "lossy rendering and is not what the file contains"
-                         if lossy else ""),
-                "content": text}
+                "sha256": digest, "content": text}
 
     def list_files(self, sandbox_id: str, *, limit: int = 200) -> list[dict[str, Any]]:
         """Files in the scratch tree.

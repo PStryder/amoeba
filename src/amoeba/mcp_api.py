@@ -497,7 +497,14 @@ def build_server(cfg: Config):  # noqa: C901
         path: Annotated[str, Field(description="Path relative to the root.",
                                    max_length=512)],
     ) -> dict[str, Any]:
-        """Read a file from a configured root."""
+        """Read a UTF-8 text file from a configured root.
+
+        Returns the exact text, or refuses. A file that is not UTF-8 text
+        has no correct text representation, and a lossy rendering is still
+        something a reader will treat as the content -- so the refusal
+        names the size and digest instead. Read raw bytes by running code
+        in a sandbox.
+        """
         return facade.envelope(facade.call("file_read", root=root, path=path,
                                            actor="operator"))
 

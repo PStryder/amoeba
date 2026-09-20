@@ -227,12 +227,30 @@ neuocyte had seen content it never saw. That is the failure that matters:
 corruption is a bug, but a receipt that misdescribes it is a lie the whole
 provenance chain rests on.
 
-The single exception is declared rather than hidden. `read_file` returns text,
-so a non-UTF-8 file cannot round-trip through it. Such a read sets
-`lossy_decode: true`, says so in `note`, and still reports the **true** digest
-— so a neuocyte can detect the discrepancy itself instead of reasoning about
-U+FFFD soup as though it were the file. Code run through `run_code` reads the
-real bytes.
+There is no lossy surface. `read_file` returns text, so it returns **exact
+text or nothing**: if the bytes are not UTF-8 there is no correct string to
+hand back, and a flagged rendering is still something a model will reason about
+as though it were the file.
+
+```
+file_read(root="out", path="blob.bin")
+  → refused: "this file is not UTF-8 text, so it cannot be returned as text;
+              use the run_code tool to read the bytes"
+              path, bytes, sha256, invalid_at
+```
+
+The refusal carries everything except the bytes, so a caller learns the size
+and digest and is told the verb that does work. Arbitrary bytes are read
+through `run_code`, which sees them exactly — that is how a neuocyte inspects
+a PNG, a pickle or a `.gguf`.
+
+A truncated read is trimmed back to a character boundary before decoding, so a
+cap landing mid-character costs at most one character rather than making an
+ordinary text file look like binary.
+
+An explicitly lossy preview verb may be added later if it proves useful. It
+would be a separate verb with a name that says what it is, not a quiet mode of
+this one.
 
 ## Residual risk, stated plainly
 
