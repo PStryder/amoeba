@@ -60,6 +60,7 @@ OPERATOR_VERBS = (
     "operator_prompt_author", "operator_prompt_state", "operator_prompt_select",
     "operator_prompt_cascade_plan", "operator_prompt_cascade",
     "operator_prompt_bootstrap_report",
+    "role_environment",
     # filespace and security posture
     "file_roots", "file_list", "file_read", "file_versions",
     "sandbox_capabilities", "sandbox_list",

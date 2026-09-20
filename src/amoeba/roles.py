@@ -51,6 +51,34 @@ of them. You may propose maintenance work; you may not perform administration.
 Be terse and specific. Separate what you measured from what you inferred."""
 
 
+ENVIRONMENT_BLOCK = """{environment}
+
+The declaration above is authoritative for this turn. To use a capability,
+emit a single tool call and stop; the Harness will run it and return the
+result, after which you may continue or call another.
+"""
+
+TOOL_RESULT_BLOCK = """<tool_result name="{name}">
+{result}
+</tool_result>
+Continue. Use this result, or call another capability if you still need one."""
+
+AUTHORITY_ARGUMENTS = frozenset({
+    # Identity and authority are facts about the authenticated connection, not
+    # parameters. A model that could set these would be choosing who it is.
+    "actor", "caller", "role", "scope", "client_id", "origin_actor",
+    "from_role", "requested_by", "agent_id", "neuocyte_id", "operation_id",
+    "mutation_id", "fencing_token", "_allow_root",
+})
+
+BOUND_IDENTITY_ARGUMENTS = ("reader", "author", "produced_by")
+"""Arguments naming who is acting, which the process fills from its own role.
+
+Advertised to the model because the verb genuinely takes them, and then
+overwritten regardless of what the model asked for.
+"""
+
+
 class RoleProcess:
     """Shared machinery: inference session, supervisor link, RPC server, heartbeat."""
 
@@ -84,6 +112,12 @@ class RoleProcess:
         self.profile_ref: str | None = None
         self.profile_prompt: str | None = None
         self.profile_settings: dict[str, Any] = {}
+        # The environment frozen for the turn currently in progress. Rebuilt
+        # per turn and never mutated mid-generation: a capability list that
+        # changed underneath an in-flight turn would make the transcript
+        # unexplainable.
+        self.environment: dict[str, Any] | None = None
+        self.environment_blob: str | None = None
         self.started_at = time.time()
         self.turns = 0
         self._stop = threading.Event()
@@ -143,11 +177,20 @@ class RoleProcess:
         self.profile_settings = dict(bound.get("backend_arguments") or {})
 
     def _system_text(self) -> str:
-        """The exact bytes this incarnation primes its context with."""
-        base = (self.profile_prompt if self.profile_prompt is not None
+        """The exact bytes this incarnation primes its context with.
+
+        The Prompt Library, and nothing else. There used to be a
+        `cfg.<role>.system_prompt` appended here, which meant a configuration
+        file could rewrite constitutional doctrine with no version, no
+        candidate and no approval. That path is closed, and a non-empty value
+        is now refused at config load.
+
+        The module constant remains only for a mind whose library has nothing
+        selected -- a partial bootstrap -- and is not a second governance
+        route: it is the shipped text those files were written from.
+        """
+        return (self.profile_prompt if self.profile_prompt is not None
                 else self.system_prompt)
-        extra = self.role_cfg.system_prompt
-        return base + (f"\n{extra}" if extra else "")
 
     def _prime_context(self) -> None:
         """Seed the private context with the role's system prompt only.
@@ -164,9 +207,169 @@ class RoleProcess:
                       parse_special=True)
 
     # ------------------------------------------------------------------
+    # ------------------------------------------------------------------
+    # One bounded turn: freeze the environment, generate, run tools, resume
+    # ------------------------------------------------------------------
+    def _begin_turn(self, trigger: str) -> str:
+        """Ask the Harness for this turn's environment and freeze it.
+
+        Built by the Harness from authoritative state -- the prompt library,
+        the live dispatch table, the resource registry -- rather than composed
+        here, for the same reason a neuocyte's tool block is: a manifest this
+        process assembled could advertise something this process cannot
+        actually reach.
+
+        The Harness content-addresses the exact bytes and records the turn
+        against them, so the profile, the environment and the trigger that
+        produced a piece of cognition are all recoverable afterwards.
+        """
+        try:
+            env = self.sup.call(
+                "role_environment", role=self.role, incarnation=self.incarnation,
+                profile_ref=self.profile_ref,
+                prompt_sha256=(self.profile or {}).get("prompt_sha256"),
+                config_sha256=(self.profile or {}).get("config_sha256"),
+                trigger=trigger[:500])
+        except Exception as exc:  # noqa: BLE001
+            # A turn without an environment is a turn with no capabilities
+            # offered, not a turn with unchecked ones.
+            self.log.warning("no role environment for this turn (%s)", exc)
+            self.environment = None
+            self.environment_blob = None
+            return ""
+        self.environment = env["manifest"]
+        self.environment_blob = env.get("environment_blob")
+        return ENVIRONMENT_BLOCK.format(environment=env["text"])
+
+    def _offered(self) -> dict[str, dict[str, Any]]:
+        """The capabilities this turn's frozen environment advertised."""
+        manifest = self.environment or {}
+        return {c["verb"]: c for c in manifest.get("capabilities", [])}
+
+    def _sanitise(self, name: str, arguments: dict[str, Any]) -> dict[str, Any]:
+        """Keep only declared arguments, and bind identity ourselves.
+
+        Two things happen here, and neither is a policy check the Harness
+        relies on -- the scope table is still the authority. Unknown arguments
+        are dropped so a model cannot smuggle a parameter the verb was never
+        advertised as taking, and identity-shaped arguments are overwritten
+        with this role's own name so "who is asking" can never be answered by
+        the asker.
+        """
+        cap = self._offered().get(name, {})
+        declared = {a["name"] for a in cap.get("arguments", [])}
+        clean = {k: v for k, v in (arguments or {}).items()
+                 if k in declared and k not in AUTHORITY_ARGUMENTS}
+        for field in BOUND_IDENTITY_ARGUMENTS:
+            if field in declared:
+                clean[field] = self.role
+        if "author_kind" in declared:
+            clean["author_kind"] = self.role
+        return clean
+
+    def _invoke(self, name: str, arguments: dict[str, Any]) -> dict[str, Any]:
+        """Execute one advertised capability through the Harness.
+
+        This process never performs the operation. It forwards the request on
+        its own authenticated connection, whose scope table decides what
+        exists -- so a verb from another role is not refused here, it simply
+        is not a method that connection can name.
+        """
+        if name not in self._offered():
+            return {"accepted": False,
+                    "reason": (f"{name!r} is not in this turn's environment; "
+                               "only the capabilities declared there can be "
+                               "invoked"),
+                    "result": None, "error": None}
+        try:
+            result = self.sup.call(name, **self._sanitise(name, arguments))
+            return {"accepted": True, "result": result, "error": None,
+                    "reason": None}
+        except Exception as exc:  # noqa: BLE001
+            # Reported back to the model as a failed call rather than killing
+            # the turn. A refusal the model never learns about leaves it
+            # guessing why its request vanished.
+            return {"accepted": False, "result": None,
+                    "reason": f"{type(exc).__name__}: {exc}"[:500],
+                    "error": None}
+
+    def _feed_tool_result(self, name: str, res: dict[str, Any]) -> None:
+        if res.get("accepted"):
+            body = json.dumps(res.get("result"), default=str)[:2000]
+        else:
+            body = f"refused: {res.get('reason')}"
+        rendered = self.inf.call(
+            "apply_chat_template",
+            messages=[{"role": "user",
+                       "content": TOOL_RESULT_BLOCK.format(name=name, result=body)}],
+            add_assistant=True)
+        self.inf.call("ingest_text", session_id=self.session_id, text=rendered,
+                      parse_special=True)
+
+    def _turn(self, user_text: str, *, trigger: str = "", max_tokens: int | None = None,
+              temperature: float | None = None, max_tool_turns: int | None = None,
+              deadline: float | None = None) -> dict[str, Any]:
+        """One bounded cognitive turn with the environment and the tool loop.
+
+        Environment, then turn input, then generation; a tool request is run
+        by the Harness and its result appended, and generation resumes. The
+        environment is built once and reused for the whole turn: if a tool
+        call changes the world, the tool *result* is what tells the model, not
+        a manifest that silently shifted under it. The next turn gets a fresh
+        one.
+
+        Bounded three ways, like the neuocyte loop: tool turns, the deadline,
+        and the model's own token budget. Whichever binds first ends the turn
+        and the reason is returned rather than swallowed.
+        """
+        env_block = self._begin_turn(trigger or user_text[:200])
+        max_tool_turns = (self.cfg.arbiter.max_tool_turns
+                          if max_tool_turns is None else max_tool_turns)
+        if deadline is None:
+            deadline = time.time() + self.cfg.arbiter.neuocyte_wall_seconds
+
+        trace: list[dict[str, Any]] = []
+        out: dict[str, Any] = {}
+        stop_reason = "answered"
+        first = env_block + user_text if env_block else user_text
+
+        for turn in range(max(1, max_tool_turns)):
+            if time.time() >= deadline:
+                stop_reason = "deadline_reached"
+                break
+            out = self._infer(first if turn == 0 else "",
+                              max_tokens=max_tokens, temperature=temperature,
+                              skip_input=turn > 0)
+            requests = parse_tool_calls(out["text"], limit=1)
+            if not requests:
+                stop_reason = "answered"
+                break
+            if turn == max_tool_turns - 1:
+                # Do not run something whose result it will never see.
+                stop_reason = "tool_turn_limit_reached"
+                trace.append({"turn": turn, "tool": requests[0].name,
+                              "executed": False,
+                              "reason": "tool turn limit reached before execution"})
+                break
+            req = requests[0]
+            res = self._invoke(req.name, req.arguments)
+            trace.append({"turn": turn, "tool": req.name, "executed": True,
+                          "accepted": res.get("accepted"),
+                          "reason": res.get("reason")})
+            self._feed_tool_result(req.name, res)
+        else:
+            stop_reason = "tool_turn_limit_reached"
+
+        return {**out, "stop_reason": stop_reason, "tool_calls": trace,
+                "tool_call_count": len(trace),
+                "environment_sha256": (self.environment or {}).get(
+                    "environment_sha256"),
+                "environment_blob": self.environment_blob,
+                "profile_ref": self.profile_ref}
+
     def _infer(self, user_text: str, *, max_tokens: int | None = None,
-               temperature: float | None = None, seed: int | None = None
-               ) -> dict[str, Any]:
+               temperature: float | None = None, seed: int | None = None,
+               skip_input: bool = False) -> dict[str, Any]:
         """Append one user turn to the private context and generate a reply.
 
         Sampling comes from the bound profile. A caller's explicit argument
@@ -188,13 +391,14 @@ class RoleProcess:
             temperature = float(settings.get("temperature", 0.0))
         if seed is None:
             seed = int(settings.get("seed", 1234))
-        rendered = self.inf.call(
-            "apply_chat_template",
-            messages=[{"role": "user", "content": user_text}],
-            add_assistant=True,
-        )
-        self.inf.call("ingest_text", session_id=self.session_id, text=rendered,
-                      parse_special=True)
+        if not skip_input:
+            rendered = self.inf.call(
+                "apply_chat_template",
+                messages=[{"role": "user", "content": user_text}],
+                add_assistant=True,
+            )
+            self.inf.call("ingest_text", session_id=self.session_id, text=rendered,
+                          parse_special=True)
         out = self.inf.call("generate", session_id=self.session_id,
                             max_tokens=max_tokens, temperature=temperature,
                             seed=seed)
@@ -367,12 +571,15 @@ class EgoProcess(RoleProcess):
             f"User message:\n{message}\n\n"
             "Answer briefly. If you rely on a memory above, cite its id in square brackets."
         )
-        out = self._infer(prompt, max_tokens=max_tokens, temperature=temperature)
+        out = self._turn(prompt, trigger=f"user message: {message[:160]}",
+                         max_tokens=max_tokens, temperature=temperature)
         text = strip_tool_calls(out["text"]).strip()
         tool_requests = [
             {"name": r.name, "arguments": r.arguments} for r in parse_tool_calls(out["text"])
         ]
         cited = [m["memory_id"] for m in recalled if m["memory_id"] in out["text"]]
+        environment_sha256 = out.get("environment_sha256")
+        tool_calls = out.get("tool_calls", [])
         return {
             "answer": text,
             "raw_text": out["text"],
@@ -380,6 +587,14 @@ class EgoProcess(RoleProcess):
                           "confidence": m["confidence"]} for m in recalled],
             "cited_memory_ids": cited,
             "tool_requests": tool_requests,
+            # What Ego was told it could do this turn, and what it actually
+            # invoked -- so an answer can be tied to the exact environment
+            # that produced it.
+            "environment_sha256": environment_sha256,
+            "profile_ref": out.get("profile_ref"),
+            "tool_calls": tool_calls,
+            "tool_call_count": len(tool_calls),
+            "stop_reason": out.get("stop_reason"),
             "finish_reason": out["finish_reason"],
             "completion_tokens": out["completion_tokens"],
             "time_to_first_token": out["time_to_first_token"],
@@ -405,7 +620,8 @@ class EgoProcess(RoleProcess):
             "PLAN: <one sentence describing what to check>\n"
             "CLAIM: <your current best answer, with explicit uncertainty>"
         )
-        out = self._infer(prompt, max_tokens=max_tokens)
+        out = self._turn(prompt, trigger=f"investigate: {question[:160]}",
+                         max_tokens=max_tokens)
         text = strip_tool_calls(out["text"])
         plan, claim = "", text.strip()
         for line in text.splitlines():
@@ -490,10 +706,13 @@ class IdProcess(RoleProcess):
             "In at most four sentences, say what this state implies. "
             "Mark anything you are inferring rather than reading."
         )
-        out = self._infer(prompt, max_tokens=256)
+        out = self._turn(prompt, trigger=f"introspect: {question[:160]}",
+                         max_tokens=256)
         return {
             "question": question,
             "measured": measured,
+            "environment_sha256": out.get("environment_sha256"),
+            "tool_calls": out.get("tool_calls", []),
             "interpretation": strip_tool_calls(out["text"]).strip(),
             "measurement_source": "durable state (events, work queue, memory tables)",
             "interpretation_source": "model inference over the measured state",
@@ -523,7 +742,8 @@ class IdProcess(RoleProcess):
             "FINDING: <one sentence>\n"
             "UNRESOLVED: <one sentence naming what the record does not establish>"
         )
-        out = self._infer(prompt, max_tokens=256)
+        out = self._turn(prompt, trigger=f"audit: {conclusion_id or operation_id_target}",
+                         max_tokens=256)
         text = strip_tool_calls(out["text"])
         verdict, finding, unresolved = "inconclusive", "", ""
         for line in text.splitlines():

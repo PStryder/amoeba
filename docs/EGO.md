@@ -169,3 +169,29 @@ concluded` is reconstructible from the event log:
 | `board.posted`, `memory.created`, `conclusion.recorded` | the usual paths |
 
 All attributed to `ego`, all in the hash chain.
+
+## What Ego is given each turn
+
+Three separate things, and Ego's doctrine is only the first:
+
+* **Profile** — `ego@N` from the Prompt Library, bound at incarnation and
+  frozen. Ego does not get a configured prompt appended to it; that path is
+  closed (I63).
+* **Environment** — a `role_environment` declaration built by the Harness at
+  the start of every bounded turn: the cognitive profiles currently available
+  to delegate to, the capabilities Ego may invoke right now, and the resource
+  identities in force. Rebuilt per turn, frozen within one.
+* **Turn input** — the message, question or trigger.
+
+Ego's capabilities in that declaration are derived from the same scope table
+that gates dispatch, so Ego is never told it has something its credential
+cannot reach (I58). Ego executes them through a bounded Harness-mediated tool
+loop: one call, the Harness validates and runs it, the result comes back, and
+generation resumes (I59).
+
+Ego does **not** receive Id's physiological telemetry, Id's effectors, or any
+Operator verb, and its environment lists only `ego.*` profiles.
+
+A newly approved `ego.neuocyte.research` appears in Ego's next environment with
+Ego's own prompt untouched. That is the point: the world changing must not
+require rewriting the constitution (I62).

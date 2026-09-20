@@ -198,24 +198,50 @@ def test_the_pulse_reports_inference_and_model_generation(org):
     assert p["inference"]["max_sessions"] is not None
 
 
-def test_a_resource_version_changes_when_the_resource_does(cfg):
+def test_a_resource_version_changes_when_the_resource_does(cfg, mind):
     """At the layer the guarantee lives: the digest, not the transport.
 
-    A behavioural shift after a prompt edit is a different problem from one
+    A behavioural shift after a prompt change is a different problem from one
     with no resource change at all, and Id can only tell them apart if the
     digest actually tracks the text.
+
+    This used to change the prompt through `cfg.ego.system_prompt`. That field
+    is gone -- it was an ungoverned way to rewrite constitutional doctrine --
+    so the change is made the only way it can now be made: a new governed
+    version, approved and selected.
     """
+    from amoeba.promptlib import bootstrap
+    from amoeba.promptlib.store import PromptStore
     from amoeba.resources import all_versions, prompt_version
 
-    before = prompt_version("ego", cfg).sha256
-    cfg.ego.system_prompt = "An additional instruction."
-    after = prompt_version("ego", cfg).sha256
-    assert after != before, "editing a role prompt did not change its digest"
+    store = PromptStore(mind)
+    mind.writer.apply(lambda m: bootstrap.ingest(m, store), actor="bootstrap")
+    before = prompt_version("ego", cfg, mind).sha256
 
-    v = all_versions(cfg)
+    _, created = mind.writer.apply(lambda m: store.create_runtime_version(
+        m, namespace="ego", prompt_mode="replace",
+        prompt_text="An additional instruction.", origin="operator",
+        created_by="operator", state="candidate"), actor="operator")
+
+    # A candidate changes nothing: the digest still describes what is running.
+    assert prompt_version("ego", cfg, mind).sha256 == before
+
+    def _promote(m):
+        for state in ("validated", "proposed", "production_approved"):
+            store.set_state(m, created["version_id"], state, actor="operator")
+        store.select(m, namespace="ego", version_id=created["version_id"],
+                     purpose="production", selected_by="operator")
+    mind.writer.apply(_promote, actor="operator")
+
+    after = prompt_version("ego", cfg, mind).sha256
+    assert after != before, "approving a role prompt did not change its digest"
+
+    v = all_versions(cfg, mind)
     assert v["prompt.ego"]["sha256"] == after
+    assert v["prompt.ego"]["detail"]["source"] == "ego@2"
     cfg.filespace.allow_multiply_linked = True
-    assert all_versions(cfg)["security.policy"]["sha256"] != v["security.policy"]["sha256"]
+    assert all_versions(cfg, mind)["security.policy"]["sha256"] \
+        != v["security.policy"]["sha256"]
 
 
 # ===========================================================================
@@ -258,8 +284,17 @@ def test_id_can_invoke_every_authorised_effector(org):
     prompt = org.id.call("id_propose_prompt", role="ego",
                          prompt="You are Ego. Be brief.",
                          rationale="verbosity", pulse_id=pid)
-    assert prompt["status"] == "proposed" and prompt["receipt_id"]
+    # A real Prompt Library candidate now, not a note: `ego@2` exists and is
+    # awaiting approval. It used to be recorded as a suggestion because the
+    # library refused every root version, which was an over-restriction.
+    assert prompt["status"] == "candidate" and prompt["receipt_id"]
+    assert prompt["profile_ref"] == "ego@2"
+    assert prompt["local_version"] == 2
     assert prompt["candidate_sha256"] != prompt["current_sha256"]
+    # Proposing is not adopting, and Id cannot adopt.
+    tree = {n["namespace"]: n for n in org.call("prompt_tree")["nodes"]}
+    assert tree["ego"]["selected"]["profile_ref"] == "ego@1"
+    assert any(p["local_version"] == 2 for p in tree["ego"]["pending"])
 
     msg = org.id.call("id_message_ego", kind="notice",
                       message="your context is climbing", pulse_id=pid)

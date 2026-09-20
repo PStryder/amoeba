@@ -69,6 +69,7 @@ def build(sup: "Supervisor") -> dict[str, Any]:  # noqa: C901
                    snapshot_id: str | None = None,
                    model_generation: str | None = None,
                    supersedes: str | None = None) -> dict[str, Any]:
+        """Post a finding to the blackboard for other minds to see."""
         post_id, receipt = mind.board.post(
             author=author, author_kind=author_kind, post_type=post_type, body=body,
             title=title, thread_id=thread_id, work_id=work_id,
@@ -86,6 +87,7 @@ def build(sup: "Supervisor") -> dict[str, Any]:  # noqa: C901
                    post_types: Sequence[str] | None = None, query: str | None = None,
                    since_seq: int | None = None, limit: int = 20,
                    work_id: str | None = None, record: bool = True) -> dict[str, Any]:
+        """Read the blackboard. Every read is recorded, so agreement can be told from echo."""
         posts = mind.board.read(
             reader=reader, thread_id=thread_id, post_types=post_types, query=query,
             since_seq=since_seq, limit=limit, work_id=work_id, record=record)
@@ -99,9 +101,11 @@ def build(sup: "Supervisor") -> dict[str, Any]:  # noqa: C901
 
     def board_get_post(*, post_id: str, reader: str | None = None,
                        work_id: str | None = None) -> dict[str, Any]:
+        """One blackboard post by id."""
         return mind.board.get_post(post_id, reader=reader, work_id=work_id)
 
     def board_thread(*, thread_id: str, limit: int = 200) -> list[dict[str, Any]]:
+        """A blackboard thread in order."""
         return mind.board.thread(thread_id, limit=limit)
 
     def board_relate(*, from_post: str, to_post: str, relation: str, actor: str
@@ -117,12 +121,15 @@ def build(sup: "Supervisor") -> dict[str, Any]:  # noqa: C901
         return {"receipt_id": r.receipt_id}
 
     def board_independence(*, post_a: str, post_b: str) -> dict[str, Any]:
+        """Whether two posts were reached independently or one read the other."""
         return mind.board.independence(post_a, post_b)
 
     def board_corroboration(*, post_id: str) -> dict[str, Any]:
+        """Split genuine replication from socially propagated agreement."""
         return mind.board.corroboration(post_id)
 
     def board_stats() -> dict[str, Any]:
+        """Blackboard totals by post type."""
         return mind.board.stats()
 
     def board_promote_to_memory(*, post_id: str, kind: str = "belief",
@@ -183,6 +190,7 @@ def build(sup: "Supervisor") -> dict[str, Any]:  # noqa: C901
         return sup.sandboxes
 
     def sandbox_capabilities() -> dict[str, Any]:
+        """What sandboxed compute can and cannot reach, as measured."""
         if sup.sandboxes is None:
             return {"sandbox_available": False, "detail": "disabled in configuration"}
         return sup.sandboxes.capabilities()
@@ -538,6 +546,7 @@ def build(sup: "Supervisor") -> dict[str, Any]:  # noqa: C901
 
     def artifact_list(*, status: str | None = None, limit: int = 50
                       ) -> list[dict[str, Any]]:
+        """Artifacts and proposals, with their promotion state."""
         sql = "SELECT * FROM artifacts"
         params: list[Any] = []
         if status:
@@ -612,6 +621,7 @@ def build(sup: "Supervisor") -> dict[str, Any]:  # noqa: C901
         mind.writer.apply(body, actor=actor, bump_version=False)
 
     def file_roots() -> dict[str, Any]:
+        """The configured host directories Amoeba may touch, and how."""
         if sup.filespace is None:
             return {"filespace_available": False, "roots": [],
                     "detail": "filespace not initialised"}
@@ -945,9 +955,11 @@ def build(sup: "Supervisor") -> dict[str, Any]:  # noqa: C901
                 "prompt_block": reg.prompt_block(role=role)}
 
     def context_report() -> dict[str, Any]:
+        """Measured context occupancy for the running roles."""
         return sup.homeostasis.measure().to_dict()
 
     def context_assess() -> dict[str, Any]:
+        """Whether a role's context is healthy enough to keep reasoning in."""
         return sup.homeostasis.assess()
 
     def context_rejuvenate(*, role: str, reason: str, mode: str = "trim",

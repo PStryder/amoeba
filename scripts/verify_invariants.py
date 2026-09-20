@@ -883,22 +883,38 @@ MUTATIONS: list[Mutation] = [
 
     # -- Prompt Library: the versioned cognitive family tree ------------
     Mutation(
-        "I49", "Roots can only be established by bootstrap",
+        "I49", "Runtime cannot establish a new top-level namespace",
         "src/amoeba/promptlib/store.py",
-        '        kwargs.pop("_allow_root", None)\n        return self.create_version(m, **kwargs)',
-        "        return self.create_version(m, **kwargs)  # MUTANT: forwards the flag",
-        ["test_runtime_cannot_author_a_root_even_when_it_asks_for_it"],
-        layer="create_runtime_version (the one path a runtime caller reaches)",
-        also=[("        is_root = len(parts) == 1\n        if is_root and not _allow_root:",
-               "        is_root = False\n        if is_root and not _allow_root:")],
-        note="Defended twice: the runtime wrapper drops the flag, and the "
-             "creation path refuses a root outright. Both must come out.",
+        "        if len(parts) == 1 and not self.versions(namespace):",
+        "        if False:  # MUTANT: create_version may establish a root",
+        ["test_runtime_cannot_invent_a_new_root"],
+        layer="create_version (the existence guard)",
+        also=[("src/amoeba/promptlib/model.py",
+               "    if require_root and parts[0] not in ROOTS:",
+               "    if False:  # MUTANT: any top-level name is a root")],
+        note="Defended twice and independently: validate_namespace refuses an "
+             "unknown root name, and create_version refuses a top-level "
+             "namespace that does not exist yet. Both must go. Negating this "
+             "must NOT negate I49b -- versioning an existing root stays legal "
+             "under this mutation.",
+    ),
+    Mutation(
+        "I49b", "An existing root may receive governed new versions",
+        "src/amoeba/promptlib/store.py",
+        "        if len(parts) == 1 and not self.versions(namespace):",
+        "        if len(parts) == 1:  # MUTANT: no root may ever be versioned",
+        ["test_runtime_can_propose_a_new_version_of_an_existing_root",
+         "test_id_can_propose_root_doctrine_through_governance"],
+        layer="create_version (the over-restriction this replaced)",
+        note="The inverse claim. Reintroducing the blanket root refusal must "
+             "kill these tests while leaving I49's test green, which is what "
+             "makes the two guarantees genuinely separate.",
     ),
     Mutation(
         "I50", "An edited prompt file is a candidate, never an override",
         "src/amoeba/promptlib/bootstrap.py",
-        '            state="candidate", _allow_root=True)',
-        '            state="production_approved", _allow_root=True)\n'
+        '            state="candidate")',
+        '            state="production_approved")\n'
         "        store.select(m, namespace=namespace,  # MUTANT: file overrides\n"
         '                     version_id=created["version_id"],\n'
         '                     purpose="production", selected_by=BOOTSTRAP_ACTOR)',
@@ -974,6 +990,82 @@ MUTATIONS: list[Mutation] = [
         '                   "", resolved.config_sha256,  # MUTANT: no frozen digest',
         ["test_binding_freezes_resolved_bytes_not_a_pointer"],
         layer="bind_profile (the row written at birth)",
+    ),
+
+    # -- Role environment: profile / environment / turn input ----------
+    Mutation(
+        "I58", "A role is never offered a capability it cannot invoke",
+        "src/amoeba/scopes.py",
+        'EGO_MODEL_FACING = _SHARED_MODEL_FACING + (\n    "record_conclusion", "board_post",\n) + EGO_ONLY',
+        'EGO_MODEL_FACING = _SHARED_MODEL_FACING + (\n    "record_conclusion", "board_post",\n'
+        ') + EGO_ONLY + ID_ONLY  # MUTANT: advertise Id effectors to Ego',
+        ["test_model_facing_verbs_are_a_subset_of_the_roles_scope",
+         "test_role_environments_do_not_leak_across_roles"],
+        layer="scopes.MODEL_FACING (what the manifest advertises)",
+    ),
+    Mutation(
+        "I59", "A role can actually execute what its environment offers",
+        "src/amoeba/roles.py",
+        "            result = self.sup.call(name, **self._sanitise(name, arguments))",
+        "            result = None  # MUTANT: parse the request, never run it",
+        ["test_ego_can_invoke_an_advertised_sense",
+         "test_id_can_invoke_an_advertised_sense_and_effector"],
+        layer="RoleProcess._invoke (the role tool loop's execution step)",
+        note="The state before this work: roles parsed tool calls and reported "
+             "them without executing, so a manifest would have advertised "
+             "capabilities the model could not use.",
+    ),
+    Mutation(
+        "I60", "Authority-shaped arguments cannot widen authority",
+        "src/amoeba/roles.py",
+        "        clean = {k: v for k, v in (arguments or {}).items()\n"
+        "                 if k in declared and k not in AUTHORITY_ARGUMENTS}\n"
+        "        for field in BOUND_IDENTITY_ARGUMENTS:\n"
+        "            if field in declared:\n"
+        "                clean[field] = self.role",
+        "        clean = dict(arguments or {})  # MUTANT: trust the model",
+        ["test_authority_shaped_arguments_cannot_widen_authority",
+         "test_undeclared_arguments_are_dropped"],
+        layer="RoleProcess._sanitise (where identity is bound, not accepted)",
+    ),
+    Mutation(
+        "I61", "One turn sees one environment",
+        "src/amoeba/roles.py",
+        "        env_block = self._begin_turn(trigger or user_text[:200])",
+        "        env_block = \"\"  # MUTANT: no environment is built for the turn",
+        ["test_the_environment_is_built_once_per_turn",
+         "test_the_environment_reaches_the_context_before_the_turn_input"],
+        layer="RoleProcess._turn (the per-turn freeze)",
+    ),
+    Mutation(
+        "I62", "A changing environment does not require rewriting doctrine",
+        "src/amoeba/role_env.py",
+        "        if not namespace.startswith(role + \".\"):",
+        "        if True:  # MUTANT: no profile is ever discoverable",
+        ["test_a_new_profile_becomes_visible_without_editing_doctrine"],
+        layer="role_env._profile_inventory (what a role can discover)",
+    ),
+    Mutation(
+        "I63", "Configuration cannot silently rewrite constitutional doctrine",
+        "src/amoeba/config.py",
+        "    raise ValueError(\n"
+        "        f\"[{role}].{RETIRED_PROMPT_KEY} is no longer honoured:",
+        "    section.pop(RETIRED_PROMPT_KEY, None)  # MUTANT: silently ignore\n"
+        "    return\n"
+        "    raise ValueError(\n"
+        "        f\"[{role}].{RETIRED_PROMPT_KEY} is no longer honoured:",
+        ["test_a_configured_system_prompt_is_refused_not_honoured"],
+        layer="config._reject_retired_prompt (the loud refusal)",
+        also=[("src/amoeba/roles.py",
+               "        return (self.profile_prompt if self.profile_prompt is not None\n"
+               "                else self.system_prompt)",
+               "        base = (self.profile_prompt if self.profile_prompt is not None\n"
+               "                else self.system_prompt)\n"
+               "        return base + getattr(self.role_cfg, \"system_prompt\", \"\")")],
+        note="Defended on both sides: the loader refuses the key and the role "
+             "composes only what the library resolved. Reintroducing the "
+             "append alone would not restore the bypass, because the field no "
+             "longer loads.",
     ),
 ]
 

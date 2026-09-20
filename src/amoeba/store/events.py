@@ -149,6 +149,9 @@ class EventKind:
     PROMPT_CASCADED = "prompt.cascaded"
     PROMPT_REJECTED = "prompt.rejected"
     INCARNATION_BOUND = "incarnation.bound"
+    ROLE_ENVIRONMENT_BUILT = "role.environment_built"
+    ROLE_TURN_BEGAN = "role.turn_began"
+    ROLE_TOOL_INVOKED = "role.tool_invoked"
 
     # arbiter / side channel
     RESOURCE_DECISION = "resource.decision"

@@ -161,14 +161,26 @@ def ingest(m: Mutation, store: PromptStore, directory: Path | None = None
         selected = store.selected(namespace)
 
         if not versions:
-            created = store.create_version(
-                m, namespace=namespace, prompt_mode=parsed["prompt_mode"],
-                prompt_text=parsed["prompt_text"],
-                model_vars=parsed["model_vars"], origin="bootstrap",
-                created_by=BOOTSTRAP_ACTOR,
-                rationale=parsed["rationale"]
-                          or f"shipped baseline from {parsed['source']}",
-                state="production_approved", _allow_root=True)
+            rationale = (parsed["rationale"]
+                         or f"shipped baseline from {parsed['source']}")
+            if depth(namespace) == 1:
+                # Establishing a root: the one operation no runtime caller can
+                # reach, through the one function that performs it.
+                created = store.establish_root(
+                    m, namespace=namespace, prompt_mode=parsed["prompt_mode"],
+                    prompt_text=parsed["prompt_text"],
+                    model_vars=parsed["model_vars"],
+                    created_by=BOOTSTRAP_ACTOR, rationale=rationale,
+                    state="production_approved")
+            else:
+                # An ordinary first version. Its parent already exists, because
+                # files are ingested shallowest first.
+                created = store.create_version(
+                    m, namespace=namespace, prompt_mode=parsed["prompt_mode"],
+                    prompt_text=parsed["prompt_text"],
+                    model_vars=parsed["model_vars"], origin="bootstrap",
+                    created_by=BOOTSTRAP_ACTOR, rationale=rationale,
+                    state="production_approved")
             store.select(m, namespace=namespace,
                          version_id=created["version_id"], purpose="production",
                          selected_by=BOOTSTRAP_ACTOR)
@@ -209,7 +221,7 @@ def ingest(m: Mutation, store: PromptStore, directory: Path | None = None
             origin="bootstrap", created_by=BOOTSTRAP_ACTOR,
             rationale=parsed["rationale"]
                       or f"{parsed['source']} differs from the selected version",
-            state="candidate", _allow_root=True)
+            state="candidate")
         m.emit(EventKind.PROMPT_BOOTSTRAP_DELTA, {
             "namespace": namespace, "version_id": created["version_id"],
             "local_version": created["local_version"],

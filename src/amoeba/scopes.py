@@ -55,6 +55,10 @@ NEUOCYTE = (
 ROLE_BASE = (
     "register_agent", "retire_agent", "heartbeat",
     "bind_profile",
+    # The turn's authoritative environment. Process plumbing rather than a
+    # cognitive act, so it is deliberately not model-facing: the role asks for
+    # it on the model's behalf and hands the answer over.
+    "role_environment",
     "status", "health", "capabilities",
     "recall", "get_memory", "history", "provenance", "audit_dossier",
     "get_conclusion", "get_work", "queue_stats",
@@ -135,6 +139,65 @@ EXTERNAL_IO = (
     "io_capabilities", "io_attach_input", "io_submit", "io_status",
     "io_await", "io_output", "io_list", "io_result",
 )
+
+
+# ---------------------------------------------------------------------------
+# What the role MODEL is offered, as opposed to what the role PROCESS may call
+# ---------------------------------------------------------------------------
+# A scope table is the dispatch authority of a *connection*. Some of what it
+# contains is plumbing the process performs on the model's behalf --
+# registering, heartbeating, binding a profile -- and offering those to the
+# model would be inviting it to operate its own life support.
+#
+# These are the verbs the environment manifest advertises and the role tool
+# loop will execute. Two rules hold, and both are tested:
+#
+#   * every model-facing verb is in that role's scope table, so a role is
+#     never told it has a capability its credential cannot invoke;
+#   * every *deliberate* role capability -- everything in EGO_ONLY and
+#     ID_ONLY -- is model-facing, so an effector cannot exist in dispatch
+#     while being invisible to the mind it was built for.
+#
+# The descriptions and argument schemas are not written here. They are derived
+# from the real functions in the supervisor's method table, because a
+# hand-maintained second list is exactly how a manifest starts lying.
+
+_SHARED_MODEL_FACING = (
+    # reading the record
+    "recall", "get_memory", "history", "provenance", "audit_dossier",
+    "get_conclusion", "get_work", "queue_stats",
+    # the blackboard
+    "board_read", "board_get_post", "board_thread", "board_stats",
+    # work product and self-measurement
+    "artifact_list", "context_report",
+)
+
+EGO_MODEL_FACING = _SHARED_MODEL_FACING + (
+    "record_conclusion", "board_post",
+) + EGO_ONLY
+
+ID_MODEL_FACING = _SHARED_MODEL_FACING + ID_SENSES + PROMPT_READ + ID_ONLY
+
+# Deliberately absent from both: register_agent, retire_agent, heartbeat and
+# bind_profile (the process's own lifecycle), status/health/capabilities (the
+# manifest carries the resource identities that matter), and Ego's snapshot
+# publication, which is the Harness's scheduling concern rather than a
+# cognitive act.
+
+MODEL_FACING: dict[str, tuple[str, ...]] = {
+    "ego": EGO_MODEL_FACING,
+    "id": ID_MODEL_FACING,
+}
+
+
+def model_facing_verbs(role: str) -> tuple[str, ...]:
+    """The verbs a role's model may be offered and may invoke.
+
+    Ordered and de-duplicated so a manifest built twice from the same state is
+    byte-identical -- the environment digest has to be stable or provenance
+    becomes noise.
+    """
+    return tuple(sorted(set(MODEL_FACING.get(role, ()))))
 
 
 def scope_tables() -> dict[str, tuple[str, ...]]:

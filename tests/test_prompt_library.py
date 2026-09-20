@@ -154,31 +154,155 @@ def test_prompt_mode_and_text_must_agree():
 # ---------------------------------------------------------------------------
 # roots
 # ---------------------------------------------------------------------------
-def test_runtime_cannot_author_a_root_even_when_it_asks_for_it(mind, library):
-    """I49. Roots are bootstrap-only, structurally.
+def test_runtime_cannot_invent_a_new_root(mind, library):
+    """I49. A top-level namespace can only be established by bootstrap.
 
-    The caller here does the most it possibly can: it names an established
-    root and explicitly passes the private `_allow_root` flag. The runtime
-    creation path has no parameter that carries it, so the request is not
-    refused by a policy check that could be reasoned around -- it is not
-    expressible.
+    Two independent defences, and the test forces both to matter:
+    `validate_namespace` refuses a name whose root is not `ego` or `id`, and
+    `create_version` refuses a top-level namespace with no versions. The
+    second is what stops a *known* root being conjured on an empty library,
+    where the first would happily let it through.
+
+    Note what this does **not** claim: that roots are frozen. Versioning an
+    existing root is ordinary governance — see I49b.
     """
     store, _ = library
-    with pytest.raises(NamespaceError):
-        mind.writer.apply(lambda m: store.create_runtime_version(
-            m, namespace="ego", prompt_mode="replace", prompt_text="I am in charge",
-            origin="id", created_by="id", _allow_root=True), actor="id")
-    assert [v["local_version"] for v in store.versions("ego")] == [1]
-
-
-def test_runtime_cannot_invent_a_new_root(mind, library):
-    store, _ = library
-    for name in ("godmode", "operator", "supervisor", "root"):
+    for name in ("godmode", "operator", "supervisor", "root", "foo"):
         with pytest.raises(NamespaceError):
             mind.writer.apply(lambda m: store.create_runtime_version(
                 m, namespace=name, prompt_mode="replace", prompt_text="x",
                 origin="id", created_by="id"), actor="id")
         assert name not in store.namespaces()
+
+
+def test_runtime_cannot_establish_even_a_known_root(mind):
+    """The second defence, isolated: `ego` is a legal name but must not exist.
+
+    On an empty library `validate_namespace` passes — `ego` *is* a root — so
+    only the existence guard stands between a runtime caller and a
+    self-established constitution.
+    """
+    store = PromptStore(mind)
+    assert store.namespaces() == []
+    with pytest.raises(NamespaceError) as exc:
+        mind.writer.apply(lambda m: store.create_runtime_version(
+            m, namespace="ego", prompt_mode="replace",
+            prompt_text="I establish myself.", origin="id",
+            created_by="id"), actor="id")
+    assert "does not exist" in str(exc.value)
+    assert store.namespaces() == []
+
+
+def test_establishing_a_root_is_not_reachable_from_any_scope():
+    """`establish_root` is bootstrap's alone because nothing else names it.
+
+    The permission is which function you can call, not a flag you decline to
+    pass — so the check is that no dispatchable surface mentions it.
+    """
+    from amoeba import prompt_api, scopes
+
+    for table in scopes.scope_tables().values():
+        assert "establish_root" not in table
+    built = prompt_api.build.__doc__ or ""
+    assert "establish_root" not in built
+    source = (Path(__file__).resolve().parents[1]
+              / "src" / "amoeba" / "prompt_api.py").read_text(encoding="utf-8")
+    assert "establish_root" not in source, \
+        "the RPC surface must not be able to establish a root"
+
+
+def test_establish_root_refuses_an_existing_namespace(mind, library):
+    """Bootstrap cannot use it to slip a second `ego` past governance."""
+    store, _ = library
+    with pytest.raises(NamespaceError):
+        mind.writer.apply(lambda m: store.establish_root(
+            m, namespace="ego", prompt_mode="replace", prompt_text="again",
+            created_by="bootstrap"), actor="bootstrap")
+    with pytest.raises(NamespaceError):
+        mind.writer.apply(lambda m: store.establish_root(
+            m, namespace="ego.neuocyte", prompt_mode="replace",
+            prompt_text="not top level", created_by="bootstrap"),
+            actor="bootstrap")
+
+
+def test_runtime_can_propose_a_new_version_of_an_existing_root(mind, library):
+    """I49b. Ego's and Id's doctrine can change through ordinary governance.
+
+    The inverse of I49, and the correction of a real over-restriction: the
+    first implementation forbade every root version, not merely a new
+    top-level namespace, which meant a doctrine change required editing a
+    shipped file. A root version is now a candidate like any other.
+    """
+    store, resolver = library
+    for root in ("ego", "id"):
+        _, created = mind.writer.apply(
+            lambda m, r=root: store.create_runtime_version(
+                m, namespace=r, prompt_mode="replace",
+                prompt_text=f"Revised {r} doctrine.", origin="id",
+                created_by="id", rationale="doctrine needs to evolve"),
+            actor="id")
+        assert created["local_version"] == 2
+        assert created["state"] == "candidate"
+        # Created is not adopted: what is running is untouched.
+        assert store.selected(root)["local_version"] == 1
+        assert str(resolver.resolve_selected(root).ref) == f"{root}@1"
+
+
+def test_a_root_candidate_cannot_be_selected_before_approval(mind, library):
+    store, _ = library
+    _, created = mind.writer.apply(lambda m: store.create_runtime_version(
+        m, namespace="ego", prompt_mode="replace", prompt_text="New doctrine.",
+        origin="id", created_by="id"), actor="id")
+    with pytest.raises(InvalidInput):
+        mind.writer.apply(lambda m: store.select(
+            m, namespace="ego", version_id=created["version_id"],
+            purpose="production", selected_by="operator"), actor="operator")
+    with pytest.raises(InvalidInput):
+        mind.writer.apply(lambda m: store.set_state(
+            m, created["version_id"], "production_approved", actor="id"),
+            actor="id")
+
+
+def test_a_root_version_completes_the_normal_governance_path(mind, library):
+    """Creation -> validated -> proposed -> approved -> selected."""
+    store, resolver = library
+    _, created = mind.writer.apply(lambda m: store.create_runtime_version(
+        m, namespace="ego", prompt_mode="replace",
+        prompt_text="Governed new Ego doctrine.", origin="id",
+        created_by="id"), actor="id")
+    _approve_and_select(mind, store, "ego", created["version_id"])
+    assert str(resolver.resolve_selected("ego").ref) == "ego@2"
+    assert resolver.resolve_selected("ego").prompt_text \
+        == "Governed new Ego doctrine."
+    # Descendants still pin ego@1 until cascaded -- I51 is unaffected.
+    assert str(resolver.resolve_selected("ego.neuocyte").ref) == "ego.neuocyte@1.1"
+
+
+def test_id_can_propose_root_doctrine_through_governance(mind, library):
+    """I49b, through the verb Id actually holds.
+
+    `id_propose_prompt` used to record a note and tell the Operator to edit a
+    file, because the library refused root versions. It now creates a real
+    candidate, and Id still cannot approve it.
+    """
+    from amoeba import id_api, scopes
+
+    store, _ = library
+    verbs = id_api.build(_Sup(mind))
+    out = verbs["id_propose_prompt"](
+        role="ego", prompt="Ego doctrine, revised by Id.",
+        rationale="observed repeated overclaiming in conclusions")
+
+    assert out["status"] == "candidate"
+    assert out["local_version"] == 2
+    assert out["profile_ref"] == "ego@2"
+    assert store.by_id(out["version_id"])["state"] == "candidate"
+    # Still running the old one.
+    assert store.selected("ego")["local_version"] == 1
+    # And Id holds no verb that could change that.
+    for verb in ("operator_prompt_state", "operator_prompt_select",
+                 "operator_prompt_cascade"):
+        assert verb not in scopes.ID
 
 
 def test_bootstrap_establishes_roots_and_is_idempotent(mind, library):
@@ -306,8 +430,8 @@ def test_child_pins_an_exact_parent_version(mind, library):
     # A brand new ego, approved and selected.
     _, ego2 = mind.writer.apply(lambda m: store.create_version(
         m, namespace="ego", prompt_mode="replace", prompt_text="Revised root.",
-        origin="bootstrap", created_by="bootstrap", state="proposed",
-        _allow_root=True), actor="bootstrap")
+        origin="bootstrap", created_by="bootstrap", state="proposed"),
+        actor="bootstrap")
     _approve_and_select(mind, store, "ego", ego2["version_id"])
 
     after = resolver.resolve_selected("ego.neuocyte.research")
@@ -440,8 +564,8 @@ def test_selection_does_not_change_a_running_mind(mind, library):
 
     _, ego2 = mind.writer.apply(lambda m: store.create_version(
         m, namespace="ego", prompt_mode="replace", prompt_text="Different root.",
-        origin="bootstrap", created_by="bootstrap", state="proposed",
-        _allow_root=True), actor="bootstrap")
+        origin="bootstrap", created_by="bootstrap", state="proposed"),
+        actor="bootstrap")
     _approve_and_select(mind, store, "ego", ego2["version_id"])
 
     assert str(resolver.resolve_selected("ego").ref) == "ego@2"
@@ -476,8 +600,8 @@ def test_cascade_copies_local_definitions_unchanged(mind, library):
 
     _, ego2 = mind.writer.apply(lambda m: store.create_version(
         m, namespace="ego", prompt_mode="replace", prompt_text="Revised root.",
-        origin="bootstrap", created_by="bootstrap", state="proposed",
-        _allow_root=True), actor="bootstrap")
+        origin="bootstrap", created_by="bootstrap", state="proposed"),
+        actor="bootstrap")
     _approve_and_select(mind, store, "ego", ego2["version_id"])
 
     plan = cascade.plan(store, "ego", 2, mode="approve")
@@ -498,8 +622,8 @@ def test_cascade_queue_creates_candidates_without_selecting(mind, library):
     store, resolver = library
     _, ego2 = mind.writer.apply(lambda m: store.create_version(
         m, namespace="ego", prompt_mode="replace", prompt_text="Revised root.",
-        origin="bootstrap", created_by="bootstrap", state="proposed",
-        _allow_root=True), actor="bootstrap")
+        origin="bootstrap", created_by="bootstrap", state="proposed"),
+        actor="bootstrap")
     _approve_and_select(mind, store, "ego", ego2["version_id"])
     before = resolver.resolve_selected("ego.neuocyte")
 
@@ -519,8 +643,8 @@ def test_cascade_descends_level_by_level(mind, library):
     _approve_and_select(mind, store, "ego.neuocyte.research", child["version_id"])
     _, ego2 = mind.writer.apply(lambda m: store.create_version(
         m, namespace="ego", prompt_mode="replace", prompt_text="R2.",
-        origin="bootstrap", created_by="bootstrap", state="proposed",
-        _allow_root=True), actor="bootstrap")
+        origin="bootstrap", created_by="bootstrap", state="proposed"),
+        actor="bootstrap")
     _approve_and_select(mind, store, "ego", ego2["version_id"])
 
     plan = cascade.plan(store, "ego", 2, mode="approve")
@@ -540,8 +664,8 @@ def test_cascade_reports_what_it_skipped(mind, library):
     _author(mind, store, "ego.neuocyte.research", text="never approved")
     _, ego2 = mind.writer.apply(lambda m: store.create_version(
         m, namespace="ego", prompt_mode="replace", prompt_text="R2.",
-        origin="bootstrap", created_by="bootstrap", state="proposed",
-        _allow_root=True), actor="bootstrap")
+        origin="bootstrap", created_by="bootstrap", state="proposed"),
+        actor="bootstrap")
     _approve_and_select(mind, store, "ego", ego2["version_id"])
     plan = cascade.plan(store, "ego", 2, mode="queue")
     skipped = {s["namespace"] for s in plan["skipped"]}
@@ -552,8 +676,8 @@ def test_cascade_requires_an_approved_parent(mind, library):
     store, _ = library
     _, ego2 = mind.writer.apply(lambda m: store.create_version(
         m, namespace="ego", prompt_mode="replace", prompt_text="R2.",
-        origin="bootstrap", created_by="bootstrap", state="candidate",
-        _allow_root=True), actor="bootstrap")
+        origin="bootstrap", created_by="bootstrap", state="candidate"),
+        actor="bootstrap")
     with pytest.raises(InvalidInput):
         cascade.plan(store, "ego", 2, mode="approve")
 
@@ -741,8 +865,8 @@ def test_binding_freezes_resolved_bytes_not_a_pointer(mind, library):
     # Move the library on.
     _, ego2 = mind.writer.apply(lambda m: store.create_version(
         m, namespace="ego", prompt_mode="replace", prompt_text="Totally new.",
-        origin="bootstrap", created_by="bootstrap", state="proposed",
-        _allow_root=True), actor="bootstrap")
+        origin="bootstrap", created_by="bootstrap", state="proposed"),
+        actor="bootstrap")
     _approve_and_select(mind, store, "ego", ego2["version_id"])
     plan = cascade.plan(store, "ego", 2, mode="approve")
     mind.writer.apply(lambda m: cascade.apply_plan(m, store, plan,

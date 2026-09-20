@@ -565,3 +565,125 @@ def test_an_incarnation_binding_carries_its_incarnation(stack: LiveStack):
     for b in bindings:
         assert b["incarnation"] is not None, b
         assert b["incarnation"] >= 1
+
+
+def test_a_role_turn_carries_a_frozen_environment(stack: LiveStack):
+    """Ego's answers are tied to the exact environment that produced them."""
+    first = stack.call("ego_converse", message="what do you know?")["result"]
+    assert first["environment_sha256"]
+    assert first["profile_ref"] == "ego@1"
+    assert first["stop_reason"]
+
+    # Unchanged world, unchanged digest: the manifest is a function of state,
+    # not of the clock.
+    second = stack.call("ego_converse", message="and now?")["result"]
+    assert second["environment_sha256"] == first["environment_sha256"]
+
+
+def test_the_exact_environment_a_turn_saw_is_reconstructable(stack: LiveStack):
+    """A digest whose content cannot be recovered is not provenance.
+
+    The manifest bytes go to the content-addressed store, so the environment a
+    past turn reasoned against can be read back and re-hashed rather than
+    recomputed from state that has since moved.
+    """
+    import hashlib
+    import json
+
+    env = stack.call("role_environment", role="ego", incarnation=1,
+                     profile_ref="ego@1", trigger="provenance check")
+    blob = env["environment_blob"]
+    assert blob
+
+    # `history` returns the raw rows: a small payload is inline, a large one
+    # is a blob reference. Resolve whichever it is.
+    from amoeba.store.blobs import BlobStore
+
+    blobs = BlobStore(stack.cfg.blob_dir)
+
+    def _payload(event):
+        if event.get("payload_inline") is not None:
+            return json.loads(event["payload_inline"])
+        if event.get("payload_sha256"):
+            return blobs.get_json(event["payload_sha256"])
+        return {}
+
+    events = stack.call("history", kinds=["role.turn_began"], limit=20)
+    turn = [e for e in events if _payload(e).get("environment_blob") == blob]
+    assert turn, "the turn did not record the environment it was given"
+    payload = _payload(turn[0])
+    for field in ("role", "profile_ref", "environment_sha256",
+                  "environment_blob", "trigger", "model_generation"):
+        assert field in payload, field
+
+    # The stored bytes really are the manifest that was handed over, and they
+    # still hash to the digest the turn recorded.
+    raw = blobs.get(blob)
+    assert hashlib.sha256(raw).hexdigest() == blob
+    body = json.loads(raw.decode("utf-8"))
+    assert body["environment_sha256"] == env["environment_sha256"]
+    assert {c["verb"] for c in body["capabilities"]} == {
+        c["verb"] for c in env["manifest"]["capabilities"]}
+    assert body["available_profiles"] == env["manifest"]["available_profiles"]
+
+
+def test_the_environment_digest_tracks_the_authoritative_state(stack: LiveStack):
+    """Approving a profile changes the environment; nothing else needs to."""
+    before = stack.call("role_environment", role="ego")["environment_sha256"]
+    created = stack.call("operator_prompt_author",
+                         namespace="ego.neuocyte.do_thing", prompt_mode="append",
+                         prompt_text="Do the thing precisely.",
+                         rationale="environment test")
+    # A candidate is not yet a capability.
+    assert stack.call("role_environment", role="ego")["environment_sha256"] == before
+
+    for state in ("validated", "proposed", "production_approved"):
+        stack.call("operator_prompt_state", version_id=created["version_id"],
+                   state=state)
+    stack.call("operator_prompt_select", namespace="ego.neuocyte.do_thing",
+               version_id=created["version_id"])
+
+    after = stack.call("role_environment", role="ego")
+    assert after["environment_sha256"] != before
+    names = [p["profile_ref"] for p in after["manifest"]["available_profiles"]]
+    assert any("do_thing" in n for n in names), names
+
+
+def test_a_role_credential_cannot_reach_another_roles_effectors(stack: LiveStack):
+    """The real physics behind the environment: the scope table.
+
+    The manifest refusing an unlisted verb is the first defence. This is the
+    second and the one that matters -- Ego's own credential resolves to a
+    method table that does not contain Id's effectors, so the verb is not
+    refused, it is absent.
+    """
+    from amoeba.rpc import RpcClient, read_or_create_token
+
+    cfg = stack.cfg
+    ego = RpcClient(cfg.supervisor_host, cfg.supervisor_port,
+                    read_or_create_token(cfg.scope_token_path("ego")),
+                    name="test-ego")
+    ident = RpcClient(cfg.supervisor_host, cfg.supervisor_port,
+                      read_or_create_token(cfg.scope_token_path("id")),
+                      name="test-id")
+    try:
+        ego.connect(retries=10, delay=0.2)
+        ident.connect(retries=10, delay=0.2)
+
+        with pytest.raises(Exception) as exc:
+            ego.call("id_raise_finding", kind="anomaly", summary="I am Id")
+        assert "unknown method" in str(exc.value).lower()
+
+        with pytest.raises(Exception):
+            ident.call("ego_request_work", objective="I am Ego")
+
+        # Neither can reach the operator's prompt governance.
+        for client in (ego, ident):
+            with pytest.raises(Exception):
+                client.call("operator_prompt_select", namespace="ego",
+                            version_id="anything")
+        # But each can build its own environment.
+        assert ego.call("role_environment", role="ego")["manifest"]["role"] == "ego"
+    finally:
+        ego.close()
+        ident.close()

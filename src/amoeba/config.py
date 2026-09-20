@@ -84,9 +84,18 @@ class SandboxConfig:
 
 @dataclass(slots=True)
 class RoleConfig:
+    """Operational limits for a long-lived role. Deliberately not doctrine.
+
+    `system_prompt` used to live here and was appended to whatever the Prompt
+    Library resolved. That made a configuration file a second, ungoverned way
+    to rewrite Ego's or Id's constitution -- no version, no candidate, no
+    evaluation, no approval, and no record beyond a digest that happened to
+    change. It is gone, and a non-empty value is refused at load with
+    migration guidance rather than ignored.
+    """
+
     max_context_tokens: int = 6144
     max_turns_resident: int = 40
-    system_prompt: str = ""
 
 
 @dataclass(slots=True)
@@ -247,6 +256,41 @@ def _apply(obj: Any, data: dict[str, Any], where: str) -> None:
         setattr(obj, key, value)
 
 
+RETIRED_PROMPT_KEY = "system_prompt"
+
+
+def _reject_retired_prompt(section: dict[str, Any], role: str) -> None:
+    """Refuse a configured role prompt instead of silently dropping it.
+
+    Dropping it would be worse than honouring it: somebody who had tuned a
+    role through configuration would restart into different cognition with no
+    signal at all. Refusing states plainly that doctrine has one governed
+    home now, and says how to get there.
+
+    An empty value is not a doctrine change, so it loads and does nothing.
+    """
+    value = section.get(RETIRED_PROMPT_KEY)
+    if not value:
+        # Present but empty changes nothing, so it is consumed rather than
+        # reported as an unknown key: refusing a config that does nothing
+        # would be noise, and the field is gone from RoleConfig.
+        section.pop(RETIRED_PROMPT_KEY, None)
+        return
+    raise ValueError(
+        f"[{role}].{RETIRED_PROMPT_KEY} is no longer honoured: a role's system "
+        "prompt comes from the Prompt Library, which versions, evaluates and "
+        "approves it. Configuration cannot change how the organism thinks.\n"
+        f"  To keep this text, propose it as a new version of the {role!r} "
+        "root and have the Operator approve it:\n"
+        f"    id_propose_prompt(role={role!r}, prompt=..., rationale=...)\n"
+        f"    operator_prompt_author(namespace={role!r}, prompt_mode='replace', "
+        "prompt_text=...)\n"
+        f"  then operator_prompt_state(...) and operator_prompt_select(...).\n"
+        f"  Or edit src/amoeba/promptlib/prompts/{role}.md, which arrives as a "
+        "governed candidate at the next start.\n"
+        f"  Remove the key from your config to continue.")
+
+
 def load_config(path: str | os.PathLike[str] | None = None) -> Config:
     cfg = Config()
     if path is None:
@@ -271,6 +315,8 @@ def load_config(path: str | os.PathLike[str] | None = None) -> Config:
         _apply(cfg.backend, raw["backend"], "backend")
     if "arbiter" in raw:
         _apply(cfg.arbiter, raw["arbiter"], "arbiter")
+    for role in ("ego", "id"):
+        _reject_retired_prompt(raw.get(role) or {}, role)
     if "ego" in raw:
         _apply(cfg.ego, raw["ego"], "ego")
     if "id" in raw:

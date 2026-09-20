@@ -136,31 +136,87 @@ class PromptStore:
                        prompt_text: str = "", model_vars: dict[str, Any] | None = None,
                        parent_version: int | None = None, origin: str,
                        created_by: str, rationale: str = "",
-                       state: str = "candidate",
-                       _allow_root: bool = False) -> dict[str, Any]:
-        """Create an immutable node version beneath an established root.
+                       state: str = "candidate") -> dict[str, Any]:
+        """Create an immutable version of a namespace that already exists.
 
-        ``_allow_root`` is private and is passed only by the bootstrap path.
-        It is not a caller-supplied boolean in any sense that matters: no RPC
-        verb, tool schema or adapter forwards it, and every runtime entry point
-        reaches this function through wrappers that cannot set it. A runtime
-        caller therefore has no expression that creates a root -- see
-        :func:`create_runtime_version`.
+        This has **no power to establish a top-level namespace**, and no
+        parameter that would grant it one. The previous design gated that on a
+        private boolean, which meant the guarantee rested on every caller
+        declining to pass a flag. The permission is now *which function you
+        called*: establishing lives in :meth:`establish_root`, which no scope
+        table names and no RPC verb calls.
+
+        Creating a new version of an **existing** root is ordinary governance
+        and is allowed. Ego's and Id's doctrine has to be able to change, and
+        forbidding it conflated "no new top-level namespace" with "no new
+        version of a root". What comes back is still a candidate, and still
+        has to be validated, evaluated, proposed and approved like any other.
         """
         parts = validate_namespace(namespace)
+        if len(parts) == 1 and not self.versions(namespace):
+            # A top-level name with no versions would be *established* here,
+            # which is bootstrap's alone. `validate_namespace` has already
+            # refused any root outside ROOTS, so a brand-new top-level
+            # namespace is blocked twice, independently.
+            raise NamespaceError(
+                f"{namespace!r} is a top-level namespace that does not exist "
+                "yet; only bootstrap establishes one",
+                hint="bootstrap ships the roots; runtime may version them "
+                     "once they exist")
+        return self._write_version(
+            m, namespace=namespace, prompt_mode=prompt_mode,
+            prompt_text=prompt_text, model_vars=model_vars,
+            parent_version=parent_version, origin=origin,
+            created_by=created_by, rationale=rationale, state=state)
+
+    def establish_root(self, m: Mutation, *, namespace: str, prompt_mode: str,
+                       prompt_text: str = "",
+                       model_vars: dict[str, Any] | None = None,
+                       created_by: str = "bootstrap", rationale: str = "",
+                       state: str = "production_approved") -> dict[str, Any]:
+        """Bring a top-level namespace into existence. Bootstrap's alone.
+
+        Unreachable from any RPC surface: no scope table names it, no tool
+        schema describes it, and `prompt_api` never calls it. That is the
+        protection, and it is stronger than the boolean it replaced, because
+        there is no argument that turns :meth:`create_version` into this.
+
+        It refuses a namespace that already exists, so it cannot be used to
+        slip a second `ego` past governance -- that is `create_version`'s job
+        and goes through approval.
+        """
+        parts = validate_namespace(namespace)
+        if len(parts) != 1:
+            raise NamespaceError(
+                f"{namespace!r} is not top-level; descendants go through "
+                "create_version", namespace=namespace)
+        if self.versions(namespace):
+            raise NamespaceError(
+                f"{namespace!r} already exists; a further version is ordinary "
+                "governance, not establishment", namespace=namespace)
+        return self._write_version(
+            m, namespace=namespace, prompt_mode=prompt_mode,
+            prompt_text=prompt_text, model_vars=model_vars,
+            parent_version=None, origin="bootstrap", created_by=created_by,
+            rationale=rationale, state=state)
+
+    def _write_version(self, m: Mutation, *, namespace: str, prompt_mode: str,
+                       prompt_text: str, model_vars: dict[str, Any] | None,
+                       parent_version: int | None, origin: str,
+                       created_by: str, rationale: str,
+                       state: str) -> dict[str, Any]:
+        """The mechanics, with no root policy of its own.
+
+        Private because it is the one function here that would create
+        anything: the policy that decides *what* may be created lives in the
+        two public callers above.
+        """
+        validate_namespace(namespace)
         if origin not in ORIGINS:
             raise InvalidInput("unknown origin", origin=origin,
                                allowed=list(ORIGINS))
         if state not in STATES:
             raise InvalidInput("unknown state", state=state)
-
-        is_root = len(parts) == 1
-        if is_root and not _allow_root:
-            raise NamespaceError(
-                f"{namespace!r} is a top-level root; roots and new root "
-                "versions originate only from bootstrap",
-                hint="author a descendant such as "
-                     f"{namespace}.neuocyte.<specialisation> instead")
 
         text = validate_prompt(prompt_mode, prompt_text)
         check_no_unresolved_placeholders(text)
@@ -208,13 +264,14 @@ class PromptStore:
                 "local_sha256": local_sha, "state": state, "origin": origin}
 
     def create_runtime_version(self, m: Mutation, **kwargs: Any) -> dict[str, Any]:
-        """The only creation path reachable from a runtime caller.
+        """The creation path reachable from a runtime caller.
 
-        It cannot pass ``_allow_root``. A root or a new root version is
-        therefore not something a runtime caller can express, rather than
-        something it is forbidden from asking for.
+        Identical to :meth:`create_version`, kept as a separate name so call
+        sites read honestly. There is nothing left to strip: `create_version`
+        cannot establish a top-level namespace under any arguments, so a
+        runtime caller has no expression for it rather than a flag it is
+        trusted not to set.
         """
-        kwargs.pop("_allow_root", None)
         return self.create_version(m, **kwargs)
 
     def set_state(self, m: Mutation, version_id: str, new_state: str, *,

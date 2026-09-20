@@ -593,21 +593,32 @@ touches no filesystem. Running on loopback grants nothing.
 
 Full reference: `PROMPTLIB.md` (namespaces and lineage vectors, inheritance and prompt composition, the bootstrap comparison, the governance state machine, the three cascade modes, and incarnation binding).
 
-**I49. Roots are established only by bootstrap.** `ego` and `id` come from the
-files shipped in `promptlib/prompts`, which are reviewable in the repository.
-There is no runtime expression that creates a top-level root or a new version
-of one: `create_runtime_version` has no parameter that would permit it, so
-`godmode`, `operator` and `supervisor` are not requests that get refused — they
-are sentences the runtime cannot say. This does not depend on a model
-instruction or a caller-supplied boolean.
+**I49. Runtime cannot establish a new top-level namespace.** `godmode`,
+`operator`, `supervisor` and any other new root are not requests that get
+refused — they are sentences the runtime cannot say. Two independent defences:
+`validate_namespace` rejects a name whose root is not `ego` or `id`, and
+`create_version` rejects a top-level namespace that has no versions yet, which
+is what stops a *known* root being conjured on an empty library. Establishing
+one lives in `establish_root`, which no scope table names and no RPC verb
+calls — the permission is which function you can reach, not a flag you decline
+to pass.
+→ `test_runtime_cannot_invent_a_new_root`,
+`test_runtime_cannot_establish_even_a_known_root`,
+`test_establishing_a_root_is_not_reachable_from_any_scope`,
+`test_establish_root_refuses_an_existing_namespace`
 
-Currently over-broad, and known to be: the `is_root` test in `create_version`
-also refuses a new *version* of an existing root, so Ego and Id doctrine can
-only change through a bootstrap file edit rather than a governed proposal. The
-prohibition that matters — no new top-level namespace — is enforced separately
-by `validate_namespace`, so it survives relaxing this one.
-→ `test_runtime_cannot_author_a_root_even_when_it_asks_for_it`,
-`test_runtime_cannot_invent_a_new_root`
+**I49b. An existing root may receive governed new versions.** Ego's and Id's
+doctrine has to be able to change. A new version of `ego` is a candidate like
+any other and goes through validation, evaluation, Operator approval and
+selection; Id can propose one and cannot approve it. The first implementation
+forbade this along with new roots — it conflated "no new top-level namespace"
+with "no new version of a root", and made a doctrine change require editing a
+shipped file. Negating either of I49 and I49b leaves the other defended, which
+is checked rather than assumed.
+→ `test_runtime_can_propose_a_new_version_of_an_existing_root`,
+`test_id_can_propose_root_doctrine_through_governance`,
+`test_a_root_candidate_cannot_be_selected_before_approval`,
+`test_a_root_version_completes_the_normal_governance_path`
 
 **I50. An edited prompt file is a candidate, never an override.** A shipped
 file is authoritative exactly once, when its namespace does not yet exist.
@@ -691,6 +702,107 @@ widen it, and are not a parameter any caller can supply.
 → `test_unsupported_model_variables_are_refused_not_dropped`,
 `test_every_model_variable_reaches_the_backend`,
 `test_harness_constraints_narrow_and_never_widen`
+
+### Profile, environment, turn input
+
+Three things reach a mind, and conflating any two is how a system ends up
+rewriting its constitution because a tool was added:
+
+| Layer | Question | Source | Lifetime |
+|---|---|---|---|
+| **Profile** | who am I, how should I think | Prompt Library | bound at incarnation, immutable |
+| **Environment** | what exists, what can I do now | Harness | rebuilt per turn |
+| **Turn input** | what should I think about | the trigger | one turn |
+
+Neuocytes always worked this way. Ego and Id had a profile and a turn input and
+nothing in between, so a newly approved `ego.neuocyte.research` was invisible
+to Ego unless somebody rewrote Ego's root prompt — constitutional doctrine was
+the only channel for environmental fact.
+
+**I58. A role is never offered a capability it cannot invoke.** The manifest's
+verb list *is* `scopes.model_facing_verbs(role)`, every entry is resolved
+against the supervisor's live dispatch table, and each description and argument
+schema is read off the real function. There is no second hand-maintained list
+to drift. The inverse is also checked: everything in `EGO_ONLY` and `ID_ONLY`
+is discoverable, so an effector cannot exist in dispatch while being invisible
+to the mind it was built for. Lifecycle plumbing — `register_agent`,
+`heartbeat`, `bind_profile`, `role_environment` — is deliberately not offered:
+a mind is not invited to operate its own life support.
+→ `test_model_facing_verbs_are_a_subset_of_the_roles_scope`,
+`test_every_deliberate_role_effector_is_discoverable`,
+`test_role_environments_do_not_leak_across_roles`,
+`test_lifecycle_plumbing_is_not_offered_to_the_model`,
+`test_an_undeclared_model_facing_verb_is_caught_at_build`
+
+**I59. A role can actually execute what its environment offers.** Ego and Id
+have a bounded Harness-mediated tool loop: the model emits one call, the
+Harness validates and runs it, the result is appended, generation resumes.
+Before this, `roles.py` parsed tool requests and reported them without running
+them — injecting a manifest on top of that would have advertised capabilities
+to a mind that could not use any of them. The loop lives in the role process;
+the authority does not.
+→ `test_ego_can_invoke_an_advertised_sense`,
+`test_ego_can_invoke_an_advertised_effector`,
+`test_id_can_invoke_an_advertised_sense_and_effector`,
+`test_a_verb_outside_the_environment_is_refused_and_never_dispatched`,
+`test_a_failing_tool_is_reported_to_the_model_not_fatal`,
+`test_the_tool_loop_is_bounded_by_turns`,
+`test_the_tool_loop_is_bounded_by_the_deadline`,
+`test_a_role_credential_cannot_reach_another_roles_effectors`
+
+**I60. Authority-shaped arguments cannot widen authority.** `role`, `actor`,
+`scope`, `client_id` and friends are discarded, and identity arguments the verb
+genuinely takes (`reader`, `author`, `produced_by`) are overwritten with the
+role's own name. Arguments the manifest never advertised are dropped, so a
+model cannot smuggle a parameter the verb was not offered as taking. None of
+this is what makes the boundary hold — the scope table is — but a request
+should not reach the Harness pretending to be someone else.
+→ `test_authority_shaped_arguments_cannot_widen_authority`,
+`test_undeclared_arguments_are_dropped`
+
+**I61. One turn sees one environment.** Built once at turn start, used for the
+whole turn however many tools it calls, rebuilt for the next. A manifest that
+shifted mid-generation would make the transcript unexplainable: the model would
+have reasoned against a world that no longer matches what provenance recorded.
+If a tool call changes the world, the tool *result* is what says so. When the
+Harness cannot answer, the turn has no capabilities rather than unchecked ones.
+→ `test_the_environment_is_built_once_per_turn`,
+`test_the_environment_is_rebuilt_for_the_next_turn`,
+`test_the_environment_reaches_the_context_before_the_turn_input`,
+`test_a_turn_without_an_environment_offers_nothing`,
+`test_a_role_turn_carries_a_frozen_environment`
+
+**I62. A changing environment does not require rewriting doctrine.** Approving
+`ego.neuocyte.do_thing` makes it discoverable to Ego on its next turn with
+`ego`'s own prompt untouched and still at the same version. Only
+approved-and-selected lineages appear: an approved version nobody selected is
+not something Ego can be given, and advertising it would describe the library's
+possibilities rather than the organism's capability.
+→ `test_a_new_profile_becomes_visible_without_editing_doctrine`,
+`test_an_unselected_profile_disappears_from_the_environment`,
+`test_id_environment_carries_id_profiles_not_egos`,
+`test_the_environment_digest_tracks_the_authoritative_state`
+
+**Environment provenance is reconstructable, not merely digested.** The exact
+manifest bytes are content-addressed before they are handed over, and
+`role.turn_began` records role, incarnation, profile reference, prompt digest,
+environment digest, environment blob, trigger and model generation. A digest
+whose content cannot be recovered is not provenance: profile + exact
+environment + turn input is what produced a piece of cognition, and all three
+are recoverable afterwards. Identical environments across turns resolve to one
+blob.
+→ `test_the_exact_environment_a_turn_saw_is_reconstructable`,
+`test_the_manifest_is_deterministic_for_unchanged_state`
+
+**I63. Configuration cannot silently rewrite constitutional doctrine.**
+`cfg.<role>.system_prompt` used to be appended to whatever the Prompt Library
+resolved — an ungoverned second constitution with no version, candidate,
+evaluation or approval. The field is gone and a non-empty value is refused at
+config load with migration guidance, because silently dropping it would restart
+somebody into different cognition with no signal at all.
+→ `test_a_configured_system_prompt_is_refused_not_honoured`,
+`test_the_role_prompt_has_no_source_but_the_library`,
+`test_the_resource_digest_reports_the_library_as_its_source`
 
 **I41. A receipt's digest is ground truth, verifiable from inside.** If a
 receipt claims a neuocyte received bytes with digest D, then hashing the bytes

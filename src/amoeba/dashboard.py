@@ -70,6 +70,7 @@ DASHBOARD_HTML = """<!doctype html>
 
 <script>
 const PANELS = ["overview","work","blackboard","memory","artifacts","prompts",
+                "environment",
                 "health","provenance","converse","consult id","backchannel"];
 let session = localStorage.getItem("amoeba_operator") || "";
 let current = "overview";
@@ -279,6 +280,33 @@ const render = {
       "ego and id are bootstrap-only roots: these are suggested wordings, not "
       "library candidates. Adopting one means editing the shipped prompt file."));
     main.appendChild(oc);
+  },
+  async environment(main) {
+    // What each role is told it can do, right now. The same manifest the
+    // Harness hands the role at the start of a turn -- built from the live
+    // dispatch table, not a description of it.
+    for (const role of ["ego","id"]) {
+      const e = await rpc("role_environment", {role});
+      const m = e.manifest;
+      const c = card(role + " environment \u2014 " + e.environment_sha256.slice(0,12), true);
+      c.appendChild(dump({
+        profile: m.bound_profile.profile_ref,
+        model_generation: m.resources.model_generation,
+        capabilities: m.capabilities.length,
+        available_profiles: m.available_profiles.length,
+        blob: e.environment_blob,
+      }));
+      c.appendChild(el("h2",null,"available cognitive profiles"));
+      c.appendChild(table(m.available_profiles,
+                          ["namespace","profile_ref","prompt_mode","state"]));
+      c.appendChild(el("h2",null,"capabilities this role may invoke"));
+      c.appendChild(table(m.capabilities.map(x => ({
+        verb: x.verb, summary: x.summary,
+        arguments: (x.arguments||[]).map(a => a.name + (a.required ? "" : "?")).join(", "),
+      })), ["verb","arguments","summary"]));
+      c.appendChild(el("div","pill", m.contract));
+      main.appendChild(c);
+    }
   },
   async health(main) {
     const p = await rpc("system_pulse", {max_age_seconds:0});

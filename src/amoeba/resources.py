@@ -78,8 +78,7 @@ def prompt_text(role: str, cfg: Any, mind: Any = None) -> str:
             base, source = resolved.prompt_text, str(resolved.ref)
         except Exception:                      # no library, or nothing selected
             pass
-    extra = (cfg.ego if role == "ego" else cfg.id).system_prompt
-    return base + (f"\n{extra}" if extra else "")
+    return base
 
 
 def prompt_source(role: str, cfg: Any, mind: Any = None) -> str:
@@ -99,9 +98,8 @@ def prompt_version(role: str, cfg: Any, mind: Any = None) -> ResourceVersion:
     text = prompt_text(role, cfg, mind)
     return ResourceVersion(
         kind=f"prompt.{role}", sha256=sha256_hex(text.encode("utf-8")),
-        detail={"chars": len(text), "has_config_extra": bool(
-            (cfg.ego if role == "ego" else cfg.id).system_prompt),
-            "source": prompt_source(role, cfg, mind)})
+        detail={"chars": len(text), "source": prompt_source(role, cfg, mind),
+                "governed_by": "prompt_library"})
 
 
 def tool_surface_version(*, sandbox_allowed: bool = True) -> ResourceVersion:

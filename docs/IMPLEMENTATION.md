@@ -60,6 +60,11 @@ Read this before trusting anything below it.
 | Neuocyte cognitive profiles | **Implemented, tested** | neuocytes previously had no profile at all; they now descend from `ego.neuocyte` / `id.neuocyte`, making specialisations expressible |
 | Incarnation binding: resolved bytes frozen at birth | **Implemented, tested** | digests and lineage stored, not a pointer; a forked neuocyte's injected bytes and inherited prefix are recorded separately |
 | Prompt-library A/B evaluation | **Not implemented** | `experimental_approved` and the experimental selection purpose exist and are honoured, but nothing measures whether a profile performs better -- see [PROMPTLIB §14](PROMPTLIB.md#14-residual-limits) |
+| Root namespace creation reserved to bootstrap; root *versions* governed | **Implemented, tested** | `establish_root` is reachable from no scope table; two independent defences against a new top-level name, and negating either leaves the other defended |
+| Role environment manifest (profile / environment / turn input) | **Implemented, tested** | `tests/test_role_environment.py`; Harness-built per turn, frozen within one, capabilities derived from the live dispatch table |
+| Ego/Id bounded Harness-mediated tool loop | **Implemented, tested** | roles previously parsed tool calls without executing them; one call per turn, validated and run by the Harness, result fed back, bounded by turns and deadline |
+| Environment provenance: exact bytes reconstructable | **Implemented, tested** | manifest content-addressed before it is handed over; `role.turn_began` records profile, environment digest, blob and trigger |
+| `cfg.<role>.system_prompt` ungoverned doctrine path | **Removed** | the field is gone and a non-empty value is refused at load with migration guidance; the live prompt comes only from the Prompt Library |
 | Cognitive blackboard: posts, threads, relations, receipts | **Implemented, tested** | `tests/test_blackboard.py` |
 | Independent replication vs socially propagated agreement | **Implemented, tested** | every read recorded; `board_corroboration` splits the two |
 | Board-naive neuocytes (`board_access="none"`) | **Implemented, tested** | `test_a_naive_worker_posts_without_having_read_the_board` |

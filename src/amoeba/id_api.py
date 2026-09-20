@@ -259,54 +259,74 @@ def build(sup: "Supervisor") -> dict[str, Any]:  # noqa: C901
     # Proposing a change to cognition itself
     # ==================================================================
     def id_propose_prompt(*, role: str, prompt: str, rationale: str,
+                          model_vars: dict[str, Any] | None = None,
                           evidence: Sequence[dict[str, Any]] = (),
                           pulse_id: str | None = None,
                           operation_id: str | None = None) -> dict[str, Any]:
-        """Suggest replacement text for a **root** profile (``ego`` or ``id``).
+        """Propose new doctrine for a constitutional root (``ego`` or ``id``).
 
-        Roots are bootstrap-only: they come from the files shipped in
-        ``promptlib/prompts``, which are reviewable in the repository, and
-        there is no API path that creates a root version. So this verb cannot
-        and does not change the library. It records Id's suggested wording,
-        content-addressed, where the Operator will find it; adopting it means
-        editing the shipped file, which makes the change reviewable before it
-        ever runs.
+        A real Prompt Library candidate: `ego@N` becomes a proposed `ego@N+1`
+        that goes through validation, evaluation and Operator approval like
+        any other version. Id cannot approve it, select it, or cascade it --
+        those verbs are in no scope Id holds.
 
-        For anything below a root -- ``ego.neuocyte``, a new specialisation --
-        use ``id_propose_profile``, which creates a real governed candidate.
+        This verb previously could not do that. While the library forbade
+        every root version, not merely a new top-level namespace, it recorded
+        Id's wording as a note and told the Operator to go and edit a file.
+        The over-restriction is gone, so the verb is honest again.
+
+        It is the role-shaped entry point; `id_propose_profile` is the general
+        one and reaches any namespace, roots included. Both go through the same
+        store, so there is one creation path, not two governance schemes.
         """
         if role not in ("ego", "id"):
             raise InvalidInput("prompt proposals target ego or id", role=role)
         text = _text(prompt, "prompt", limit=20000)
-        digest = mind.blobs.put(text.encode("utf-8"))
         proposal_id = new_id("ppr")
         prov = _provenance(pulse_id, f"prompt proposal for {role}")
+        from .promptlib.store import PromptStore
         from .resources import prompt_version
 
+        store = PromptStore(mind)
         current = prompt_version(role, sup.cfg, mind)
 
-        def body(m: Mutation) -> None:
-            m.register_blob(digest, len(text.encode("utf-8")), "text/plain",
-                            "prompt_candidate")
+        def body(m: Mutation) -> dict[str, Any]:
+            # A root replaces rather than composes: it has no parent whose
+            # text it could extend.
+            created = store.create_runtime_version(
+                m, namespace=role, prompt_mode="replace", prompt_text=text,
+                model_vars=model_vars or {}, origin="id", created_by="id",
+                rationale=_text(rationale, "rationale", limit=4000),
+                state="candidate")
+            # The legacy proposal event is still emitted, because the operator
+            # console reads it and because a proposal is a distinct act from
+            # the version write that carried it.
             m.emit(EventKind.PROMPT_PROPOSED, {
                 "proposal_id": proposal_id, "role": role,
-                "candidate_sha256": digest,
+                "namespace": role, "version_id": created["version_id"],
+                "local_version": created["local_version"],
+                "candidate_sha256": created["local_sha256"],
                 "current_sha256": current.sha256,
                 "rationale": _text(rationale, "rationale", limit=4000),
                 "evidence": list(evidence)[:20],
                 "proposed_by": "id", "pulse_id": prov.get("pulse_id"),
-                "note": ("a suggestion about a bootstrap-only root; it is "
-                         "not a library candidate and cannot be approved "
-                         "through the API. Adopting it means editing the "
-                         "shipped prompt file, which then arrives as a "
-                         "governed candidate at the next start")})
+                "note": ("a governed candidate; it changes nothing until the "
+                         "Operator approves and selects it, and Id can do "
+                         "neither")})
+            return created
 
-        receipt, _ = mind.writer.apply(body, actor="id", operation_id=operation_id)
+        receipt, created = mind.writer.apply(body, actor="id",
+                                             operation_id=operation_id)
         return {"proposal_id": proposal_id, "role": role,
-                "candidate_sha256": digest, "current_sha256": current.sha256,
+                "namespace": role, "version_id": created["version_id"],
+                "local_version": created["local_version"],
+                "profile_ref": str(store.ref_for(role, created["local_version"])),
+                "candidate_sha256": created["local_sha256"],
+                "current_sha256": current.sha256,
                 "receipt_id": receipt.receipt_id, "provenance": prov,
-                "status": "proposed",
-                "note": "the operator decides; Id cannot install a prompt"}
+                "status": "candidate",
+                "note": ("the operator decides; Id cannot approve, select or "
+                         "cascade a prompt version")}
 
     # ==================================================================
     # Talking to the rest of the organism

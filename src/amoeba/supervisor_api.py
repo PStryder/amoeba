@@ -160,6 +160,67 @@ def build(sup: "Supervisor") -> dict[str, Any]:
                 "receipt_id": receipt.receipt_id,
                 "profile_binding_id": profile_binding_id}
 
+    def role_environment(*, role: str, incarnation: int | None = None,
+                         profile_ref: str | None = None,
+                         prompt_sha256: str | None = None,
+                         config_sha256: str | None = None,
+                         trigger: str = "",
+                         operation_id: str | None = None) -> dict[str, Any]:
+        """Build, record and return this turn's authoritative environment.
+
+        The role asks for it at the start of a bounded turn and uses the
+        answer for the whole turn. It is deliberately *not* `system_pulse`:
+        the pulse is Id's live physiological telemetry, this is the cognitive
+        operating environment -- what profiles exist, what this role may
+        invoke, and which resource identities produced the result.
+
+        The manifest's exact bytes are content-addressed before they are
+        returned, and the turn event references that digest. A digest whose
+        content cannot be recovered is not provenance, so the bytes go to the
+        blob store rather than being recomputed later from state that has
+        since moved.
+
+        Identical environments across turns resolve to the same blob, which is
+        the point of content addressing: a quiet organism does not accumulate
+        one copy of an unchanged world per turn.
+        """
+        from . import role_env
+
+        manifest = role_env.build(
+            sup, role, incarnation=incarnation,
+            profile={"profile_ref": profile_ref, "prompt_sha256": prompt_sha256,
+                     "config_sha256": config_sha256})
+        text = role_env.render(manifest)
+        body_bytes = role_env._canon(manifest)
+
+        def _record(m: Mutation) -> dict[str, Any]:
+            blob = m.put_blob(body_bytes, encoding="application/json",
+                              schema="amoeba.role_environment/1")
+            m.emit(EventKind.ROLE_ENVIRONMENT_BUILT, {
+                "role": role, "incarnation": incarnation,
+                "environment_sha256": manifest["environment_sha256"],
+                "environment_blob": blob,
+                "capability_count": len(manifest["capabilities"]),
+                "profile_count": len(manifest["available_profiles"])})
+            m.emit(EventKind.ROLE_TURN_BEGAN, {
+                "role": role, "incarnation": incarnation,
+                "profile_ref": profile_ref, "prompt_sha256": prompt_sha256,
+                "config_sha256": config_sha256,
+                "environment_sha256": manifest["environment_sha256"],
+                "environment_blob": blob,
+                "trigger": trigger[:500],
+                "model_generation": manifest["resources"].get("model_generation"),
+                "note": ("profile + environment + trigger is everything this "
+                         "turn's cognition was produced from")})
+            return {"environment_blob": blob}
+
+        receipt, recorded = mind.writer.apply(
+            _record, actor=role, operation_id=operation_id, bump_version=False)
+        return {"manifest": manifest, "text": text,
+                "environment_sha256": manifest["environment_sha256"],
+                "environment_blob": recorded["environment_blob"],
+                "receipt_id": receipt.receipt_id}
+
     def heartbeat(*, agent_id: str) -> dict[str, Any]:
         mind.work.heartbeat(agent_id)
         return {"ok": True, "at": time.time()}
@@ -175,6 +236,7 @@ def build(sup: "Supervisor") -> dict[str, Any]:
     def recall(*, query: str | None = None, scope: str = "active",
                kinds: Sequence[str] | None = None, limit: int = 20,
                min_confidence: float = 0.0) -> list[dict[str, Any]]:
+        """Search maintained memory: beliefs the organism holds, not raw history."""
         return mind.memory.recall(query=query, scope=scope, kinds=list(kinds) if kinds else None,
                                   limit=limit, min_confidence=min_confidence)
 
@@ -193,6 +255,7 @@ def build(sup: "Supervisor") -> dict[str, Any]:
                 "state_version": receipt.result_version, "replayed": receipt.replayed}
 
     def get_memory(*, memory_id: str) -> dict[str, Any]:
+        """One maintained memory item, with its supporting and opposing evidence."""
         return mind.memory.get_memory(memory_id)
 
     def record_conclusion(*, claim: str, produced_by: str,
@@ -203,6 +266,7 @@ def build(sup: "Supervisor") -> dict[str, Any]:
                           model_identity: str | None = None,
                           snapshot_id: str | None = None,
                           mutation_id: str | None = None) -> dict[str, Any]:
+        """Commit an auditable conclusion. Id may later audit it against the record."""
         cid, receipt = mind.memory.record_conclusion(
             claim=claim, produced_by=produced_by, evidence=evidence,
             uncertainty=uncertainty, alternatives=alternatives, operation_id=operation_id,
@@ -212,6 +276,7 @@ def build(sup: "Supervisor") -> dict[str, Any]:
                 "state_version": receipt.result_version}
 
     def get_conclusion(*, conclusion_id: str) -> dict[str, Any]:
+        """One recorded Ego conclusion with the evidence it rests on."""
         return mind.memory.get_conclusion(conclusion_id)
 
     def record_audit(*, target_kind: str, target_id: str, verdict: str,
@@ -229,6 +294,7 @@ def build(sup: "Supervisor") -> dict[str, Any]:
                 "state_version": receipt.result_version}
 
     def disagreements(*, status: str = "open", limit: int = 50) -> list[dict[str, Any]]:
+        """Recorded contradictions between claims, and whether they are resolved."""
         return mind.memory.get_disagreements(status=status, limit=limit)
 
     def open_disagreement(*, subject_kind: str, subject_id: str, claim_a: str,
@@ -246,14 +312,17 @@ def build(sup: "Supervisor") -> dict[str, Any]:
     # provenance
     # ------------------------------------------------------------------
     def provenance(*, operation_id: str) -> dict[str, Any]:
+        """Resolve how a result came about: inputs, actors and receipts."""
         return mind.provenance(operation_id=operation_id)
 
     def verify_integrity(*, deep: bool = True) -> dict[str, Any]:
+        """Check the event hash chain and that referenced content is present."""
         return mind.verify_integrity(deep=deep)
 
     def history(*, operation_id: str | None = None, correlation_id: str | None = None,
                 kinds: Sequence[str] | None = None, since_seq: int = 0,
                 limit: int = 100) -> list[dict[str, Any]]:
+        """Raw append-only events. Evidence of what happened, not what is believed."""
         return mind.history(operation_id=operation_id, correlation_id=correlation_id,
                             kinds=list(kinds) if kinds else None,
                             since_seq=since_seq, limit=limit)
@@ -404,9 +473,11 @@ def build(sup: "Supervisor") -> dict[str, Any]:
         return {"receipt_id": receipt.receipt_id}
 
     def get_work(*, work_id: str) -> dict[str, Any]:
+        """The current state of one work item."""
         return mind.work.get_work(work_id)
 
     def queue_stats() -> dict[str, Any]:
+        """Counts of productive work by status."""
         return mind.work.queue_stats()
 
     def kill_all_neuocytes(*, reason: str = "operator request") -> dict[str, Any]:
@@ -659,6 +730,7 @@ def build(sup: "Supervisor") -> dict[str, Any]:
                               idempotency_key, run)
 
     def id_health(*, scope: str = "all") -> dict[str, Any]:
+        """Whether Id itself is running, and how recently it reported."""
         base = health()
         base["capabilities"] = capabilities()
         try:
@@ -885,6 +957,7 @@ def build(sup: "Supervisor") -> dict[str, Any]:
         "debug_threads": debug_threads,
         # agents
         "register_agent": register_agent, "heartbeat": heartbeat,
+        "role_environment": role_environment,
         "retire_agent": retire_agent,
         # memory
         "recall": recall, "remember": remember, "get_memory": get_memory,

@@ -520,9 +520,15 @@ def test_discovery_then_calling_the_exact_operator_verb_anyway(net):
             continue
         assert "unknown method" in message, (verb, message)
         # Nothing in the refusal should read as an authorization decision.
+        #
+        # Scanned with the echoed verb name removed. The message quotes back
+        # what was asked for, which is fine and useful, but a verb like
+        # `role_environment` would otherwise trip the "role" check on its own
+        # name rather than on anything the Harness said about authority.
+        said = message.replace(f"'{verb.lower()}'", "").replace(verb.lower(), "")
         for word in ("forbidden", "denied", "not allowed", "permission",
                      "unauthorized", "insufficient", "role", "privilege"):
-            assert word not in message, (
+            assert word not in said, (
                 f"{verb} was refused on authorization grounds ({word!r}); the "
                 "operation should not exist here at all")
 

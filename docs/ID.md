@@ -152,3 +152,21 @@ directory or the network at all (see `STORES.md`).
 
 The stronger form — a dedicated account per role — is a deployment decision,
 the same one the ACL work reaches.
+
+## What Id is given each turn
+
+Id has two distinct views of the organism and they are deliberately separate:
+
+* **`system_pulse`** — live physiological telemetry. How the organism is doing.
+* **`role_environment`** — the cognitive operating environment. What the
+  organism is currently made of and what Id can reach: available `id.*`
+  profiles, the capabilities Id may invoke, resource identities.
+
+Plus the governed profile `id@N` bound at incarnation, and the turn's trigger.
+
+Id's capabilities come from the same scope table that gates dispatch (I58), and
+Id executes them through the same bounded Harness-mediated tool loop Ego uses
+(I59). Id's environment never contains Ego-only effectors or Operator verbs.
+
+Id may propose a new version of the `id` or `ego` root through the Prompt
+Library and cannot approve one (I49b).

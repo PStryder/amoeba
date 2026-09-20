@@ -131,6 +131,7 @@ def build(sup: "Supervisor") -> dict[str, Any]:  # noqa: C901
                          "is cascaded")}
 
     def prompt_versions(*, namespace: str) -> dict[str, Any]:
+        """Every version of one namespace, with its lineage and evaluations."""
         validate_namespace(namespace)
         out = []
         for v in store.versions(namespace):

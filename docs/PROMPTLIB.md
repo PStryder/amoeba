@@ -32,30 +32,40 @@ Parent first, specialisation afterwards. The name *is* the family tree, so a
 node cannot be reparented by renaming it and ancestry cannot disagree with the
 hierarchy.
 
-Two roots exist — `ego` and `id` — and only bootstrap may establish them.
+Two roots exist — `ego` and `id`. Only bootstrap may *establish* a
+top-level namespace; new *versions* of an existing root are ordinary
+governance (§2).
 
-## 2. Roots are bootstrap-only, structurally
+## 2. A root namespace is bootstrap-only; a root *version* is not
 
-The runtime creation path, `create_runtime_version`, has no parameter that
-permits a top-level root. A caller that names `godmode`, or names `ego` and
-explicitly passes the private `_allow_root` flag, does not get refused by a
-policy check — the flag is dropped before the call, and the creation path
-refuses a root outright. It is not a request the runtime can express.
+Two different operations, and only the first is reserved:
 
-This does not depend on a model instruction or a caller-supplied boolean, and
-it is mutation-verified: removing *both* defences is what it takes to make the
-test go green (I49).
+| Operation | Who |
+|---|---|
+| create a new top-level namespace (`godmode`, `foo`) | **bootstrap alone** |
+| create a new version of an existing root (`ego@N+1`) | ordinary governance |
 
-> **Known over-restriction.** The same guard currently also refuses a new
-> *version* of an existing `ego` or `id`, which was not the intent. A changing
-> environment should never require new root doctrine, but a genuine change to
-> Ego's or Id's doctrine should be proposable through ordinary governance —
-> candidate, evaluation, Operator approval, no self-promotion — exactly like
-> any descendant. The two prohibitions are enforced by *independent* checks:
-> `validate_namespace` rejects a name whose root is not `ego` or `id` before
-> `_allow_root` is consulted at all, and a separate `is_root` test in
-> `create_version` blocks root versions. Relaxing the second cannot weaken the
-> first. See §14.
+**Establishing a namespace** is `establish_root`, which no scope table names
+and no RPC verb calls. The permission is *which function you can reach*, not a
+flag you decline to pass — an earlier design gated it on a private boolean,
+which meant the guarantee rested on every caller choosing not to set it.
+`create_version` has no power to establish anything and no argument that grants
+it one.
+
+Defended twice, independently: `validate_namespace` refuses a name whose root
+is not `ego` or `id`, and `create_version` refuses a top-level namespace with
+no versions. The second is what stops a *known* root being conjured on an empty
+library, where the first would let it through (I49).
+
+**Versioning an existing root** is ordinary governance. Ego's and Id's doctrine
+has to be able to change, and `ego@2` is a candidate like any other: validated,
+evaluated, approved by the Operator, then selected. Id may propose one through
+`id_propose_prompt` or `id_propose_profile`; Id may not approve it (I49b).
+
+An earlier version of this library forbade both, having conflated "no new
+top-level namespace" with "no new version of a root". The effect was that
+changing Ego's doctrine required editing a shipped file. Negating either
+guarantee now leaves the other standing, which is checked rather than assumed.
 
 ## 3. Versions are immutable and pin their parent
 
@@ -173,6 +183,35 @@ Comparison is against *every* version, not only the selected one, so restarts
 are idempotent and an unselected namespace does not accumulate one identical
 candidate per restart.
 
+### Upgrading shipped doctrine
+
+This has a consequence worth stating plainly, because it is the mechanism
+working rather than a bug. When a release changes `ego.md` or `id.md`:
+
+* **a fresh state directory** bootstraps the new text as `ego@1` — immediately
+  usable, nothing to approve;
+* **an existing state directory** keeps running the version it already
+  selected and records the new text as a candidate. The organism does not
+  change how it thinks because a package was upgraded.
+
+To adopt it, approve the candidate the normal way:
+
+```
+operator_prompt_bootstrap_report()            # which files differ
+operator_prompt_state(version_id=..., state="validated")
+operator_prompt_state(version_id=..., state="proposed")
+operator_prompt_state(version_id=..., state="production_approved")
+operator_prompt_select(namespace="ego", version_id=...)
+```
+
+A role reborn after that selection gets the new doctrine. Until then it keeps
+what it was bound to, which is I53 rather than a delay to work around.
+
+Note that the *environment* is supplied either way: the Harness injects the
+manifest regardless of which doctrine version is running. An un-upgraded Ego
+still receives its capabilities; it just has not been told how to read the
+declaration, which degrades gracefully rather than breaking.
+
 ## 8. Governance
 
 ```
@@ -252,6 +291,32 @@ any of them had been told. They now descend from the same tree —
 `ego.neuocyte` for Ego-derived work, `id.neuocyte` for maintenance — which is
 what makes `ego.neuocyte.research` expressible at all.
 
+## 10b. Profile, environment, turn input
+
+A profile is one of three things that reach a mind, and the Prompt Library
+governs exactly one of them:
+
+```
+PROFILE      who am I, how should I think     Prompt Library   bound at birth
+ENVIRONMENT  what exists, what can I do now   Harness          rebuilt per turn
+TURN INPUT   what should I think about now    the trigger      one turn
+```
+
+All three roles now work this way. A neuocyte always did — its tool block is
+built by the Harness per work item and recorded as `tools_offered`. Ego and Id
+had a profile and a turn input and nothing in between, which meant a newly
+approved `ego.neuocyte.research` was invisible to Ego unless somebody rewrote
+Ego's root prompt: constitutional doctrine was the only channel for
+environmental fact.
+
+`role_environment(role)` is the Harness verb that builds it. It is **not**
+`system_pulse`: the pulse is Id's live physiological telemetry, the manifest is
+the cognitive operating environment — what profiles exist, what this role may
+invoke, and which resource identities produced the turn.
+
+A root prompt teaches a role how to *read* the declaration. It never enumerates
+what happens to exist today. See `ARCHITECTURE.md` I58–I63 for the guarantees.
+
 ## 11. Who can reach what
 
 | Caller | Read tree | Evaluate | Propose | Approve / select / cascade | Bind own profile |
@@ -288,41 +353,37 @@ to be widened (I56).
 **Birth** (every role and neuocyte)
 `bind_profile`
 
+**Per turn** (Ego and Id)
+`role_environment` — the Harness builds, records and returns the turn's
+authoritative environment. Not model-facing: the role asks for it on the
+model's behalf and hands the answer over.
+
 `prompt_diff` answers the question that actually matters after a cascade:
 identical prompt and config digests mean two lineages produce the same
 cognition despite different version numbers.
 
-## 13. What `id_propose_prompt` is now
+## 13. `id_propose_prompt`
 
-> Shaped around the over-restriction in §2, and expected to change with it.
+A real Prompt Library candidate: `ego@N` becomes a proposed `ego@N+1` that goes
+through validation, evaluation and Operator approval like any other version. Id
+cannot approve, select or cascade it.
 
+It is the role-shaped entry point; `id_propose_profile` is the general one and
+reaches any namespace, roots included. Both go through the same store, so there
+is one creation path rather than two governance schemes.
 
-The older verb targets `ego` and `id`, which are bootstrap-only roots. It
-therefore cannot and does not change the library. It records Id's suggested
-wording, content-addressed, where the Operator will find it; adopting it means
-editing the shipped file, which makes the change reviewable in the repository
-before it ever runs, and it then arrives as a governed candidate at the next
-start.
-
-For anything below a root, `id_propose_profile` creates a real governed
-candidate.
+While the library forbade every root version, this verb could not do what its
+name said: it recorded Id's wording as a note and told the Operator to go and
+edit a file. That is fixed.
 
 ## 14. Residual limits
 
-* **Root versions cannot be proposed at runtime.** See §2. `ego` and `id`
-  accept new versions only from the bootstrap files, so a doctrine change
-  currently requires a file edit rather than a governed proposal. Creating a
-  *new* top-level namespace must remain impossible and is blocked separately.
-* **Ego and Id receive no dynamic environment manifest.** A role's context is
-  primed once, at birth, with its profile text, and each turn carries only its
-  trigger — a user message, a dossier, measured state. Nothing tells a role
-  which productive profiles exist, which effectors it currently has, or which
-  resources are registered. Neuocytes already have this separation: they are
-  given a Harness-built tool block per turn, recorded as `tools_offered` in the
-  work result, and their prompt therefore cannot advertise a capability the
-  work row does not carry. Roles have no equivalent, so a newly approved
-  `ego.neuocyte.do_thing` is invisible to Ego without editing Ego's own
-  doctrine — which is precisely the coupling this library exists to remove.
+* **The manifest costs context every turn.** Ego's runs around 2.7 KB and Id's
+  larger, injected into an accumulating context on every turn. That is a real
+  cost, accepted because an environment that is sometimes stale is worse than
+  one that is always paid for; context pressure is what homeostasis exists to
+  handle. Compressing it to a digest-plus-delta would make reconstruction
+  subtler and was not worth it before measuring.
 * **No A/B evaluation.** `experimental_approved` and the `experimental`
   selection purpose exist and are honoured, but nothing measures whether an
   experimental profile performs better. Id records verdicts; those are
