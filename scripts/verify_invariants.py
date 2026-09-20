@@ -39,11 +39,17 @@ class Mutation:
     tests: list[str]
     layer: str
     note: str = ""
-    # Extra (old, new) pairs applied to the same file. A guarantee defended in
-    # depth cannot be negated by a single edit: removing one of two redundant
-    # checks leaves the other working, and the tests correctly stay green. To
-    # ask "is this claim defended at all?" every defence has to come out.
-    also: list[tuple[str, str]] = field(default_factory=list)
+    # Extra edits. A guarantee defended in depth cannot be negated by a single
+    # change: removing one of two redundant checks leaves the other working,
+    # and the tests correctly stay green. To ask "is this claim defended at
+    # all?" every defence has to come out. Two shapes:
+    #   (old, new)        -- another edit in this mutation's own file
+    #   (path, old, new)  -- an edit in a different file
+    # The second exists because a claim can be defended across modules -- the
+    # external surface is defined by both an adapter allowlist and a credential
+    # scope -- and a harness that could not express that would report SKIP,
+    # which proves nothing while looking like success.
+    also: list[tuple[str, ...]] = field(default_factory=list)
 
 
 # Each mutation removes exactly one guarantee, at the layer that owns it.
@@ -730,6 +736,88 @@ MUTATIONS: list[Mutation] = [
              "attribution a claim rather than a fact.",
     ),
     Mutation(
+        "I48", "The external surface holds no control verb",
+        "src/amoeba/scopes.py",
+        '    "io_capabilities", "io_attach_input", "io_submit", "io_status",\n'
+        '    "io_await", "io_output", "io_list", "io_result",\n)',
+        '    "io_capabilities", "io_attach_input", "io_submit", "io_status",\n'
+        '    "io_await", "io_output", "io_list", "io_result",\n'
+        '    "admit_work", "cancel_work",  # MUTANT: control granted\n)',
+        ["test_an_external_client_cannot_reach_a_control_verb",
+         "test_the_adapter_and_the_credential_agree_on_the_surface"],
+        layer="the external surface, in both places that define it",
+        note="defended twice, deliberately. The adapter dispatches only what "
+             "io_api.EXTERNAL_VERBS lists, and the credential can only reach "
+             "what scopes.EXTERNAL_IO grants -- two independent lists, so one "
+             "mistake does not open the door. Widening either alone leaves the "
+             "other refusing, which is why negating this claim needs both.",
+        also=[("src/amoeba/io_api.py",
+               '    "io_attach_input", "io_result", "io_list",\n)',
+               '    "io_attach_input", "io_result", "io_list",\n'
+               '    "admit_work", "cancel_work",  # MUTANT\n)')],
+    ),
+    Mutation(
+        "I48b", "The adapter dispatches nothing outside its own surface",
+        "src/amoeba/http_api.py",
+        "            if method not in external_allowed:",
+        "            if False:  # MUTANT: dispatch anything the caller names",
+        ["test_discovery_then_calling_the_exact_operator_verb_anyway"],
+        layer="_external_rpc (the adapter's own allowlist)",
+        note="the important half of this mutation is the *shape* of the "
+             "failure. The call still fails -- the credential cannot name "
+             "those verbs either -- but it fails downstream with a different "
+             "code, and the test is written to reject exactly that: a route "
+             "that exists and is rejected later is not an absent route.",
+    ),
+    Mutation(
+        "I48c", "MCP holds the external credential, not the control token",
+        "src/amoeba/mcp_api.py",
+        '        self.token = read_or_create_token(cfg.scope_token_path("external_io"))',
+        "        self.token = read_or_create_token(cfg.token_path)  # MUTANT",
+        ["test_the_mcp_adapter_offers_only_the_io_surface"],
+        layer="mcp Facade (which credential the adapter connects with)",
+        note="restores the defect this work was built to fix: every MCP client "
+             "reaching the full method table.",
+    ),
+    Mutation(
+        "I48d", "Caller-supplied identity fields are discarded",
+        "src/amoeba/http_api.py",
+        '            for forged in ("client_id", "actor", "role", "caller", "scope",',
+        '            for forged in ():  # MUTANT: honour what the caller claims\n'
+        '                pass\n'
+        '            for _ignored in ("client_id", "actor", "role", "caller", "scope",',
+        ["test_spoofed_identity_fields_buy_nothing"],
+        layer="_external_rpc (where identity is bound)",
+        note="lets a client name itself, which turns 'my interactions' from a "
+             "fact about the credential into a parameter anyone can set.",
+    ),
+    Mutation(
+        "I48e", "A credential is required even on loopback",
+        "src/amoeba/http_api.py",
+        "            client_id = self._external_client()\n"
+        "            if client_id is None:",
+        "            client_id = self._external_client() or \"default\"\n"
+        "            if False:",
+        ["test_a_credential_is_required_even_on_loopback"],
+        layer="_external_rpc (authentication)",
+        note="treats binding to 127.0.0.1 as authentication, which it is not: "
+             "it says nothing about other local processes or a hostile page in "
+             "the user's browser.",
+    ),
+    Mutation(
+        "I48f", "The console reaches state only through the Harness",
+        "src/amoeba/operator_api.py",
+        "    def _interaction_summary() -> dict[str, Any]:",
+        "    import sqlite3  # MUTANT: a second path to the database\n"
+        "    def _interaction_summary() -> dict[str, Any]:",
+        ["test_the_dashboard_never_touches_the_database_or_filesystem"],
+        layer="the console modules (whether they can reach past the Harness)",
+        note="a console with its own database handle is a second writer with "
+             "none of the invariants the first one enforces. The guarantee is "
+             "about what the code *can* reach, so the test reads the source "
+             "and the mutation puts the capability back.",
+    ),
+    Mutation(
         "I42c", "A proposal's bytes are preserved as evidence when it is made",
         "src/amoeba/harness_api.py",
         "        digest = mind.blobs.put(data)",
@@ -813,6 +901,10 @@ def main() -> int:
 
     backup = Path(tempfile.mkdtemp(prefix="inv_backup_"))
     touched = {m.path for m in muts}
+    for m in muts:
+        for entry in m.also:
+            if len(entry) == 3:
+                touched.add(entry[0])
     for rel in touched:
         dest = backup / rel.replace("/", "__")
         shutil.copy2(ROOT / rel, dest)
@@ -827,20 +919,43 @@ def main() -> int:
                 print(f"SKIP {m.invariant}: anchor not found in {m.path}")
                 continue
             mutated = original.replace(m.old, m.new, 1)
-            for old, new in m.also:
-                if old not in mutated:
-                    results.append((m, "SKIP", f"secondary anchor not found: {old[:40]}"))
-                    print(f"SKIP {m.invariant}: secondary anchor not found")
-                    mutated = None
-                    break
-                mutated = mutated.replace(old, new, 1)
+            # (path, old, new) entries edit another file; restore every one of
+            # them afterwards, including on failure.
+            elsewhere: dict[str, tuple[str, str]] = {}
+            for entry in m.also:
+                if len(entry) == 3:
+                    rel, old, new = entry
+                    other = ROOT / rel
+                    text = elsewhere.get(rel, (other.read_text(encoding="utf-8"),))[0] \
+                        if rel in elsewhere else other.read_text(encoding="utf-8")
+                    if old not in text:
+                        mutated = None
+                        results.append((m, "SKIP",
+                                        f"secondary anchor not found in {rel}"))
+                        print(f"SKIP {m.invariant}: secondary anchor not found "
+                              f"in {rel}")
+                        break
+                    elsewhere[rel] = (text, text.replace(old, new, 1))
+                else:
+                    old, new = entry
+                    if old not in mutated:
+                        results.append((m, "SKIP",
+                                        f"secondary anchor not found: {old[:40]}"))
+                        print(f"SKIP {m.invariant}: secondary anchor not found")
+                        mutated = None
+                        break
+                    mutated = mutated.replace(old, new, 1)
             if mutated is None:
                 continue
             target.write_text(mutated, encoding="utf-8")
+            for rel, (_orig, new_text) in elsewhere.items():
+                (ROOT / rel).write_text(new_text, encoding="utf-8")
             try:
                 passed, tail = run_tests(m.tests)
             finally:
                 target.write_text(original, encoding="utf-8")
+                for rel, (orig_text, _new) in elsewhere.items():
+                    (ROOT / rel).write_text(orig_text, encoding="utf-8")
             if passed:
                 results.append((m, "WEAK", tail))
                 print(f"WEAK {m.invariant:8s} tests PASSED with the guarantee removed "

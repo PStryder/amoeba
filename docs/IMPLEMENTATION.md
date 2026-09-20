@@ -49,6 +49,9 @@ Read this before trusting anything below it.
 | Ego sensory surface: productive-work view, artifact evidence, resource identity | **Implemented, tested** | `tests/test_ego_senses_and_effectors.py`; no Id telemetry, no sandbox scratch |
 | Ego effectors: request work, governed work message, cancel own work, propose memory, reach Id | **Implemented, tested** | Ego states intent; the Harness owns admission, worker choice, prompt version and budget |
 | Ego/Id/neuocyte scopes mutually disjoint | **Implemented, tested** | role authority is the presented credential, never a request field; board-naive work refuses mid-flight messages |
+| External I/O surface (MCP + JSON-RPC API): input in, output out | **Implemented, tested** | `tests/test_external_interfaces.py`; eight io_* verbs, exact-byte input provenance, SSE scoped to the client |
+| MCP demoted from control token to `external_io` scope | **Implemented, tested** | was 23 tools incl. file write/delete, artifact promotion, Id maintenance; now 8 I/O tools |
+| Operator console + governance surface on a separate table | **Implemented, tested** | same listener, different credential and method table; console reaches state only through the Harness |
 | Cognitive blackboard: posts, threads, relations, receipts | **Implemented, tested** | `tests/test_blackboard.py` |
 | Independent replication vs socially propagated agreement | **Implemented, tested** | every read recorded; `board_corroboration` splits the two |
 | Board-naive neuocytes (`board_access="none"`) | **Implemented, tested** | `test_a_naive_worker_posts_without_having_read_the_board` |

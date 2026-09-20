@@ -103,6 +103,22 @@ ID_ONLY = (
 ID = ROLE_BASE + ID_SENSES + ID_ONLY
 
 
+# The external I/O adapter's scope: MCP and the HTTP API both connect with
+# this and nothing else. It is the smallest table in the system on purpose --
+# every verb here is semantic input or output, and there is no verb it could
+# name that admits work, cancels it, governs an artifact or a prompt, edits
+# state, or reaches a role's internal effectors.
+#
+# The adapter is trusted to bind `client_id` from the authenticated credential.
+# An external client never holds this token; it holds an API key the adapter
+# maps to an identity, so "my interactions" is a fact about who asked rather
+# than a parameter anyone can set.
+EXTERNAL_IO = (
+    "io_capabilities", "io_attach_input", "io_submit", "io_status",
+    "io_await", "io_output", "io_list", "io_result",
+)
+
+
 def scope_tables() -> dict[str, tuple[str, ...]]:
     """The whole capability model, as data.
 
@@ -110,7 +126,8 @@ def scope_tables() -> dict[str, tuple[str, ...]]:
     supervisor itself and the MCP facade, and is granted by the control token
     rather than by a scope entry.
     """
-    return {"neuocyte": NEUOCYTE, "ego": EGO, "id": ID}
+    return {"neuocyte": NEUOCYTE, "ego": EGO, "id": ID,
+            "external_io": EXTERNAL_IO}
 
 
 def id_only_verbs() -> frozenset[str]:
@@ -119,6 +136,10 @@ def id_only_verbs() -> frozenset[str]:
 
 def ego_only_verbs() -> frozenset[str]:
     return frozenset(EGO_ONLY)
+
+
+def external_io_verbs() -> frozenset[str]:
+    return frozenset(EXTERNAL_IO)
 
 
 def verbs_for(scope: str) -> frozenset[str]:

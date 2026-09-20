@@ -537,6 +537,58 @@ identity-shaped arguments, or by re-presenting a different token mid-connection.
 `test_id_cannot_invoke_an_ego_only_verb`,
 `test_the_three_scopes_are_disjoint_where_it_matters`
 
+### External interfaces
+
+Full reference: `INTERFACES.md` (authority classes, the JSON-RPC protocol and endpoints, the MCP adapter, the operator console, and why an I/O client has no route to protected state).
+
+**I48. External input is not external control.** MCP and API clients submit
+input and collect output. Input may cause Amoeba to do a great deal — request
+workers, run tools, fill the blackboard, propose artifacts, change maintained
+cognition — and none of that makes the caller a control-plane actor, because
+none of the verbs that did it are reachable from the external surface.
+→ `test_an_api_client_can_submit_input_and_collect_output`,
+`test_an_external_client_cannot_reach_a_control_verb`,
+`test_disconnecting_does_not_cancel_anything`
+
+**I48b. The route is absent, not refused.** An external client that authenticates,
+reads discovery, and then posts the exact spelled-out name of an operator, Ego
+or Id verb receives `unknown method` — never an authorization decision. A
+refusal would mean the operation exists here and something decided against it,
+which is one refactor away from deciding differently. Checked twice: at the
+adapter, and against the credential the adapter itself holds.
+→ `test_discovery_then_calling_the_exact_operator_verb_anyway`,
+`test_discovery_does_not_reveal_privileged_methods`,
+`test_the_operator_surface_and_the_external_surface_are_separate_tables`
+
+**I48c. Identity is the credential.** `client_id` comes from the authenticated
+key; fields named `client_id`, `role`, `actor`, `caller` or `scope` in a request
+are discarded rather than honoured. "My interactions" is a fact about who asked,
+not a filter that could be widened.
+→ `test_spoofed_identity_fields_buy_nothing`,
+`test_mcp_and_api_reach_the_same_semantic_operations`
+
+**I48d. Loopback is not authentication.** Every request needs a credential,
+cross-origin browser requests are refused before dispatch, and the operator
+session travels in a header rather than a cookie.
+→ `test_a_credential_is_required_even_on_loopback`,
+`test_a_cross_origin_browser_request_is_refused`,
+`test_an_api_key_cannot_reach_the_operator_surface`
+
+**I48e. External bytes are admitted input, never a path.** Attachments are
+content-addressed with exact-byte provenance and an attachment name is a label:
+no host path is accepted, no filespace is written, and knowing an artifact id or
+digest is not authority to fetch anything.
+→ `test_attached_bytes_enter_as_admitted_input_with_exact_provenance`,
+`test_an_attachment_name_is_a_label_not_a_path`
+
+**I48f. The console is a cockpit, not an authority.** Operator actions go
+through the Harness and are receipted; dashboard code opens no database and
+touches no filesystem. Running on loopback grants nothing.
+→ `test_the_operator_can_govern_through_the_harness`,
+`test_operator_governance_actions_are_receipted`,
+`test_the_dashboard_never_touches_the_database_or_filesystem`,
+`test_accepting_a_prompt_does_not_silently_change_cognition`
+
 **I41. A receipt's digest is ground truth, verifiable from inside.** If a
 receipt claims a neuocyte received bytes with digest D, then hashing the bytes
 actually available to that neuocyte must produce D. This holds for attachments,

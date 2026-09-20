@@ -125,9 +125,13 @@ def test_every_mutation_anchor_still_matches_its_source(mut):
         f"{mut['invariant']}: mutation anchor no longer present in "
         f"{mut['path']}. Update scripts/verify_invariants.py so the guarantee "
         "is still actually negated.")
-    for old, _new in mut["also"]:
-        assert old in src, (
-            f"{mut['invariant']}: secondary anchor missing from {mut['path']}")
+    for entry in mut["also"]:
+        # (path, old, new) names another file; (old, new) means this one.
+        rel, old = ((entry[0], entry[1]) if len(entry) == 3
+                    else (mut["path"], entry[0]))
+        text = (ROOT / rel).read_text(encoding="utf-8")
+        assert old in text, (
+            f"{mut['invariant']}: secondary anchor missing from {rel}")
 
 
 @pytest.mark.parametrize("mut", _harness_mutations(),

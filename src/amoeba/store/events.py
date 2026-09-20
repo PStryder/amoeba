@@ -126,6 +126,17 @@ class EventKind:
     WORK_MESSAGE_REFUSED = "work.message_refused"
     EGO_REVIEW_REQUESTED = "ego.review_requested"
     WORK_REQUESTED_BY_EGO = "work.requested_by_ego"
+    # External I/O surface. Input is input: it may cause cognition, and
+    # that is not the same thing as the client controlling anything.
+    INTERACTION_ACCEPTED = "interaction.accepted"
+    INTERACTION_COMPLETED = "interaction.completed"
+    INTERACTION_FAILED = "interaction.failed"
+    INTERACTION_INPUT_ATTACHED = "interaction.input_attached"
+    INTERACTION_RESULT_SURFACED = "interaction.result_surfaced"
+    EXTERNAL_DENIED = "external.denied"
+    # Operator governance: human decisions, recorded like any other.
+    PROMPT_DECIDED = "prompt.decided"
+    OPERATOR_CONSULTED_ID = "operator.consulted_id"
 
     # arbiter / side channel
     RESOURCE_DECISION = "resource.decision"

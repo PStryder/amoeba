@@ -360,7 +360,18 @@ def test_side_channel_signal_changes_no_state(stack: LiveStack):
 # Test 3: a real MCP client calls both halves directly.
 # ---------------------------------------------------------------------------
 @pytest.mark.timeout(300)
-def test_real_mcp_client_calls_both_halves(stack: LiveStack):
+def test_a_real_mcp_client_gets_the_io_surface_only(stack: LiveStack):
+    """Through a real MCP client, over stdio, end to end.
+
+    This test used to be called "calls both halves" and drove `ego_converse`,
+    `id_health` and `ego_recall`. That premise is now wrong by design: MCP has
+    no Id half and no half of Ego's internals. It is a cognitive service
+    interface -- input in, output out -- and the tools it publishes are the
+    whole of what it can do.
+
+    The removed tool names are tried anyway, spelled exactly as they used to
+    be, because a client that remembers the old surface is the realistic case.
+    """
     import anyio
 
     async def run() -> dict:
@@ -382,54 +393,42 @@ def test_real_mcp_client_calls_both_halves(stack: LiveStack):
                 init = await session.initialize()
                 tools = await session.list_tools()
                 names = sorted(t.name for t in tools.tools)
-                ego = await session.call_tool(
-                    "ego_converse",
-                    {"message": "Name one invariant you maintain.",
-                     "idempotency_key": "mcp-client-1"},
-                )
-                idh = await session.call_tool("id_health", {})
-                recall = await session.call_tool("ego_recall", {"query": "invariant"})
-                return {
-                    "server_name": init.serverInfo.name,
-                    "instructions": init.instructions or "",
-                    "tool_names": names,
-                    "ego": ego.structuredContent or json.loads(ego.content[0].text),
-                    "id_health": idh.structuredContent
-                    or json.loads(idh.content[0].text),
-                    "recall": recall.structuredContent
-                    or json.loads(recall.content[0].text),
-                }
+
+                asked = await session.call_tool(
+                    "amoeba_ask", {"text": "Name one invariant you maintain.",
+                                   "wait_seconds": 90})
+                answer = asked.structuredContent or json.loads(
+                    asked.content[0].text)
+
+                gone = {}
+                for old in ("ego_converse", "id_health", "ego_recall",
+                            "mind_file_write", "mind_artifact_promote",
+                            "board_post", "mind_cancel", "id_maintenance"):
+                    try:
+                        res = await session.call_tool(old, {})
+                        gone[old] = ("ERROR-FLAGGED" if res.isError
+                                     else "EXECUTED")
+                    except Exception as exc:  # noqa: BLE001
+                        gone[old] = type(exc).__name__
+                return {"server_name": init.serverInfo.name,
+                        "tool_names": names, "answer": answer, "gone": gone}
 
     out = anyio.run(run)
 
-    assert out["server_name"] == "amoeba"
-    # Both halves are directly callable and discovery lists the cognitive verbs.
-    for expected in ("ego_converse", "ego_investigate", "ego_recall", "ego_status",
-                     "id_introspect", "id_health", "id_audit", "id_disagreements",
-                     "id_maintenance"):
-        assert expected in out["tool_names"], out["tool_names"]
-    # No neuocyte, cache or snapshot controls are exposed.
-    assert not any(bad in name for name in out["tool_names"]
-                   for bad in ("neuocyte", "snapshot", "kv", "fork", "lease", "session"))
+    assert out["tool_names"] == [
+        "amoeba_ask", "amoeba_attach", "amoeba_capabilities", "amoeba_list",
+        "amoeba_output", "amoeba_result", "amoeba_status", "amoeba_submit",
+    ], out["tool_names"]
 
-    ego = out["ego"]
-    for field in ("schema_version", "operation_id", "status", "receipt_id",
-                  "state_version", "result", "limitations"):
-        assert field in ego, (field, ego)
-    assert ego["schema_version"] == "1.0.0"
-    assert ego["status"] == "completed"
-    assert ego["operation_id"] and ego["receipt_id"]
-    assert any("SIMULATED" in lim for lim in ego["limitations"])
+    # The surface works for what it is for.
+    result = out["answer"].get("result", out["answer"])
+    assert result.get("status") in ("complete", "failed"), out["answer"]
+    assert result.get("interaction_id", "").startswith("ixn_")
 
-    health = out["id_health"]["result"] if "result" in out["id_health"] \
-        and out["id_health"].get("result") else out["id_health"]
-    assert isinstance(health, dict)
+    # And every removed tool is gone rather than merely refused.
+    for old, outcome in out["gone"].items():
+        assert outcome != "EXECUTED", f"{old} still executes over MCP"
 
-    recall = out["recall"]
-    assert "MAINTAINED" in " ".join(recall["limitations"])
-
-
-@pytest.mark.timeout(300)
 def test_mcp_client_disconnect_does_not_kill_the_mind(stack: LiveStack):
     import anyio
 

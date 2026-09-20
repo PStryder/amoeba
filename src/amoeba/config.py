@@ -136,6 +136,11 @@ class Config:
     ego_port: int = 8713
     id_port: int = 8714
     log_level: str = "INFO"
+    # Loopback by default. Binding here is not authentication:
+    # every request still needs a credential (see http_api).
+    api_host: str = "127.0.0.1"
+    api_port: int = 8715
+    api_enabled: bool = True
     backend: BackendConfig = field(default_factory=BackendConfig)
     arbiter: ArbiterConfig = field(default_factory=ArbiterConfig)
     sandbox: SandboxConfig = field(default_factory=SandboxConfig)
@@ -188,6 +193,16 @@ class Config:
         below it decorative.
         """
         return self.state_dir / "control.token"
+
+    @property
+    def operator_session_path(self) -> Path:
+        """Where the console's session credential is written at startup."""
+        return self.state_dir / "operator.session"
+
+    @property
+    def api_clients_path(self) -> Path:
+        """API keys and the client identity each one carries."""
+        return self.state_dir / "api_clients.json"
 
     def scope_token_path(self, scope: str) -> Path:
         """The credential a child presents to name its own capability scope.

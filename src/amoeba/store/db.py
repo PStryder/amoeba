@@ -393,6 +393,72 @@ CREATE TABLE IF NOT EXISTS work_messages (
 );
 CREATE INDEX IF NOT EXISTS ix_work_message_work ON work_messages(work_id, created_at);
 
+-- External interactions: one row per unit of input an outside client sent.
+--
+-- This is the whole external surface. A client owns its interactions and sees
+-- nothing else: `client_id` is the authenticated credential's identity, never
+-- a field the caller supplies, so scoping a read to "mine" is a fact rather
+-- than a filter someone could ask to have widened.
+--
+-- Input bytes are content-addressed like any other admitted input, so what the
+-- client actually sent is recoverable by digest and cannot be confused with
+-- what Amoeba decided to do about it.
+CREATE TABLE IF NOT EXISTS interactions (
+  interaction_id  TEXT PRIMARY KEY,
+  client_id       TEXT NOT NULL,          -- authenticated identity, never claimed
+  surface         TEXT NOT NULL,          -- mcp | api
+  kind            TEXT NOT NULL,          -- converse | investigate
+  conversation_id TEXT,
+  input_sha256    TEXT NOT NULL,
+  input_preview   TEXT,
+  status          TEXT NOT NULL,          -- accepted | running | complete | failed
+  operation_id    TEXT,
+  output_sha256   TEXT,
+  output_preview  TEXT,
+  error           TEXT,
+  created_at      REAL NOT NULL,
+  completed_at    REAL,
+  state_version   INTEGER NOT NULL
+);
+CREATE INDEX IF NOT EXISTS ix_interaction_client
+  ON interactions(client_id, created_at);
+
+-- Files an external client attached to an interaction. Admitted input, nothing
+-- more: exact bytes, a digest, and a record of which client sent them. Never a
+-- host path, and never a Filespace write.
+CREATE TABLE IF NOT EXISTS interaction_inputs (
+  input_id       TEXT PRIMARY KEY,
+  interaction_id TEXT,
+  client_id      TEXT NOT NULL,
+  filename       TEXT NOT NULL,
+  sha256         TEXT NOT NULL,
+  bytes          INTEGER NOT NULL,
+  media_type     TEXT,
+  created_at     REAL NOT NULL,
+  state_version  INTEGER NOT NULL
+);
+CREATE INDEX IF NOT EXISTS ix_interaction_input
+  ON interaction_inputs(interaction_id);
+
+-- Results deliberately surfaced outward. An artifact is readable by a client
+-- only if it appears here: knowing an artifact id is not authority to fetch it,
+-- and there is no route from an identifier to the blob store.
+CREATE TABLE IF NOT EXISTS interaction_results (
+  result_id      TEXT PRIMARY KEY,
+  interaction_id TEXT NOT NULL,
+  client_id      TEXT NOT NULL,
+  artifact_id    TEXT,
+  sha256         TEXT NOT NULL,
+  filename       TEXT,
+  media_type     TEXT,
+  bytes          INTEGER NOT NULL,
+  surfaced_by    TEXT NOT NULL,
+  created_at     REAL NOT NULL,
+  state_version  INTEGER NOT NULL
+);
+CREATE INDEX IF NOT EXISTS ix_interaction_result
+  ON interaction_results(interaction_id);
+
 CREATE TABLE IF NOT EXISTS conversations (
   conversation_id TEXT PRIMARY KEY,
   created_at      REAL NOT NULL,

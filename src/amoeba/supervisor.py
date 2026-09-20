@@ -30,6 +30,7 @@ from .errors import (
 from .ids import new_id
 from .logging_setup import get_logger, setup_logging
 from .homeostasis import ContextHomeostasis, HomeostasisConfig
+from .http_api import ApiServer
 from .mind import Mind
 from .pulse import PulseCollector
 from .rpc import RpcClient, RpcServer, read_or_create_token, wait_for_port
@@ -141,6 +142,7 @@ class Supervisor:
         self._work_sandboxes: dict[str, str] = {}
         self._work_sandbox_lock = threading.RLock()
         self.pulse = PulseCollector(self)
+        self.api: ApiServer | None = None
         # What a *running* role actually primed its context with, as
         # reported at registration. Editing configuration changes what the
         # next incarnation would run, not this. In memory on purpose: it
@@ -288,6 +290,8 @@ class Supervisor:
         self._server.register_all(self.methods())
         self._register_scopes()
         self._server.serve_in_thread()
+        if self.cfg.api_enabled:
+            self._start_api()
         self.log.info("supervisor listening on %s:%s",
                       self.cfg.supervisor_host, self.cfg.supervisor_port)
 
@@ -317,6 +321,12 @@ class Supervisor:
                 self._terminate(name)
             except Exception:  # noqa: BLE001
                 self.log.exception("failed stopping %s", name)
+        if self.api is not None:
+            try:
+                self.api.stop()
+            except Exception:  # noqa: BLE001
+                pass
+            self.api = None
         for wid in list(self.neuocytes):
             self._kill_neuocyte(wid, reason="supervisor shutdown")
         if self.sandboxes is not None:
@@ -641,6 +651,27 @@ class Supervisor:
         return self.pulse.capture(max_age_seconds=float(max_age_seconds))
 
     # ------------------------------------------------------------------
+    def _start_api(self) -> None:
+        """Bring up the HTTP front door.
+
+        Two adapters share the listener and nothing else: each holds its own
+        credential and therefore its own method table. The operator session
+        token is printed once, because a console nobody can log into is not a
+        console.
+        """
+        try:
+            self.api = ApiServer(self.cfg)
+            host, port = self.api.start()
+            self.log.info("operator console: http://%s:%s/", host, port)
+            self.log.info("operator session token: %s",
+                          self.api.operator_session)
+            self.log.info("external API key: %s", self.api.clients.any_key())
+        except Exception:  # noqa: BLE001
+            self.log.exception("could not start the HTTP api; the mind runs "
+                               "without an external interface")
+            self.api = None
+
+    # ------------------------------------------------------------------
     # Capability scopes
     # ------------------------------------------------------------------
     def _register_scopes(self) -> None:
@@ -673,12 +704,15 @@ class Supervisor:
         # Cached: the handlers are closures, and the tool registry looks them
         # up per call. Rebuilding would make every lookup a fresh closure set.
         if self._method_cache is None:
-            from . import ego_api, harness_api, id_api, supervisor_api
+            from . import (ego_api, harness_api, id_api, io_api,
+                           operator_api, supervisor_api)
 
             methods = supervisor_api.build(self)
             methods.update(harness_api.build(self))
             methods.update(id_api.build(self))
             methods.update(ego_api.build(self))
+            methods.update(io_api.build(self))
+            methods.update(operator_api.build(self))
             methods["system_pulse"] = self._system_pulse
             self._method_cache = methods
         return self._method_cache

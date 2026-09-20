@@ -164,12 +164,18 @@ def test_cancel_generation_targets_a_live_role_session(stack: LiveStack):
 # A real MCP client aborting mid-call
 # ---------------------------------------------------------------------------
 @pytest.mark.timeout(300)
-def test_mcp_client_cancellation_reaches_the_supervisor(stack: LiveStack):
-    """Abort an in-flight tool call and check the mind was actually told.
+def test_an_mcp_client_has_no_cancellation_verb(stack: LiveStack):
+    """Cancellation is control, so it is not in the external vocabulary.
 
-    The deterministic backend answers instantly, so this asserts the wiring
-    (cancel arrives, operation is marked, receipt exists) rather than racing to
-    interrupt a slow generation.
+    This test used to drive `mind_cancel` over MCP and assert the cancel
+    reached the supervisor. That surface is gone on purpose: a client that
+    wants something stopped says so as input, and Amoeba decides what follows.
+
+    What remains true, and is tested directly in
+    `test_call_cancellable_issues_a_cancel_when_the_await_is_cancelled`, is
+    that an *aborted MCP call* still tells the supervisor to stop the work --
+    that is the transport honouring its own protocol, not the client holding a
+    control verb.
     """
     import anyio
 
@@ -190,27 +196,22 @@ def test_mcp_client_cancellation_reaches_the_supervisor(stack: LiveStack):
             async with ClientSession(read, write) as session:
                 await session.initialize()
                 tools = {t.name for t in (await session.list_tools()).tools}
-                started = await session.call_tool(
-                    "ego_converse", {"message": "a question",
-                                     "idempotency_key": "mcp-cancel-target"})
-                import json as _json
-                payload = started.structuredContent or _json.loads(
-                    started.content[0].text)
-                cancelled = await session.call_tool(
-                    "mind_cancel", {"operation_id": payload["operation_id"],
-                                    "reason": "client changed its mind"})
-                cpayload = cancelled.structuredContent or _json.loads(
-                    cancelled.content[0].text)
-                return {"tools": tools, "turn": payload, "cancel": cpayload}
+                attempts = {}
+                for verb in ("mind_cancel", "cancel_operation", "cancel_work",
+                             "kill_all_neuocytes"):
+                    try:
+                        res = await session.call_tool(verb, {"operation_id": "x"})
+                        attempts[verb] = ("ERROR-FLAGGED" if res.isError
+                                          else "EXECUTED")
+                    except Exception as exc:  # noqa: BLE001
+                        attempts[verb] = type(exc).__name__
+                return {"tools": tools, "attempts": attempts}
 
     out = anyio.run(run)
-    assert "mind_cancel" in out["tools"]
-    result = out["cancel"].get("result", out["cancel"])
-    assert result["operation_id"] == out["turn"]["operation_id"]
-    assert result["receipt_id"]
-    # It had already completed, and the response says so rather than pretending.
-    assert result["already_terminal"] is True
-
+    assert not any("cancel" in t for t in out["tools"]), out["tools"]
+    assert not any("kill" in t for t in out["tools"])
+    for verb, outcome in out["attempts"].items():
+        assert outcome != "EXECUTED", f"an MCP client executed {verb}"
 
 def test_call_cancellable_issues_a_cancel_when_the_await_is_cancelled():
     """The facade's actual contract, tested directly.

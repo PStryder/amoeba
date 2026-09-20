@@ -114,7 +114,7 @@ class LiveStack:
 def _write_stack_config(tmp_path: Path, *, kind: str = "deterministic",
                         overrides: dict[str, Any] | None = None,
                         extra_toml: str = "") -> Path:
-    ports = [_free_port() for _ in range(4)]
+    ports = [_free_port() for _ in range(5)]
     state = (tmp_path / "state").as_posix()
     lines = [
         f'state_dir = "{state}"',
@@ -124,6 +124,7 @@ def _write_stack_config(tmp_path: Path, *, kind: str = "deterministic",
         f"inference_port = {ports[1]}",
         f"ego_port = {ports[2]}",
         f"id_port = {ports[3]}",
+        f"api_port = {ports[4]}",
         'log_level = "INFO"',
         "",
         "[backend]",

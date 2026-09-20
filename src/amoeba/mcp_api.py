@@ -26,6 +26,7 @@ import uuid
 from collections.abc import Sequence
 from typing import Annotated, Any, Literal
 
+import anyio
 from pydantic import Field
 
 from .config import Config, load_config
@@ -63,9 +64,18 @@ class Facade:
     def __init__(self, cfg: Config) -> None:
         self.cfg = cfg
         self.log = get_logger("mcp")
-        self.token = read_or_create_token(cfg.token_path)
+        # The external I/O credential, deliberately not the control token.
+        #
+        # This facade used to hold `cfg.token_path`, which resolves to operator
+        # scope -- the entire method table. Every MCP client could therefore
+        # write and delete host files, promote artifacts, run Id maintenance,
+        # post to the blackboard and cancel operations. MCP is a cognitive
+        # service interface, not a control plane, so it now connects with the
+        # narrowest scope in the system and simply cannot name those verbs.
+        self.token = read_or_create_token(cfg.scope_token_path("external_io"))
         self.client = RpcClient(cfg.supervisor_host, cfg.supervisor_port, self.token,
                                 name="mcp->supervisor")
+        self.client_id = "mcp"
 
     def call(self, method: str, **params: Any) -> Any:
         try:
@@ -206,429 +216,158 @@ def build_server(cfg: Config):  # noqa: C901
         wrapper.__annotations__ = dict(getattr(fn, "__annotations__", {}))
         return wrapper
 
-    # ---------------- Ego ----------------
-    @mcp.tool(title="Ego: converse")
+    # =================================================================
+    # The external I/O surface, and nothing else.
+    #
+    # This block used to expose 23 tools including file write and delete,
+    # artifact promotion, Id maintenance, blackboard posting and operation
+    # cancellation -- over a facade holding the control token. That made every
+    # MCP client an operator.
+    #
+    # MCP is a cognitive service interface: input in, output out. The verbs
+    # below are the entire surface, the facade holds only the external_io
+    # credential, and the supervisor put nothing else in that scope's table.
+    # There is no tool here to misuse and no method name that would reach one.
+    # =================================================================
+    @mcp.tool(title="Amoeba: what this interface can do")
     @guarded
-    async def ego_converse(
-        message: Annotated[str, Field(description="What to say to Ego.", max_length=8000)],
-        conversation_id: Annotated[str | None, Field(
-            description="Group turns into one conversation.")] = None,
-        idempotency_key: Annotated[str | None, Field(
-            description="Replaying the same key returns the original result instead of "
-                        "re-running the turn.")] = None,
-        max_tokens: Annotated[int, Field(ge=1, le=2048)] = 384,
-    ) -> dict[str, Any]:
-        """One conversational turn with Ego, grounded in maintained memory.
+    def amoeba_capabilities() -> dict[str, Any]:
+        """Describe the external interface.
 
-        Returns the answer, the memories it drew on, and the id of the
-        conclusion recorded for it -- which is what `id_audit` can later
-        examine.
-
-        Cancellable: aborting this call stops the generation between tokens
-        rather than letting it run to its budget.
+        Discovery covers this surface only. It does not enumerate Amoeba's
+        internals, and there is no verb it could name that this adapter holds
+        a credential for.
         """
-        key = idempotency_key or f"mcp-converse-{uuid.uuid4()}"
-        return facade.envelope(await facade.call_cancellable(
-            "ego_converse", idempotency_key=key, message=message,
-            conversation_id=conversation_id, max_tokens=max_tokens,
-        ))
+        return facade.envelope(facade.call("io_capabilities",
+                                           client_id=facade.client_id))
 
-    @mcp.tool(title="Ego: investigate")
+    @mcp.tool(title="Amoeba: ask")
     @guarded
-    def ego_investigate(
-        question: Annotated[str, Field(description="The question to investigate.",
-                                       max_length=4000)],
-        constraints: Annotated[str, Field(
-            description="Scope limits Ego should respect.", max_length=2000)] = "",
-        budget_tokens: Annotated[int | None, Field(
-            ge=1, le=8192,
-            description="Requested token budget. The arbiter may reduce it.")] = None,
-        idempotency_key: Annotated[str | None, Field()] = None,
+    async def amoeba_ask(
+        text: Annotated[str, Field(description="What you want Amoeba to think "
+                                               "about.", max_length=32000)],
+        kind: Annotated[Literal["converse", "investigate"],
+                        Field(description="converse for dialogue, investigate "
+                                          "for a bounded question.")] = "converse",
+        conversation_id: Annotated[str, Field(description="Continue an earlier "
+                                                          "exchange.",
+                                              max_length=64)] = "",
+        wait_seconds: Annotated[float, Field(description="How long to wait for "
+                                                         "the answer.",
+                                             ge=0, le=300)] = 60.0,
     ) -> dict[str, Any]:
-        """Start a bounded investigation.
+        """Submit input and wait for Amoeba's answer.
 
-        Returns promptly with a durable operation id and the scope actually
-        accepted by the arbiter -- which may be smaller than requested. Poll
-        `ego_status` with that operation id for progress and findings.
+        The input may cause a great deal: Ego may request workers, neuocytes
+        may run tools, the blackboard may fill with findings, artifacts may be
+        proposed, maintained cognition may change. All of that is Amoeba acting
+        on its **own** authority in response to what you said -- none of those
+        verbs are callable from here, and none of them become callable because
+        input caused them.
+
+        If you want something stopped, say so in the text. Amoeba decides what
+        follows.
         """
+        submitted = facade.call("io_submit", client_id=facade.client_id,
+                                surface="mcp", text=text, kind=kind,
+                                conversation_id=conversation_id or None)
+        if wait_seconds <= 0:
+            return facade.envelope(submitted)
+        out = await anyio.to_thread.run_sync(
+            functools.partial(facade.call, "io_await",
+                              client_id=facade.client_id,
+                              interaction_id=submitted["interaction_id"],
+                              timeout_seconds=wait_seconds),
+            abandon_on_cancel=True)
+        return facade.envelope({**out,
+                                "interaction_id": submitted["interaction_id"]})
+
+    @mcp.tool(title="Amoeba: submit without waiting")
+    @guarded
+    def amoeba_submit(
+        text: Annotated[str, Field(description="Input for Amoeba.",
+                                   max_length=32000)],
+        kind: Annotated[Literal["converse", "investigate"],
+                        Field(description="Interaction kind.")] = "converse",
+        conversation_id: Annotated[str, Field(description="Continue an earlier "
+                                                          "exchange.",
+                                              max_length=64)] = "",
+    ) -> dict[str, Any]:
+        """Hand Amoeba something to think about and return immediately."""
         return facade.envelope(facade.call(
-            "ego_investigate", question=question, constraints=constraints,
-            budget_tokens=budget_tokens, idempotency_key=idempotency_key,
-        ))
+            "io_submit", client_id=facade.client_id, surface="mcp", text=text,
+            kind=kind, conversation_id=conversation_id or None))
 
-    @mcp.tool(title="Ego: recall")
+    @mcp.tool(title="Amoeba: status of your interaction")
     @guarded
-    def ego_recall(
-        query: Annotated[str, Field(description="Substring to match against claims.",
-                                    max_length=1000)] = "",
-        scope: Annotated[Literal["active", "all", "superseded", "retracted"], Field(
-            description="Which maintained memories to search.")] = "active",
-        limit: Annotated[int, Field(ge=1, le=100)] = 10,
+    def amoeba_status(
+        interaction_id: Annotated[str, Field(description="One of your own "
+                                                         "interactions.",
+                                             max_length=64)],
     ) -> dict[str, Any]:
-        """Search MAINTAINED memory with provenance, confidence and versions.
+        """Progress on something you submitted. Yours only."""
+        return facade.envelope(facade.call("io_status",
+                                           client_id=facade.client_id,
+                                           interaction_id=interaction_id))
 
-        This is interpretation, not raw history: each item carries supporting
-        AND opposing evidence and a supersession chain. Raw events are reached
-        through `id_audit`.
-        """
-        return facade.envelope(facade.call("ego_recall", query=query, scope=scope,
+    @mcp.tool(title="Amoeba: collect your output")
+    @guarded
+    def amoeba_output(
+        interaction_id: Annotated[str, Field(description="One of your own "
+                                                         "interactions.",
+                                             max_length=64)],
+    ) -> dict[str, Any]:
+        """The answer, plus any results deliberately surfaced to you."""
+        return facade.envelope(facade.call("io_output",
+                                           client_id=facade.client_id,
+                                           interaction_id=interaction_id))
+
+    @mcp.tool(title="Amoeba: your interactions")
+    @guarded
+    def amoeba_list(
+        limit: Annotated[int, Field(description="How many.", ge=1, le=100)] = 20,
+    ) -> dict[str, Any]:
+        """Your own interactions. There is no parameter for anyone else's."""
+        return facade.envelope(facade.call("io_list",
+                                           client_id=facade.client_id,
                                            limit=limit))
 
-    @mcp.tool(title="Ego: status")
+    @mcp.tool(title="Amoeba: attach input bytes")
     @guarded
-    def ego_status(
-        operation_id: Annotated[str | None, Field(
-            description="Poll one durable operation; omit for overall Ego state.")] = None,
+    def amoeba_attach(
+        filename: Annotated[str, Field(description="A label, not a path.",
+                                       max_length=255)],
+        content_base64: Annotated[str, Field(description="Base64 of the bytes.")],
+        media_type: Annotated[str, Field(description="Optional media type.",
+                                         max_length=128)] = "",
     ) -> dict[str, Any]:
-        """Progress, outcome, limitations and current state version."""
-        return facade.envelope(facade.call("ego_status", operation_id=operation_id))
+        """Send bytes as admitted input.
 
-    # ---------------- Id ----------------
-    @mcp.tool(title="Id: introspect")
-    @guarded
-    async def id_introspect(
-        question: Annotated[str, Field(description="What to ask Id about this mind.",
-                                       max_length=4000)],
-        scope: Annotated[str, Field(max_length=200)] = "all",
-        idempotency_key: Annotated[str | None, Field()] = None,
-    ) -> dict[str, Any]:
-        """Id's observed account of the mind's own operation.
-
-        The response separates what was measured from durable state from what
-        Id inferred. Do not read the inferred part as evidence.
-        """
-        key = idempotency_key or f"mcp-introspect-{uuid.uuid4()}"
-        return facade.envelope(await facade.call_cancellable(
-            "id_introspect", idempotency_key=key, question=question, scope=scope))
-
-    @mcp.tool(title="Id: health")
-    @guarded
-    def id_health(
-        scope: Annotated[str, Field(max_length=200)] = "all",
-    ) -> dict[str, Any]:
-        """Measured health, queue and resource status, and capability flags.
-
-        Stays answerable while inference is failing or saturated. Capability
-        flags distinguish one resident weight set, serialized execution,
-        continuous batching and verified physical overlap -- which are not the
-        same thing.
-        """
-        return facade.envelope(facade.call("id_health", scope=scope))
-
-    @mcp.tool(title="Id: audit")
-    @guarded
-    async def id_audit(
-        conclusion_id: Annotated[str | None, Field(
-            description="Conclusion to audit, e.g. from an ego_converse result.")] = None,
-        operation_id: Annotated[str | None, Field(
-            description="Audit a whole operation instead.")] = None,
-        focus: Annotated[str, Field(max_length=1000)] = "",
-        idempotency_key: Annotated[str | None, Field()] = None,
-    ) -> dict[str, Any]:
-        """Audit an Ego conclusion through its recorded evidence.
-
-        Id resolves the claim to its original inputs, model configuration and
-        evidence chain without asking Ego to defend itself. A contested verdict
-        opens a recorded disagreement rather than overwriting Ego's claim.
-        """
-        key = idempotency_key or f"mcp-audit-{uuid.uuid4()}"
-        return facade.envelope(await facade.call_cancellable(
-            "id_audit", idempotency_key=key, conclusion_id=conclusion_id,
-            operation_id=operation_id, focus=focus,
-        ))
-
-    @mcp.tool(title="Id: disagreements")
-    @guarded
-    def id_disagreements(
-        scope: Annotated[Literal["open", "resolved", "stale", "all"], Field()] = "open",
-        limit: Annotated[int, Field(ge=1, le=100)] = 20,
-    ) -> dict[str, Any]:
-        """Competing claims and the evidence on each side.
-
-        This is not a majority-truth score and neither side is marked correct.
-        """
-        return facade.envelope(facade.call("id_disagreements", scope=scope, limit=limit))
-
-    @mcp.tool(title="Id: maintenance")
-    @guarded
-    def id_maintenance(
-        objective: Annotated[str, Field(description="Maintenance objective.",
-                                        max_length=2000)],
-        scope: Annotated[str, Field(max_length=500)] = "",
-        budget_tokens: Annotated[int | None, Field(ge=1, le=8192)] = None,
-    ) -> dict[str, Any]:
-        """Propose bounded maintenance work.
-
-        The arbiter accepts or refuses. A refusal gives the reason: recursion
-        depth, hourly rate limit, or queue saturation.
-        """
-        return facade.envelope(facade.call("id_maintenance", objective=objective,
-                                           scope=scope, budget_tokens=budget_tokens))
-
-    @mcp.tool(title="Mind: cancel an operation")
-    @guarded
-    def mind_cancel(
-        operation_id: Annotated[str, Field(
-            description="Operation to stop, e.g. from an ego_investigate result.",
-            max_length=64)],
-        reason: Annotated[str, Field(max_length=500)] = "client cancelled",
-    ) -> dict[str, Any]:
-        """Stop an operation and everything downstream of it.
-
-        Queued work is cancelled so no neuocyte picks it up, a neuocyte already
-        running is killed, and an in-flight generation is asked to stop between
-        tokens. Durable state already committed is untouched: cancelling is not
-        undoing.
-
-        Cancelling an operation that has already finished is not an error. You
-        get `already_terminal: true` and its final status, because a client
-        that cancels just as the work lands deserves the truth rather than a
-        failure.
-        """
-        return facade.envelope(facade.call("cancel_operation",
-                                           operation_id=operation_id,
-                                           reason=reason, actor="mcp_client"))
-
-    # ---------------- cognitive blackboard ----------------
-    @mcp.tool(title="Board: read")
-    @guarded
-    def board_read(
-        query: Annotated[str, Field(description="Substring to match in posts.",
-                                    max_length=1000)] = "",
-        post_types: Annotated[list[str] | None, Field(
-            description="finding | question | hypothesis | challenge | request | "
-                        "answer | note | retraction")] = None,
-        since_seq: Annotated[int | None, Field(
-            description="Cursor from a previous read; returns only newer posts.")] = None,
-        limit: Annotated[int, Field(ge=1, le=100)] = 20,
-    ) -> dict[str, Any]:
-        """Read the swarm's working discussion.
-
-        This is communication between neuocytes, NOT the mind's beliefs. A post
-        is something a neuocyte said; `ego_recall` is what the organism holds to
-        be true.
-
-        Reading is recorded against you. If you then post something that agrees
-        with what you read, that agreement is marked socially informed rather
-        than independent -- which is the point, not a side effect.
-
-        Keep the returned `cursor` and pass it as `since_seq` next time.
+        Content-addressed with exact-byte provenance, exactly as an
+        operator-attached file is. No host path is accepted and no filespace is
+        written; whether this is ever materialised into a compute sandbox is a
+        Harness decision that happens later, if at all.
         """
         return facade.envelope(facade.call(
-            "board_read", reader="mcp_client", query=query, post_types=post_types,
-            since_seq=since_seq, limit=limit, record=True))
+            "io_attach_input", client_id=facade.client_id, filename=filename,
+            content_base64=content_base64, media_type=media_type or None))
 
-    @mcp.tool(title="Board: post")
+    @mcp.tool(title="Amoeba: fetch a surfaced result")
     @guarded
-    def board_post(
-        body: Annotated[str, Field(description="What you want to contribute.",
-                                   max_length=8000)],
-        post_type: Annotated[
-            Literal["finding", "question", "hypothesis", "challenge", "note"],
-            Field(description="What kind of contribution this is.")] = "note",
-        title: Annotated[str | None, Field(max_length=200)] = None,
-        thread_id: Annotated[str | None, Field(
-            description="Reply into an existing thread.")] = None,
-        replies_to: Annotated[str | None, Field(
-            description="Post id this responds to.")] = None,
-        relation: Annotated[
-            Literal["reply_to", "challenges", "supports", "refines", "answers"],
-            Field(description="How it relates to replies_to.")] = "reply_to",
-        confidence: Annotated[float | None, Field(ge=0.0, le=1.0)] = None,
+    def amoeba_result(
+        result_id: Annotated[str, Field(description="A result surfaced to you.",
+                                        max_length=64)],
     ) -> dict[str, Any]:
-        """Contribute to the swarm's discussion as a cognitive peer.
+        """Fetch a result that was deliberately surfaced to you.
 
-        You are a participant here, not an authority: posting does not change
-        what the mind believes. Promotion of a post into maintained memory is a
-        separate act performed by the Harness.
-
-        Whatever you had already read is recorded against this post, so a later
-        reader can tell whether you reached this independently.
+        Knowing an artifact id or a digest is not authority to fetch anything;
+        the only route out is through a result that Amoeba decided belongs in
+        your answer.
         """
-        relations = ([{"to_post": replies_to, "relation": relation}]
-                     if replies_to else [])
-        return facade.envelope(facade.call(
-            "board_post", author="mcp_client", author_kind="operator",
-            post_type=post_type, body=body, title=title, thread_id=thread_id,
-            relations=relations, confidence=confidence))
+        return facade.envelope(facade.call("io_result",
+                                           client_id=facade.client_id,
+                                           result_id=result_id))
 
-    @mcp.tool(title="Board: how real is this agreement?")
-    @guarded
-    def board_corroboration(
-        post_id: Annotated[str, Field(description="Post to examine.", max_length=64)],
-    ) -> dict[str, Any]:
-        """Separate independent replication from socially propagated agreement.
-
-        Several neuocytes agreeing means very different things depending on
-        whether they had read each other. This splits the support into
-        `independent_support` (separate routes to the same answer) and
-        `socially_informed_support` (one observation restated), and lists any
-        challenges. Only the first is corroboration.
-        """
-        return facade.envelope(facade.call("board_corroboration", post_id=post_id))
-
-    # ---------------- host files ----------------
-    @mcp.tool(title="Files: what Amoeba may read and write")
-    @guarded
-    def mind_file_roots() -> dict[str, Any]:
-        """List the host directories Amoeba is allowed to touch, and how.
-
-        Nothing outside these is reachable. If the list is empty, Amoeba has no
-        host filesystem access at all -- which is the default.
-        """
-        return facade.envelope(facade.call("file_roots"))
-
-    @mcp.tool(title="Files: list")
-    @guarded
-    def mind_file_list(
-        root: Annotated[str, Field(description="Configured root name.", max_length=64)],
-        path: Annotated[str, Field(description="Subdirectory within the root.",
-                                   max_length=512)] = "",
-        limit: Annotated[int, Field(description="Max entries.", ge=1, le=500)] = 200,
-    ) -> dict[str, Any]:
-        """List files inside one configured root."""
-        return facade.envelope(
-            {"files": facade.call("file_list", root=root, path=path, limit=limit)})
-
-    @mcp.tool(title="Files: read")
-    @guarded
-    def mind_file_read(
-        root: Annotated[str, Field(description="Configured root name.", max_length=64)],
-        path: Annotated[str, Field(description="Path relative to the root.",
-                                   max_length=512)],
-    ) -> dict[str, Any]:
-        """Read a UTF-8 text file from a configured root.
-
-        Returns the exact text, or refuses. A file that is not UTF-8 text
-        has no correct text representation, and a lossy rendering is still
-        something a reader will treat as the content -- so the refusal
-        names the size and digest instead. Read raw bytes by running code
-        in a sandbox.
-        """
-        return facade.envelope(facade.call("file_read", root=root, path=path,
-                                           actor="operator"))
-
-    @mcp.tool(title="Files: write")
-    @guarded
-    def mind_file_write(
-        root: Annotated[str, Field(description="Configured root name (must be "
-                                               "read_write).", max_length=64)],
-        path: Annotated[str, Field(description="Path relative to the root.",
-                                   max_length=512)],
-        content: Annotated[str, Field(description="File contents.")],
-        rationale: Annotated[str, Field(description="Why this is being written.",
-                                        max_length=2000)] = "",
-    ) -> dict[str, Any]:
-        """Write a file, preserving whatever was there before.
-
-        If the path already exists its content is content-addressed into the
-        blob store first and the digest is recorded, so the previous version
-        stays recoverable with `mind_file_restore`. A write here supersedes;
-        it does not destroy.
-        """
-        return facade.envelope(facade.call(
-            "file_write", root=root, path=path, content=content,
-            actor="operator", rationale=rationale))
-
-    @mcp.tool(title="Files: versions of a path")
-    @guarded
-    def mind_file_versions(
-        root: Annotated[str, Field(description="Configured root name.", max_length=64)],
-        path: Annotated[str, Field(description="Path relative to the root.",
-                                   max_length=512)],
-        limit: Annotated[int, Field(description="Max versions.", ge=1, le=200)] = 50,
-    ) -> dict[str, Any]:
-        """Every recorded version of one path, newest first.
-
-        Reconstructed from the event log rather than a separate index, so it
-        cannot drift from what actually happened. `restorable` says whether the
-        content is still in the blob store.
-        """
-        return facade.envelope({"versions": facade.call(
-            "file_versions", root=root, path=path, limit=limit)})
-
-    @mcp.tool(title="Files: restore an earlier version")
-    @guarded
-    def mind_file_restore(
-        root: Annotated[str, Field(description="Configured root name.", max_length=64)],
-        path: Annotated[str, Field(description="Path relative to the root.",
-                                   max_length=512)],
-        sha256: Annotated[str, Field(description="Digest from mind_file_versions.",
-                                     max_length=64)],
-    ) -> dict[str, Any]:
-        """Put an earlier version of a file back, by digest.
-
-        Restoring is itself a write, so whatever is currently there is
-        snapshotted too: undo is not a way to lose the current version.
-        """
-        return facade.envelope(facade.call("file_restore", root=root, path=path,
-                                           sha256=sha256, actor="operator"))
-
-    @mcp.tool(title="Files: delete")
-    @guarded
-    def mind_file_delete(
-        root: Annotated[str, Field(description="Configured root name.", max_length=64)],
-        path: Annotated[str, Field(description="Path relative to the root.",
-                                   max_length=512)],
-        reason: Annotated[str, Field(description="Why.", max_length=2000)] = "",
-    ) -> dict[str, Any]:
-        """Delete a file, keeping its content recoverable by digest."""
-        return facade.envelope(facade.call("file_delete", root=root, path=path,
-                                           actor="operator", reason=reason))
-
-    @mcp.tool(title="Files: hand a file to a work item")
-    @guarded
-    def mind_file_attach(
-        path: Annotated[str, Field(description="Absolute host path, inside a "
-                                               "configured root.", max_length=1024)],
-        work_id: Annotated[str, Field(description="Work item to attach it to.",
-                                      max_length=64)],
-    ) -> dict[str, Any]:
-        """Give a work item a file to work on.
-
-        The file is content-addressed on the way in and copied into that work
-        item's sandbox. Nothing is read that was not named here, and the named
-        file still has to be inside a configured root.
-        """
-        return facade.envelope(facade.call("file_attach", path=path,
-                                           work_id=work_id, actor="operator"))
-
-    @mcp.tool(title="Files: promote a proposed artifact to disk")
-    @guarded
-    def mind_artifact_promote(
-        artifact_id: Annotated[str, Field(description="Artifact to promote.",
-                                          max_length=64)],
-        root: Annotated[str, Field(description="Destination root. Omit to keep it "
-                                               "in the internal artifact store.",
-                                   max_length=64)] = "",
-        path: Annotated[str, Field(description="Destination path within the root.",
-                                   max_length=512)] = "",
-    ) -> dict[str, Any]:
-        """Decide that something a neuocyte produced becomes a real file.
-
-        The content is re-hashed at the moment of copying and refused if it
-        changed since it was proposed, and anything already at the destination
-        is snapshotted first. The neuocyte that proposed it never named this
-        destination.
-        """
-        return facade.envelope(facade.call(
-            "artifact_promote", artifact_id=artifact_id, decided_by="operator",
-            root=root or None, path=path or None))
-
-    # ---------------- provenance ----------------
-    @mcp.tool(title="Provenance: resolve an operation")
-    @guarded
-    def mind_provenance(
-        operation_id: Annotated[str, Field(description="Operation to resolve.",
-                                           max_length=64)],
-    ) -> dict[str, Any]:
-        """Resolve the input -> work -> inference -> conclusion -> mutation chain.
-
-        Reports the hash-chain verification result and names any referenced
-        content that cannot be produced. Missing committed content is an
-        integrity failure, not a gap to be glossed over.
-        """
-        return facade.envelope(facade.call("provenance", operation_id=operation_id))
 
     return mcp, facade
 

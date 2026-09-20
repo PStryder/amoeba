@@ -1,0 +1,280 @@
+"""The operator console: a cockpit over Harness operations.
+
+Every panel is a call to `/operator/rpc`, which is a call into the Harness,
+which validates and receipts it. The page holds no authority of its own and has
+no path to the database or the filesystem -- running on loopback does not make
+JavaScript privileged.
+
+Kept as a single self-contained document on purpose: a build step between the
+operator and their console is a way for the console to be unavailable exactly
+when something is wrong.
+"""
+
+DASHBOARD_HTML = """<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Amoeba — operator console</title>
+<style>
+  :root {
+    --bg:#0f1115; --panel:#171a21; --line:#252a34; --ink:#e6e8ec;
+    --dim:#8b93a3; --accent:#7aa2f7; --warn:#e0af68; --bad:#f7768e;
+    --good:#9ece6a;
+  }
+  * { box-sizing:border-box; }
+  body { margin:0; background:var(--bg); color:var(--ink);
+         font:14px/1.5 ui-sans-serif,system-ui,"Segoe UI",sans-serif; }
+  header { display:flex; align-items:baseline; gap:1rem; padding:.75rem 1rem;
+           border-bottom:1px solid var(--line); background:var(--panel); }
+  header h1 { font-size:15px; margin:0; letter-spacing:.02em; }
+  header .meta { color:var(--dim); font-size:12px; }
+  nav { display:flex; gap:.25rem; padding:.5rem 1rem; border-bottom:1px solid var(--line);
+        flex-wrap:wrap; }
+  nav button { background:transparent; border:1px solid transparent; color:var(--dim);
+               padding:.35rem .7rem; border-radius:6px; cursor:pointer; font:inherit; }
+  nav button:hover { color:var(--ink); }
+  nav button.on { background:var(--bg); border-color:var(--line); color:var(--accent); }
+  main { padding:1rem; display:grid; gap:1rem;
+         grid-template-columns:repeat(auto-fit,minmax(340px,1fr)); }
+  .card { background:var(--panel); border:1px solid var(--line); border-radius:8px;
+          padding:.75rem .9rem; overflow:hidden; }
+  .card h2 { margin:0 0 .5rem; font-size:12px; text-transform:uppercase;
+             letter-spacing:.08em; color:var(--dim); font-weight:600; }
+  .kv { display:grid; grid-template-columns:auto 1fr; gap:.15rem .75rem; font-size:13px; }
+  .kv dt { color:var(--dim); } .kv dd { margin:0; font-variant-numeric:tabular-nums; }
+  pre { margin:0; white-space:pre-wrap; word-break:break-word; font-size:12px;
+        color:var(--dim); max-height:22rem; overflow:auto; }
+  .wide { grid-column:1/-1; }
+  .row { display:flex; gap:.5rem; align-items:center; margin-bottom:.5rem; }
+  input, textarea, select { background:var(--bg); border:1px solid var(--line);
+    color:var(--ink); border-radius:6px; padding:.4rem .5rem; font:inherit; flex:1; }
+  textarea { min-height:5rem; resize:vertical; }
+  button.go { background:var(--accent); border:none; color:#0b0d12; font-weight:600;
+              padding:.4rem .9rem; border-radius:6px; cursor:pointer; }
+  .pill { display:inline-block; padding:.05rem .45rem; border-radius:999px;
+          font-size:11px; border:1px solid var(--line); color:var(--dim); }
+  .good { color:var(--good); } .warn { color:var(--warn); } .bad { color:var(--bad); }
+  table { width:100%; border-collapse:collapse; font-size:12px; }
+  th, td { text-align:left; padding:.25rem .4rem; border-bottom:1px solid var(--line); }
+  th { color:var(--dim); font-weight:500; }
+</style>
+</head>
+<body>
+<header>
+  <h1>Amoeba</h1>
+  <span class="meta" id="meta">connecting…</span>
+</header>
+<nav id="nav"></nav>
+<main id="main"></main>
+
+<script>
+const PANELS = ["overview","work","blackboard","memory","artifacts","prompts",
+                "health","provenance","converse","consult id","backchannel"];
+let session = localStorage.getItem("amoeba_operator") || "";
+let current = "overview";
+
+async function rpc(method, params={}) {
+  const r = await fetch("/operator/rpc", {
+    method:"POST",
+    headers:{"Content-Type":"application/json","X-Amoeba-Operator":session},
+    body: JSON.stringify({jsonrpc:"2.0", id:Date.now(), method, params})
+  });
+  const j = await r.json();
+  if (j.error) throw new Error(j.error.message + " (" + j.error.code + ")");
+  return j.result;
+}
+const el = (t,c,x) => { const n=document.createElement(t); if(c)n.className=c;
+                        if(x!==undefined)n.textContent=x; return n; };
+function card(title, wide) {
+  const c = el("div","card"+(wide?" wide":"")); c.appendChild(el("h2",null,title)); return c;
+}
+function kv(obj) {
+  const d = el("dl","kv");
+  for (const [k,v] of Object.entries(obj)) {
+    d.appendChild(el("dt",null,k));
+    d.appendChild(el("dd",null, typeof v==="object"&&v!==null?JSON.stringify(v):String(v)));
+  }
+  return d;
+}
+function dump(o){ const p=el("pre"); p.textContent=JSON.stringify(o,null,2); return p; }
+function table(rows, cols) {
+  const t = el("table"), h = el("tr");
+  cols.forEach(c=>h.appendChild(el("th",null,c)));
+  t.appendChild(h);
+  rows.forEach(r=>{ const tr=el("tr");
+    cols.forEach(c=>tr.appendChild(el("td",null, r[c]===undefined?"":String(r[c]))));
+    t.appendChild(tr); });
+  return t;
+}
+
+const render = {
+  async overview(main) {
+    const o = await rpc("operator_overview");
+    document.getElementById("meta").textContent =
+      "state v" + o.state_version + " · up " + Math.round(o.harness.uptime_seconds) + "s";
+    const a = card("organism");
+    a.appendChild(kv({"state version":o.state_version,
+      "uptime s":Math.round(o.harness.uptime_seconds),
+      "supervision passes":o.harness.supervision_passes,
+      "schema":o.harness.schema_version}));
+    main.appendChild(a);
+    const r = card("roles");
+    for (const [role,f] of Object.entries(o.roles)) {
+      r.appendChild(el("div",null,role+": "+(f.reachable?"reachable":"UNREACHABLE")
+        +" · inc "+f.incarnation+" · ctx "+(f.context_tokens??"?")
+        +"/"+(f.max_context_tokens??"?")));
+    }
+    main.appendChild(r);
+    const s = card("scheduler"); s.appendChild(kv(o.scheduler)); main.appendChild(s);
+    const w = card("work"); w.appendChild(kv(o.work.by_status)); main.appendChild(w);
+    const f = card("failures (5m / 1h)");
+    f.appendChild(kv({"5m":o.failures.last_5m_total,"1h":o.failures.last_1h_total,
+                      "detail":o.failures.last_1h})); main.appendChild(f);
+    const p = card("pending decisions"); p.appendChild(kv(o.pending_decisions));
+    main.appendChild(p);
+    const st = card("storage"); st.appendChild(kv(o.storage)); main.appendChild(st);
+    const res = card("resource versions", true);
+    const rows = Object.entries(o.resources.configured).map(([k,v])=>
+      ({resource:k, version:v.short}));
+    res.appendChild(table(rows,["resource","version"]));
+    res.appendChild(el("div","pill","embodied ego prompt: "
+      +(o.resources.embodied["prompt.ego"].matches_configured?"matches config":"DIFFERS from config")));
+    main.appendChild(res);
+  },
+  async work(main) {
+    const v = await rpc("ego_work_view", {limit:60});
+    const c = card("work items", true);
+    c.appendChild(kv(v.by_status));
+    c.appendChild(table(v.items, ["work_id","work_class","status","origin_actor",
+                                  "board_access","attempt"]));
+    main.appendChild(c);
+  },
+  async blackboard(main) {
+    const b = await rpc("board_read", {reader:"operator", limit:40, record:false});
+    const c = card("blackboard", true);
+    c.appendChild(table(b.posts, ["post_id","post_type","author","body"]));
+    main.appendChild(c);
+  },
+  async memory(main) {
+    const m = await rpc("recall", {limit:40});
+    const c = card("maintained memory", true);
+    c.appendChild(table(m, ["memory_id","kind","confidence","status","claim"]));
+    main.appendChild(c);
+  },
+  async artifacts(main) {
+    const a = await rpc("artifact_list", {limit:50});
+    const c = card("artifacts", true);
+    c.appendChild(table(a, ["artifact_id","status","path","proposed_by"]));
+    const row = el("div","row");
+    const id = el("input"); id.placeholder="artifact_id";
+    const ok = el("button","go","promote"), no = el("button","go","reject");
+    ok.onclick = async()=>{ try { await rpc("artifact_promote",
+      {artifact_id:id.value, decided_by:"operator"}); go(current); }
+      catch(e){ alert(e.message); } };
+    no.onclick = async()=>{ try { await rpc("artifact_reject",
+      {artifact_id:id.value, reason:"operator rejected"}); go(current); }
+      catch(e){ alert(e.message); } };
+    row.append(id, ok, no); c.appendChild(row);
+    main.appendChild(c);
+  },
+  async prompts(main) {
+    const p = await rpc("operator_prompt_library", {limit:30});
+    const c = card("prompt library", true);
+    c.appendChild(dump(p.current));
+    c.appendChild(el("h2",null,"pending candidates"));
+    c.appendChild(table(p.pending, ["proposal_id","role","candidate_sha256","rationale"]));
+    const row = el("div","row");
+    const id = el("input"); id.placeholder="proposal_id";
+    const acc = el("button","go","accept"), rej = el("button","go","reject");
+    acc.onclick = async()=>{ try{ await rpc("operator_prompt_decide",
+      {proposal_id:id.value, decision:"accept"}); go(current);}catch(e){alert(e.message);} };
+    rej.onclick = async()=>{ try{ await rpc("operator_prompt_decide",
+      {proposal_id:id.value, decision:"reject"}); go(current);}catch(e){alert(e.message);} };
+    row.append(id, acc, rej); c.appendChild(row);
+    c.appendChild(el("div","pill", p.note));
+    main.appendChild(c);
+  },
+  async health(main) {
+    const p = await rpc("system_pulse", {max_age_seconds:0});
+    const c = card("id telemetry (system_pulse)", true);
+    c.appendChild(dump(p)); main.appendChild(c);
+  },
+  async provenance(main) {
+    const h = await rpc("history", {limit:60});
+    const c = card("recent events", true);
+    c.appendChild(table(h, ["seq","kind","actor_id"])); main.appendChild(c);
+  },
+  async converse(main) {
+    const c = card("chat with ego", true);
+    const t = el("textarea"); t.placeholder = "message to Ego…";
+    const b = el("button","go","send"); const out = el("pre");
+    b.onclick = async()=>{ out.textContent="thinking…";
+      try { out.textContent = JSON.stringify(
+        await rpc("ego_converse",{message:t.value}), null, 2); }
+      catch(e){ out.textContent = e.message; } };
+    const row = el("div","row"); row.append(b);
+    c.append(t, row, out); main.appendChild(c);
+  },
+  async ["consult id"](main) {
+    const c = card("consult id", true);
+    const t = el("textarea"); t.placeholder = "question for Id…";
+    const b = el("button","go","ask"); const out = el("pre");
+    b.onclick = async()=>{ out.textContent="thinking…";
+      try { out.textContent = JSON.stringify(
+        await rpc("operator_consult_id",{question:t.value}), null, 2); }
+      catch(e){ out.textContent = e.message; } };
+    const row = el("div","row"); row.append(b);
+    c.append(t, row, out,
+      el("div","pill","an input into Id's reasoning; it carries no capability"));
+    main.appendChild(c);
+  },
+  async backchannel(main) {
+    const b = await rpc("operator_backchannel", {limit:40});
+    const c = card("ego ↔ id backchannel", true);
+    c.appendChild(table(b.transcript, ["seq","kind","actor","from_role","to_role"]));
+    const row = el("div","row");
+    const who = el("select");
+    ["ego","id"].forEach(r=>{const o=el("option",null,r); o.value=r; who.appendChild(o);});
+    const m = el("input"); m.placeholder="message…";
+    const go2 = el("button","go","send");
+    go2.onclick = async()=>{ try{ await rpc("operator_backchannel",
+      {to_role:who.value, message:m.value}); go(current);}catch(e){alert(e.message);} };
+    row.append(who, m, go2); c.appendChild(row);
+    c.appendChild(el("div","pill", b.note));
+    main.appendChild(c);
+  },
+};
+
+async function go(panel) {
+  current = panel;
+  [...document.querySelectorAll("nav button")]
+    .forEach(b => b.classList.toggle("on", b.textContent === panel));
+  const main = document.getElementById("main");
+  main.innerHTML = "";
+  try { await (render[panel] || render.overview)(main); }
+  catch (e) {
+    const c = card("error", true);
+    c.appendChild(el("pre",null,e.message));
+    if (String(e.message).includes("-32000")) {
+      const row = el("div","row");
+      const i = el("input"); i.placeholder = "operator session token";
+      const b = el("button","go","use");
+      b.onclick = ()=>{ session = i.value.trim();
+        localStorage.setItem("amoeba_operator", session); go(current); };
+      row.append(i,b); c.appendChild(row);
+      c.appendChild(el("div","pill",
+        "the supervisor prints this token at startup"));
+    }
+    main.appendChild(c);
+  }
+}
+
+const nav = document.getElementById("nav");
+PANELS.forEach(p => { const b = el("button",null,p); b.onclick = ()=>go(p); nav.appendChild(b); });
+go("overview");
+setInterval(()=>{ if (current==="overview") go("overview"); }, 5000);
+</script>
+</body>
+</html>
+"""
