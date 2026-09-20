@@ -52,6 +52,14 @@ Read this before trusting anything below it.
 | External I/O surface (MCP + JSON-RPC API): input in, output out | **Implemented, tested** | `tests/test_external_interfaces.py`; eight io_* verbs, exact-byte input provenance, SSE scoped to the client |
 | MCP demoted from control token to `external_io` scope | **Implemented, tested** | was 23 tools incl. file write/delete, artifact promotion, Id maintenance; now 8 I/O tools |
 | Operator console + governance surface on a separate table | **Implemented, tested** | same listener, different credential and method table; console reaches state only through the Harness |
+| Prompt Library: namespaced, versioned, parent-pinned cognitive profiles | **Implemented, tested** | `tests/test_prompt_library.py`; 37 tests, 9 mutation-verified invariants (I49-I57) |
+| Roots (`ego`, `id`) authorable only by bootstrap | **Implemented, tested** | `create_runtime_version` has no parameter that permits one; the private flag is dropped and a root is refused outright -- both must be removed for the test to pass |
+| Prompt inheritance, composition modes, lineage vectors (`ego.neuocyte.research@3.7.5`) | **Implemented, tested** | nearest-ancestor properties, four composition modes, self-checking references, `explain_profile` attributes every line and setting |
+| Governed change: Id evaluates and proposes, the Operator decides | **Implemented, tested** | approving/selecting/cascading appear in no scope table; an edited prompt file becomes a candidate, never an override |
+| Cascade: none / queue / approve, definitions copied unchanged | **Implemented, tested** | asserted on the local digest, which excludes the parent binding; descends level by level and reports what it skipped |
+| Neuocyte cognitive profiles | **Implemented, tested** | neuocytes previously had no profile at all; they now descend from `ego.neuocyte` / `id.neuocyte`, making specialisations expressible |
+| Incarnation binding: resolved bytes frozen at birth | **Implemented, tested** | digests and lineage stored, not a pointer; a forked neuocyte's injected bytes and inherited prefix are recorded separately |
+| Prompt-library A/B evaluation | **Not implemented** | `experimental_approved` and the experimental selection purpose exist and are honoured, but nothing measures whether a profile performs better -- see [PROMPTLIB §14](PROMPTLIB.md#14-residual-limits) |
 | Cognitive blackboard: posts, threads, relations, receipts | **Implemented, tested** | `tests/test_blackboard.py` |
 | Independent replication vs socially propagated agreement | **Implemented, tested** | every read recorded; `board_corroboration` splits the two |
 | Board-naive neuocytes (`board_access="none"`) | **Implemented, tested** | `test_a_naive_worker_posts_without_having_read_the_board` |

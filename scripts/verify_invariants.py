@@ -634,10 +634,10 @@ MUTATIONS: list[Mutation] = [
     Mutation(
         "I44d", "A resource digest tracks the resource",
         "src/amoeba/resources.py",
-        "    text = prompt_text(role, cfg)\n"
+        "    text = prompt_text(role, cfg, mind)\n"
         "    return ResourceVersion(\n"
         '        kind=f"prompt.{role}", sha256=sha256_hex(text.encode("utf-8")),',
-        "    text = prompt_text(role, cfg)\n"
+        "    text = prompt_text(role, cfg, mind)\n"
         "    return ResourceVersion(\n"
         '        kind=f"prompt.{role}", sha256=sha256_hex(role.encode("utf-8")),',
         ["test_a_resource_version_changes_when_the_resource_does"],
@@ -879,6 +879,101 @@ MUTATIONS: list[Mutation] = [
         "        if False:  # MUTANT: delete destroys",
         ["test_a_delete_keeps_the_content_recoverable"],
         layer="file_delete (the snapshot before the unlink)",
+    ),
+
+    # -- Prompt Library: the versioned cognitive family tree ------------
+    Mutation(
+        "I49", "Roots can only be established by bootstrap",
+        "src/amoeba/promptlib/store.py",
+        '        kwargs.pop("_allow_root", None)\n        return self.create_version(m, **kwargs)',
+        "        return self.create_version(m, **kwargs)  # MUTANT: forwards the flag",
+        ["test_runtime_cannot_author_a_root_even_when_it_asks_for_it"],
+        layer="create_runtime_version (the one path a runtime caller reaches)",
+        also=[("        is_root = len(parts) == 1\n        if is_root and not _allow_root:",
+               "        is_root = False\n        if is_root and not _allow_root:")],
+        note="Defended twice: the runtime wrapper drops the flag, and the "
+             "creation path refuses a root outright. Both must come out.",
+    ),
+    Mutation(
+        "I50", "An edited prompt file is a candidate, never an override",
+        "src/amoeba/promptlib/bootstrap.py",
+        '            state="candidate", _allow_root=True)',
+        '            state="production_approved", _allow_root=True)\n'
+        "        store.select(m, namespace=namespace,  # MUTANT: file overrides\n"
+        '                     version_id=created["version_id"],\n'
+        '                     purpose="production", selected_by=BOOTSTRAP_ACTOR)',
+        ["test_edited_prompt_file_becomes_a_candidate_not_an_override"],
+        layer="bootstrap.ingest (the delta branch)",
+    ),
+    Mutation(
+        "I51", "A child pins an exact parent version",
+        "src/amoeba/promptlib/store.py",
+        '            ns, version = node["parent_namespace"], int(node["parent_version"])',
+        '            ns = node["parent_namespace"]  # MUTANT: follow today\'s selection\n'
+        "            _sel = self.selected(ns)\n"
+        '            version = int(_sel["local_version"]) if _sel else int(node["parent_version"])',
+        ["test_child_pins_an_exact_parent_version"],
+        layer="pinned_chain (where the stored parent binding is walked)",
+    ),
+    Mutation(
+        "I52", "A lineage reference resolves exactly or not at all",
+        "src/amoeba/promptlib/store.py",
+        "        if actual != ref.versions:",
+        "        if False:  # MUTANT: reinterpret against today's ancestry",
+        ["test_a_lineage_reference_resolves_to_one_thing_or_nothing"],
+        layer="PromptStore.resolve_ref (where a requested lineage is verified)",
+    ),
+    Mutation(
+        "I53", "Selection changes the next incarnation, not a living one",
+        "src/amoeba/promptlib/resolver.py",
+        "    def resolve_ref(self, ref: ProfileRef) -> ResolvedProfile:\n"
+        '        """Resolve an explicitly requested historical lineage."""\n'
+        "        return resolve_chain(self.store.resolve_ref(ref))",
+        "    def resolve_ref(self, ref: ProfileRef) -> ResolvedProfile:\n"
+        "        # MUTANT: re-resolve against whatever is selected now\n"
+        "        return self.resolve_selected(ref.namespace)",
+        ["test_selection_does_not_change_a_running_mind",
+         "test_historical_lineage_still_resolves_after_the_tree_moves"],
+        layer="Resolver.resolve_ref (resolution of an explicit lineage)",
+    ),
+    Mutation(
+        "I54", "A cascade moves the pin and copies definitions unchanged",
+        "src/amoeba/promptlib/cascade.py",
+        '            prompt_text=source["prompt_text"],',
+        '            prompt_text=source["prompt_text"] + " MUTANT",',
+        ["test_cascade_copies_local_definitions_unchanged"],
+        layer="cascade.apply_plan (the rebase itself)",
+    ),
+    Mutation(
+        "I55", "Id may propose; approving is a verb Id does not have",
+        "src/amoeba/scopes.py",
+        "ID = ROLE_BASE + ID_SENSES + PROMPT_READ + ID_ONLY",
+        "ID = ROLE_BASE + ID_SENSES + PROMPT_READ + ID_ONLY + (\n"
+        '    "operator_prompt_state", "operator_prompt_select",\n'
+        '    "operator_prompt_cascade")  # MUTANT: Id can approve',
+        ["test_id_may_propose_but_the_approval_verbs_are_absent"],
+        layer="scopes.ID (the method table Id's credential resolves to)",
+    ),
+    Mutation(
+        "I56", "The prompt library is absent from the external surface",
+        "src/amoeba/scopes.py",
+        'EXTERNAL_IO = (\n    "io_capabilities",',
+        'EXTERNAL_IO = (\n    "prompt_tree",  # MUTANT: external clients read cognition\n'
+        '    "io_capabilities",',
+        ["test_the_prompt_library_is_absent_from_the_external_surface"],
+        layer="scopes.EXTERNAL_IO (the adapter's whole method table)",
+        also=[("src/amoeba/io_api.py", "EXTERNAL_VERBS = (",
+               'EXTERNAL_VERBS = (\n    "prompt_tree",')],
+        note="Defended in depth: the adapter allowlist and the credential "
+             "scope are independent lists, so both must be widened.",
+    ),
+    Mutation(
+        "I57", "An incarnation binding freezes bytes, not a pointer",
+        "src/amoeba/prompt_api.py",
+        "                   resolved.prompt_sha256, resolved.config_sha256,",
+        '                   "", resolved.config_sha256,  # MUTANT: no frozen digest',
+        ["test_binding_freezes_resolved_bytes_not_a_pointer"],
+        layer="bind_profile (the row written at birth)",
     ),
 ]
 

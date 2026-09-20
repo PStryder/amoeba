@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+from pathlib import Path
+
 import sqlite3
 
 import pytest
@@ -474,3 +476,39 @@ def test_durability_pragma_is_set_where_durability_is_configured(cfg):
         assert journal.lower() == "wal"
     finally:
         db.close()
+
+
+def test_nothing_writes_to_the_store_outside_the_single_writer():
+    """One writer, or the atomicity claim (I1) is only mostly true.
+
+    A raw `conn.commit()` anywhere outside `StateWriter` can commit another
+    mutation's half-built transaction, because the writer owns that
+    connection. This caught a real instance: the incarnation stamp in
+    `register_agent` did exactly that, and the visible symptom -- bindings
+    with a NULL incarnation -- was the harmless half of the problem.
+
+    Reads through `conn.execute` are fine and deliberately allowed; it is
+    committing and mutating that must go through the writer.
+    """
+    import re
+
+    root = Path(__file__).resolve().parents[1] / "src" / "amoeba"
+    offenders = []
+    for path in root.rglob("*.py"):
+        # store/ is the writer's own home; that is where commits belong.
+        if "store" in path.parts:
+            continue
+        text = path.read_text(encoding="utf-8")
+        for lineno, line in enumerate(text.splitlines(), start=1):
+            stripped = line.strip()
+            if stripped.startswith("#"):
+                continue
+            if ".commit()" in stripped:
+                offenders.append(f"{path.name}:{lineno} {stripped[:70]}")
+            if re.search(r"conn\.execute\(\s*$", stripped):
+                continue
+            m = re.search(r"conn\.execute\(\s*[\"']([A-Z]+)", stripped)
+            if m and m.group(1) not in ("SELECT", "PRAGMA"):
+                offenders.append(f"{path.name}:{lineno} {stripped[:70]}")
+    assert not offenders, "direct store writes outside the writer:\n" + \
+        "\n".join(offenders)

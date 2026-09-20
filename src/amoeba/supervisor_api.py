@@ -127,17 +127,38 @@ def build(sup: "Supervisor") -> dict[str, Any]:
     def register_agent(*, agent_id: str, role: str, pid: int | None = None,
                        session_handle: str | None = None, snapshot_id: str | None = None,
                        model_generation: str | None = None, work_id: str | None = None,
-                       prompt_sha256: str | None = None) -> dict[str, Any]:
+                       prompt_sha256: str | None = None,
+                       profile_binding_id: str | None = None) -> dict[str, Any]:
         incarnation, receipt = mind.work.register_agent(
             agent_id=agent_id, role=role, pid=pid, session_handle=session_handle,
             snapshot_id=snapshot_id, model_generation=model_generation, work_id=work_id,
         )
+        if profile_binding_id:
+            # The profile was bound a moment ago, before this incarnation had
+            # a number. Stamping it here is what lets a transcript be traced
+            # back to the exact prompt bytes that produced it.
+            #
+            # Through the writer, not a raw execute. The writer owns this
+            # connection: a bare `conn.commit()` from outside it can land in
+            # the middle of another mutation's transaction and commit half of
+            # it. The first version of this did exactly that, and the visible
+            # symptom was bindings left with a NULL incarnation -- the stamp
+            # itself being lost was the *harmless* half of the bug.
+            def _stamp(m: Mutation) -> None:
+                m.sql("UPDATE incarnation_profiles SET incarnation = ?,"
+                      " model_generation = COALESCE(NULLIF(model_generation, ''), ?)"
+                      " WHERE binding_id = ? AND actor_id = ?",
+                      (incarnation, model_generation or "", profile_binding_id,
+                       agent_id))
+
+            mind.writer.apply(_stamp, actor=agent_id, bump_version=False)
         if prompt_sha256 and role in ("ego", "id"):
             # What this incarnation is actually running, which is not
             # necessarily what the configuration now says.
             sup.role_prompt_digest[role] = prompt_sha256
         return {"agent_id": agent_id, "incarnation": incarnation,
-                "receipt_id": receipt.receipt_id}
+                "receipt_id": receipt.receipt_id,
+                "profile_binding_id": profile_binding_id}
 
     def heartbeat(*, agent_id: str) -> dict[str, Any]:
         mind.work.heartbeat(agent_id)

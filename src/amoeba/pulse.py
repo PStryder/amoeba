@@ -278,7 +278,7 @@ class PulseCollector:
             storage = {"error": type(exc).__name__}
 
         # -- resources -------------------------------------------------------
-        configured = all_versions(sup.cfg)
+        configured = all_versions(sup.cfg, getattr(sup, "mind", None))
         resources: dict[str, Any] = {"configured": configured, "embodied": {}}
         for role in ("ego", "id"):
             running = sup.role_prompt_digest.get(role)

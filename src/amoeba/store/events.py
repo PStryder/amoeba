@@ -138,6 +138,18 @@ class EventKind:
     PROMPT_DECIDED = "prompt.decided"
     OPERATOR_CONSULTED_ID = "operator.consulted_id"
 
+    # Prompt Library: the versioned cognitive family tree.
+    PROMPT_NODE_INGESTED = "prompt.node_ingested"
+    PROMPT_BOOTSTRAP_MATCHED = "prompt.bootstrap_matched"
+    PROMPT_BOOTSTRAP_BASELINE = "prompt.bootstrap_baseline"
+    PROMPT_BOOTSTRAP_DELTA = "prompt.bootstrap_delta"
+    PROMPT_EVALUATED = "prompt.evaluated"
+    PROMPT_SELECTED = "prompt.selected"
+    PROMPT_CASCADE_PLANNED = "prompt.cascade_planned"
+    PROMPT_CASCADED = "prompt.cascaded"
+    PROMPT_REJECTED = "prompt.rejected"
+    INCARNATION_BOUND = "incarnation.bound"
+
     # arbiter / side channel
     RESOURCE_DECISION = "resource.decision"
     SIDE_CHANNEL_SIGNAL = "side_channel.signal"

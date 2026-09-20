@@ -52,25 +52,56 @@ def _digest(obj: Any) -> str:
                                  default=str).encode("utf-8"))
 
 
-def prompt_text(role: str, cfg: Any) -> str:
+def prompt_text(role: str, cfg: Any, mind: Any = None) -> str:
     """Exactly what a role primes its context with.
 
     Mirrors ``RoleProcess._system_text`` deliberately: a digest computed from a
     different composition would be a version number for something nobody runs.
+    That mirroring is why this reads the Prompt Library when one is available.
+    A role now takes its base text from the selected profile, so hashing the
+    module constant would report a version of text the organism has not used
+    since bootstrap.
+
+    The constant remains the fallback for exactly the case where a role also
+    falls back to it: no library, or nothing selected for that namespace.
     """
     from .roles import EGO_SYSTEM, ID_SYSTEM
 
     base = EGO_SYSTEM if role == "ego" else ID_SYSTEM
+    source = "builtin"
+    if mind is not None:
+        try:
+            from .promptlib.resolver import Resolver
+            from .promptlib.store import PromptStore
+
+            resolved = Resolver(PromptStore(mind)).resolve_selected(role)
+            base, source = resolved.prompt_text, str(resolved.ref)
+        except Exception:                      # no library, or nothing selected
+            pass
     extra = (cfg.ego if role == "ego" else cfg.id).system_prompt
     return base + (f"\n{extra}" if extra else "")
 
 
-def prompt_version(role: str, cfg: Any) -> ResourceVersion:
-    text = prompt_text(role, cfg)
+def prompt_source(role: str, cfg: Any, mind: Any = None) -> str:
+    """Where the base text came from: a profile reference, or ``builtin``."""
+    if mind is None:
+        return "builtin"
+    try:
+        from .promptlib.resolver import Resolver
+        from .promptlib.store import PromptStore
+
+        return str(Resolver(PromptStore(mind)).resolve_selected(role).ref)
+    except Exception:
+        return "builtin"
+
+
+def prompt_version(role: str, cfg: Any, mind: Any = None) -> ResourceVersion:
+    text = prompt_text(role, cfg, mind)
     return ResourceVersion(
         kind=f"prompt.{role}", sha256=sha256_hex(text.encode("utf-8")),
         detail={"chars": len(text), "has_config_extra": bool(
-            (cfg.ego if role == "ego" else cfg.id).system_prompt)})
+            (cfg.ego if role == "ego" else cfg.id).system_prompt),
+            "source": prompt_source(role, cfg, mind)})
 
 
 def tool_surface_version(*, sandbox_allowed: bool = True) -> ResourceVersion:
@@ -139,13 +170,13 @@ def schema_version() -> ResourceVersion:
                            detail={"schema_version": SCHEMA_VERSION})
 
 
-def all_versions(cfg: Any) -> dict[str, dict[str, Any]]:
+def all_versions(cfg: Any, mind: Any = None) -> dict[str, dict[str, Any]]:
     """Every versioned resource, as configured right now.
 
     Cheap: string hashing and one registry construction with no handler calls.
     """
     out: dict[str, dict[str, Any]] = {}
-    for rv in (prompt_version("ego", cfg), prompt_version("id", cfg),
+    for rv in (prompt_version("ego", cfg, mind), prompt_version("id", cfg, mind),
                tool_surface_version(), security_policy_version(cfg),
                filespace_version(cfg), schema_version()):
         out[rv.kind] = rv.to_dict()

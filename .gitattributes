@@ -3,3 +3,9 @@
 
 # Benchmark output is raw measured evidence cited by the docs; keep it verbatim.
 bench/out/*.json -text diff
+
+# A prompt file's bytes are its identity: the local digest of a profile version
+# is computed over them, and a checkout that flipped line endings would make an
+# unchanged file look like an edit. Pin them, for the same reason bench output
+# is pinned -- these are evidence, not source formatting.
+src/amoeba/promptlib/prompts/*.md text eol=lf

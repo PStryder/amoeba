@@ -459,6 +459,101 @@ CREATE TABLE IF NOT EXISTS interaction_results (
 CREATE INDEX IF NOT EXISTS ix_interaction_result
   ON interaction_results(interaction_id);
 
+-- The Prompt Library: Amoeba's versioned cognitive family tree.
+--
+-- Every row is an immutable node version that pins the EXACT parent version it
+-- inherits from. That pinning is the architecture: promoting a new parent
+-- cannot silently change what an existing child means, because the child names
+-- the version it was built against rather than "whatever the parent is now".
+--
+-- A new local version is created when local properties change OR when the node
+-- is rebased onto a different parent version. Two consecutive versions may
+-- therefore have identical local definitions and still be legitimately
+-- different profiles, because their inherited environment differs.
+CREATE TABLE IF NOT EXISTS prompt_versions (
+  version_id       TEXT PRIMARY KEY,
+  namespace        TEXT NOT NULL,
+  local_version    INTEGER NOT NULL,
+  parent_namespace TEXT,                  -- NULL only for a root
+  parent_version   INTEGER,               -- the pinned parent local version
+  prompt_mode      TEXT NOT NULL,         -- inherit|append|prepend|replace
+  prompt_text      TEXT NOT NULL DEFAULT '',
+  model_vars       TEXT NOT NULL DEFAULT '{}',   -- canonical JSON, local only
+  local_sha256     TEXT NOT NULL,         -- digest of the LOCAL definition
+  state            TEXT NOT NULL,         -- see promptlib.store.STATES
+  origin           TEXT NOT NULL,         -- bootstrap|id|operator|cascade
+  created_by       TEXT NOT NULL,
+  created_at       REAL NOT NULL,
+  rationale        TEXT,
+  state_version    INTEGER NOT NULL,
+  UNIQUE(namespace, local_version)
+);
+CREATE INDEX IF NOT EXISTS ix_prompt_ns ON prompt_versions(namespace, local_version);
+CREATE INDEX IF NOT EXISTS ix_prompt_state ON prompt_versions(state, created_at);
+
+-- Which version is currently selected for a purpose. Selection is separate
+-- from approval: a version can be approved and not selected, and history keeps
+-- every previously selected version usable.
+CREATE TABLE IF NOT EXISTS prompt_selections (
+  namespace     TEXT NOT NULL,
+  purpose       TEXT NOT NULL,            -- production|experimental
+  version_id    TEXT NOT NULL,
+  selected_by   TEXT NOT NULL,
+  selected_at   REAL NOT NULL,
+  state_version INTEGER NOT NULL,
+  PRIMARY KEY (namespace, purpose)
+);
+
+-- Id's evaluation of a candidate. Advisory: Id evaluates, the Operator decides.
+CREATE TABLE IF NOT EXISTS prompt_evaluations (
+  evaluation_id TEXT PRIMARY KEY,
+  version_id    TEXT NOT NULL,
+  evaluator     TEXT NOT NULL,
+  verdict       TEXT NOT NULL,            -- endorse|concern|oppose
+  notes         TEXT,
+  evidence      TEXT,
+  created_at    REAL NOT NULL,
+  state_version INTEGER NOT NULL
+);
+CREATE INDEX IF NOT EXISTS ix_prompt_eval ON prompt_evaluations(version_id);
+
+-- The Operator's decision, recorded like any other consequential act.
+CREATE TABLE IF NOT EXISTS prompt_decisions (
+  decision_id   TEXT PRIMARY KEY,
+  version_id    TEXT NOT NULL,
+  decision      TEXT NOT NULL,            -- production|experimental|rejected|retired
+  decided_by    TEXT NOT NULL,
+  rationale     TEXT,
+  propagation   TEXT,                     -- cascade_approve|cascade_queue|none
+  created_at    REAL NOT NULL,
+  state_version INTEGER NOT NULL
+);
+CREATE INDEX IF NOT EXISTS ix_prompt_decision ON prompt_decisions(version_id);
+
+-- What a cognition-producing incarnation actually received, frozen at birth.
+-- Historical cognition must never depend on re-resolving against a future
+-- library, so the resolved text and digests are stored rather than recomputed.
+CREATE TABLE IF NOT EXISTS incarnation_profiles (
+  binding_id        TEXT PRIMARY KEY,
+  actor_id          TEXT NOT NULL,
+  actor_kind        TEXT NOT NULL,        -- ego|id|neuocyte
+  incarnation       INTEGER,
+  work_id           TEXT,
+  namespace         TEXT NOT NULL,
+  profile_ref       TEXT NOT NULL,        -- ego.neuocyte.research@4.8.5
+  lineage           TEXT NOT NULL,        -- canonical JSON, leaf->root
+  prompt_sha256     TEXT NOT NULL,
+  config_sha256     TEXT NOT NULL,
+  profile_sha256    TEXT NOT NULL,
+  model_generation  TEXT,
+  effective_settings TEXT NOT NULL,       -- after Harness constraints
+  harness_constraints TEXT NOT NULL DEFAULT '{}',
+  created_at        REAL NOT NULL,
+  state_version     INTEGER NOT NULL
+);
+CREATE INDEX IF NOT EXISTS ix_incarnation_actor
+  ON incarnation_profiles(actor_id, created_at);
+
 CREATE TABLE IF NOT EXISTS conversations (
   conversation_id TEXT PRIMARY KEY,
   created_at      REAL NOT NULL,

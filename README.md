@@ -621,6 +621,7 @@ The architecture deliberately attempts to establish these invariants before addi
 | [Benchmarks](docs/BENCHMARKS.md) | concurrency curve, prefix-sharing evidence, raw data in `bench/out/` |
 | [Blackboard](docs/BLACKBOARD.md) | how neuocytes collaborate, and how independent replication is told from echo |
 | [Sandbox](docs/SANDBOX.md) | OS-enforced scratch compute, and exactly what it can still reach |
+| [Prompt library](docs/PROMPTLIB.md) | the versioned cognitive family tree: namespaces, pinning, inheritance, governance, cascade |
 | [Homeostasis](docs/HOMEOSTASIS.md) | keeping contexts healthy; Id requests, the Harness performs |
 | [MCP contract](docs/MCP_CONTRACT.md) | the cognitive verbs, and what of MCP is *not* implemented |
 | [Open questions](docs/OPEN_QUESTIONS.md) | unresolved design questions and known failure modes |

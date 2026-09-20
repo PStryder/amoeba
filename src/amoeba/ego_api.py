@@ -155,7 +155,7 @@ def build(sup: "Supervisor") -> dict[str, Any]:  # noqa: C901
             "model_generation": sup.pulse.capture(
                 max_age_seconds=30.0).get("model_generation"),
             "prompt.ego": {
-                "configured": prompt_version("ego", sup.cfg).to_dict(),
+                "configured": prompt_version("ego", sup.cfg, mind).to_dict(),
                 "embodied_sha256": sup.role_prompt_digest.get("ego"),
             },
             "tools.neuocyte": tool_surface_version().to_dict(),

@@ -281,6 +281,7 @@ class Supervisor:
                 self.log.info("sandbox isolation: windows_appcontainer")
         recovery = self.mind.recover()
         self.log.info("recovery: %s", recovery["summary"])
+        self._ingest_prompt_library()
 
         self._server = RpcServer(
             self.cfg.supervisor_host, self.cfg.supervisor_port, token=self.token,
@@ -313,6 +314,39 @@ class Supervisor:
             "state_dir": str(self.cfg.state_dir), "started_at": self.started_at,
             "run_id": self.mind.run_id,
         }), encoding="utf-8")
+
+    def _ingest_prompt_library(self) -> None:
+        """Compare the shipped prompt files against the library, once, at boot.
+
+        A fresh state directory gets its baseline here -- roots have no other
+        origin. An edited file becomes a *candidate*, so restarting with a
+        changed prompt never silently changes how the organism thinks; the
+        selected version keeps running until somebody approves the new one.
+        """
+        from .promptlib import bootstrap as prompt_bootstrap
+        from .promptlib.store import PromptStore
+
+        store = PromptStore(self.mind)
+        try:
+            _, out = self.mind.writer.apply(
+                lambda m: prompt_bootstrap.ingest(m, store), actor="bootstrap")
+        except Exception:
+            # A malformed prompt file must not take the organism down, but it
+            # must not pass unnoticed either: whatever is already selected
+            # keeps running and the failure is on the record.
+            self.log.exception("prompt library bootstrap failed; running on "
+                               "the previously selected profiles")
+            return
+        counts = out["counts"]
+        self.log.info("prompt library: %s baseline, %s matched, %s present, "
+                      "%s new candidate(s)", counts["baseline"],
+                      counts["matched"], counts["present"], counts["delta"])
+        if counts["delta"]:
+            self.log.warning(
+                "%s prompt file(s) differ from the selected versions and are "
+                "waiting for approval: %s", counts["delta"],
+                [r["namespace"] for r in out["ingested"]
+                 if r["outcome"] == "delta"])
 
     def stop(self) -> None:
         self._stop.set()
@@ -705,13 +739,14 @@ class Supervisor:
         # up per call. Rebuilding would make every lookup a fresh closure set.
         if self._method_cache is None:
             from . import (ego_api, harness_api, id_api, io_api,
-                           operator_api, supervisor_api)
+                           operator_api, prompt_api, supervisor_api)
 
             methods = supervisor_api.build(self)
             methods.update(harness_api.build(self))
             methods.update(id_api.build(self))
             methods.update(ego_api.build(self))
             methods.update(io_api.build(self))
+            methods.update(prompt_api.build(self))
             methods.update(operator_api.build(self))
             methods["system_pulse"] = self._system_pulse
             self._method_cache = methods

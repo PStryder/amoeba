@@ -589,6 +589,109 @@ touches no filesystem. Running on loopback grants nothing.
 `test_the_dashboard_never_touches_the_database_or_filesystem`,
 `test_accepting_a_prompt_does_not_silently_change_cognition`
 
+### The prompt library
+
+Full reference: `PROMPTLIB.md` (namespaces and lineage vectors, inheritance and prompt composition, the bootstrap comparison, the governance state machine, the three cascade modes, and incarnation binding).
+
+**I49. Roots are established only by bootstrap.** `ego` and `id` come from the
+files shipped in `promptlib/prompts`, which are reviewable in the repository.
+There is no runtime expression that creates a top-level root or a new version
+of one: `create_runtime_version` has no parameter that would permit it, so
+`godmode`, `operator` and `supervisor` are not requests that get refused — they
+are sentences the runtime cannot say. This does not depend on a model
+instruction or a caller-supplied boolean.
+
+Currently over-broad, and known to be: the `is_root` test in `create_version`
+also refuses a new *version* of an existing root, so Ego and Id doctrine can
+only change through a bootstrap file edit rather than a governed proposal. The
+prohibition that matters — no new top-level namespace — is enforced separately
+by `validate_namespace`, so it survives relaxing this one.
+→ `test_runtime_cannot_author_a_root_even_when_it_asks_for_it`,
+`test_runtime_cannot_invent_a_new_root`
+
+**I50. An edited prompt file is a candidate, never an override.** A shipped
+file is authoritative exactly once, when its namespace does not yet exist.
+After that the database is authoritative and the file is a proposal: editing a
+prompt and restarting creates a governed candidate and changes nothing that is
+running. "Restart and the organism thinks differently" is a change nobody
+chose to make.
+→ `test_edited_prompt_file_becomes_a_candidate_not_an_override`,
+`test_bootstrap_establishes_roots_and_is_idempotent`
+
+**I51. A child pins an exact parent version.** Approving a new `ego` changes
+no existing descendant. Ancestry is resolved by walking the *stored* parent
+bindings, never by consulting what is selected now — which is the whole reason
+the binding is stored.
+→ `test_child_pins_an_exact_parent_version`,
+`test_pinning_a_nonexistent_parent_version_is_refused`
+
+**I52. A lineage reference resolves exactly, or not at all.**
+`ego.neuocyte.research@3.7.5` means that ancestry. Component count must equal
+namespace depth, so an incomplete reference is malformed rather than resolved
+against today's parents; and a complete one that does not match the real
+ancestry is refused, naming what the actual lineage is. Guessing which level
+was omitted is how an explicit request for a historical profile quietly
+becomes a current one.
+→ `test_a_lineage_reference_resolves_to_one_thing_or_nothing`,
+`test_lineage_reference_component_count_must_match_depth`,
+`test_historical_lineage_still_resolves_after_the_tree_moves`
+
+**I53. Selection changes what is born next, not what is alive.** Approving and
+selecting a version affects new incarnations only. A running Ego, Id or
+neuocyte keeps the profile it was bound to, because its context was primed
+with those bytes; pretending otherwise would make the incarnation binding a
+lie. Resolution of an explicit lineage reads no selection table at all.
+→ `test_selection_does_not_change_a_running_mind`,
+`test_resolution_is_independent_of_the_selection_table`
+
+**I54. A cascade moves the pin and copies definitions unchanged.** Propagating
+a parent version rebases each descendant onto it while its local definition is
+copied byte-for-byte — asserted on the local digest, which deliberately
+excludes the parent binding. Cascade descends level by level, and reports what
+it skipped, so an empty cascade never looks like a complete one.
+→ `test_cascade_copies_local_definitions_unchanged`,
+`test_cascade_descends_level_by_level`,
+`test_cascade_queue_creates_candidates_without_selecting`,
+`test_cascade_reports_what_it_skipped`, `test_cascade_none_moves_nothing`
+
+**I55. Id evaluates and proposes; the Operator decides.** Id can read the
+whole family tree, compare lineages, record a verdict and author a candidate.
+Approving, selecting and cascading appear in **no** scope table, so there is
+no secret Id could present that resolves to them. An endorsement that promoted
+would make Id the approver by a longer route.
+→ `test_id_may_propose_but_the_approval_verbs_are_absent`,
+`test_only_an_approved_version_may_be_selected`,
+`test_state_machine_refuses_illegal_jumps`
+
+**I56. The prompt library is absent from the external surface.** No MCP or API
+client can read the organism's cognitive configuration, let alone propose to
+it. Defended in depth: the adapter allowlist and the credential scope are
+independent lists, and both would have to be widened.
+→ `test_the_prompt_library_is_absent_from_the_external_surface`,
+`test_neuocytes_cannot_read_or_govern_the_library`,
+`test_ego_cannot_govern_its_own_prompt`
+
+**I57. An incarnation binding freezes bytes, not a pointer.** At birth, a mind
+records the resolved prompt digest, the config digest and the full lineage
+vector. Cognition that happened stays explicable from what the organism held
+at the time; re-resolving against a library that has since moved would quietly
+rewrite history. Where a neuocyte inherits its ancestors' text physically from
+a forked context, the binding records the injected bytes and the inherited
+prefix **separately**, rather than claiming the whole profile was handed over.
+→ `test_binding_freezes_resolved_bytes_not_a_pointer`,
+`test_role_system_text_prefers_the_library_over_the_constant`,
+`test_suffix_after_reproduces_the_resolved_profile`
+
+**Model variables are only the ones the backend applies.** Six:
+`temperature`, `top_p`, `top_k`, `max_output_tokens`, `seed`,
+`stop_sequences`. An unknown name is refused rather than dropped — a silently
+discarded `repetition_penalty` would be a profile claiming to have shaped
+cognition that it did not. Harness constraints narrow a profile and never
+widen it, and are not a parameter any caller can supply.
+→ `test_unsupported_model_variables_are_refused_not_dropped`,
+`test_every_model_variable_reaches_the_backend`,
+`test_harness_constraints_narrow_and_never_widen`
+
 **I41. A receipt's digest is ground truth, verifiable from inside.** If a
 receipt claims a neuocyte received bytes with digest D, then hashing the bytes
 actually available to that neuocyte must produce D. This holds for attachments,
@@ -637,6 +740,11 @@ on disk (`blobs/ab/cd/<sha256>.blob`).
 | `conclusion_evidence` | what a conclusion rests on | `event_id`, `blob_sha256`, `memory_id` |
 | `work_items` | leased queue | `work_id`, `objective`, `work_class`, `origin_actor`, `snapshot_id`, `model_generation`, `pinned_state_ver`, `status`, `lease_owner`, `lease_expires`, `attempt`, `fencing_token`, `budget_tokens`, `deadline`, `maintenance_depth` |
 | `operations` | externally visible units | `operation_id`, `kind`, `actor`, `status`, `idempotency_key`, `request_blob`, `result_blob`, `limitations` |
+| `prompt_versions` | immutable nodes of the cognitive family tree | `version_id`, `namespace`, `local_version`, `parent_namespace`, `parent_version` (the pin), `prompt_mode`, `prompt_text`, `model_vars`, `local_sha256`, `state`, `origin` |
+| `prompt_selections` | which approved version new incarnations get | `namespace`, `purpose`, `version_id`, `selected_by` |
+| `prompt_evaluations` | Id's advisory verdicts | `evaluation_id`, `version_id`, `evaluator`, `verdict`, `evidence` |
+| `prompt_decisions` | the Operator's recorded governance | `decision_id`, `version_id`, `decision`, `decided_by`, `rationale` |
+| `incarnation_profiles` | what a mind was actually born with | `binding_id`, `actor_id`, `actor_kind`, `incarnation`, `profile_ref`, `lineage`, `prompt_sha256`, `config_sha256`, `effective_settings` |
 | `agents` | identity and incarnation | `agent_id`, `role`, `incarnation`, `status`, `pid`, `session_handle`, `snapshot_id`, `model_generation` |
 | `snapshots` | published Ego prefixes | `snapshot_id`, `version`, `actor`, `model_generation`, `token_count`, `tokens_blob`, `text_blob`, `kv_mode`, `backend_handle`, `refcount`, `status` |
 | `snapshot_refs` | reference counting | `ref_id`, `snapshot_id`, `holder`, `acquired_at`, `released_at` |

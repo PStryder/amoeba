@@ -53,8 +53,13 @@ OPERATOR_VERBS = (
     # artifacts
     "artifact_list", "artifact_promote", "artifact_reject",
     "ego_artifact_evidence",
-    # prompts
+    # prompts: the legacy proposal log, plus the versioned family tree
     "operator_prompt_library", "operator_prompt_decide",
+    "prompt_tree", "prompt_versions", "prompt_resolve", "prompt_diff",
+    "explain_profile", "prompt_incarnations",
+    "operator_prompt_author", "operator_prompt_state", "operator_prompt_select",
+    "operator_prompt_cascade_plan", "operator_prompt_cascade",
+    "operator_prompt_bootstrap_report",
     # filespace and security posture
     "file_roots", "file_list", "file_read", "file_versions",
     "sandbox_capabilities", "sandbox_list",
@@ -134,7 +139,7 @@ def build(sup: "Supervisor") -> dict[str, Any]:
             if role and r != role:
                 continue
             current[r] = {
-                "configured": prompt_version(r, sup.cfg).to_dict(),
+                "configured": prompt_version(r, sup.cfg, mind).to_dict(),
                 "embodied_sha256": sup.role_prompt_digest.get(r),
             }
         return {

@@ -519,3 +519,49 @@ def test_supervision_keeps_making_passes(stack: LiveStack):
     second = stack.call("health")["supervision"]
     assert second["passes"] > first["passes"], "supervision stopped making passes"
     assert second["seconds_since_last_pass"] < 10
+
+
+def test_the_real_roles_are_born_from_the_prompt_library(stack: LiveStack):
+    """Ego and Id take their prompt from the library, not the module constant.
+
+    The fallback path is a warning log, which is exactly the kind of thing that
+    passes unnoticed: the organism would keep working while the whole library
+    sat unused. So this asserts the binding exists, and that the digest the
+    supervisor reports as *configured* equals what the running role actually
+    embodied -- the two agreeing is the point of routing `prompt_version`
+    through the library at all.
+    """
+    tree = stack.call("prompt_tree")
+    selected = {n["namespace"]: n["selected"] for n in tree["nodes"]}
+    assert selected["ego"]["profile_ref"] == "ego@1"
+    assert selected["ego.neuocyte"]["profile_ref"] == "ego.neuocyte@1.1"
+
+    bindings = stack.call("prompt_incarnations")["bindings"]
+    by_actor = {b["actor_id"]: b for b in bindings}
+    assert "ego" in by_actor and "id" in by_actor, "a role fell back"
+
+    lib = stack.call("operator_prompt_library")
+    for role in ("ego", "id"):
+        configured = lib["current"][role]["configured"]
+        assert configured["detail"]["source"] == f"{role}@1"
+        assert configured["sha256"] == lib["current"][role]["embodied_sha256"]
+        assert by_actor[role]["prompt_sha256"] == configured["sha256"]
+
+
+def test_an_incarnation_binding_carries_its_incarnation(stack: LiveStack):
+    """The binding is stamped with the incarnation it belongs to.
+
+    A binding with a NULL incarnation cannot be tied to a transcript, which
+    makes it decoration. It is asserted here, against the live stack, because
+    the stamp happens in `register_agent` while the single writer is busy with
+    the rest of startup -- the first implementation used a raw `conn.execute`
+    plus `conn.commit()` on the writer's own connection, and the stamp was
+    silently lost. A bare commit from outside the writer can also land inside
+    another mutation's transaction, so this pins the *write path*, not just
+    the value.
+    """
+    bindings = stack.call("prompt_incarnations")["bindings"]
+    assert bindings
+    for b in bindings:
+        assert b["incarnation"] is not None, b
+        assert b["incarnation"] >= 1

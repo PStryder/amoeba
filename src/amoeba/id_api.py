@@ -262,13 +262,18 @@ def build(sup: "Supervisor") -> dict[str, Any]:  # noqa: C901
                           evidence: Sequence[dict[str, Any]] = (),
                           pulse_id: str | None = None,
                           operation_id: str | None = None) -> dict[str, Any]:
-        """Propose a new system prompt for a role.
+        """Suggest replacement text for a **root** profile (``ego`` or ``id``).
 
-        A proposal, emphatically not an installation: changing a prompt changes
-        how the organism thinks, which is the last thing that should happen
-        because one component concluded it should. The candidate text is
-        content-addressed so the exact wording proposed is recoverable, and the
-        decision belongs to the operator.
+        Roots are bootstrap-only: they come from the files shipped in
+        ``promptlib/prompts``, which are reviewable in the repository, and
+        there is no API path that creates a root version. So this verb cannot
+        and does not change the library. It records Id's suggested wording,
+        content-addressed, where the Operator will find it; adopting it means
+        editing the shipped file, which makes the change reviewable before it
+        ever runs.
+
+        For anything below a root -- ``ego.neuocyte``, a new specialisation --
+        use ``id_propose_profile``, which creates a real governed candidate.
         """
         if role not in ("ego", "id"):
             raise InvalidInput("prompt proposals target ego or id", role=role)
@@ -278,7 +283,7 @@ def build(sup: "Supervisor") -> dict[str, Any]:  # noqa: C901
         prov = _provenance(pulse_id, f"prompt proposal for {role}")
         from .resources import prompt_version
 
-        current = prompt_version(role, sup.cfg)
+        current = prompt_version(role, sup.cfg, mind)
 
         def body(m: Mutation) -> None:
             m.register_blob(digest, len(text.encode("utf-8")), "text/plain",
@@ -290,8 +295,11 @@ def build(sup: "Supervisor") -> dict[str, Any]:  # noqa: C901
                 "rationale": _text(rationale, "rationale", limit=4000),
                 "evidence": list(evidence)[:20],
                 "proposed_by": "id", "pulse_id": prov.get("pulse_id"),
-                "note": ("a candidate only; nothing about the running or "
-                         "configured prompt has changed")})
+                "note": ("a suggestion about a bootstrap-only root; it is "
+                         "not a library candidate and cannot be approved "
+                         "through the API. Adopting it means editing the "
+                         "shipped prompt file, which then arrives as a "
+                         "governed candidate at the next start")})
 
         receipt, _ = mind.writer.apply(body, actor="id", operation_id=operation_id)
         return {"proposal_id": proposal_id, "role": role,

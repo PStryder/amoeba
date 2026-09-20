@@ -76,6 +76,14 @@ class RoleProcess:
         self.model_generation = ""
         self.capabilities: dict[str, Any] = {}
         self.incarnation = 0
+        # Filled at birth by _bind_profile. `profile_prompt` stays None only
+        # if the library had nothing selected, which is the one case the
+        # built-in constant is used.
+        self.profile: dict[str, Any] | None = None
+        self.profile_binding_id: str | None = None
+        self.profile_ref: str | None = None
+        self.profile_prompt: str | None = None
+        self.profile_settings: dict[str, Any] = {}
         self.started_at = time.time()
         self.turns = 0
         self._stop = threading.Event()
@@ -91,23 +99,55 @@ class RoleProcess:
         self.model_generation = self.capabilities.get("model_generation", "")
         sess = self.inf.call("open_session", role=self.role)
         self.session_id = sess["session_id"]
-        # Report the digest of the prompt this incarnation is about to prime
-        # its context with, so the Harness can tell configured from embodied.
+        # Bind the profile *before* registering, because the digest reported
+        # at registration has to be the digest of the text this incarnation is
+        # actually about to prime its context with.
+        self._bind_profile()
         prompt_sha = sha256_hex(self._system_text().encode("utf-8"))
         reg = self.sup.call("register_agent", agent_id=self.role, role=self.role,
                             pid=os.getpid(), session_handle=self.session_id,
                             model_generation=self.model_generation,
-                            prompt_sha256=prompt_sha)
+                            prompt_sha256=prompt_sha,
+                            profile_binding_id=self.profile_binding_id)
         self.incarnation = reg["incarnation"]
+        if self.profile_ref:
+            self.log.info("%s born with profile %s (prompt %s)", self.role,
+                          self.profile_ref, prompt_sha[:12])
         self.log.info("%s incarnation %s on session %s (backend=%s simulated=%s)",
                       self.role, self.incarnation, self.session_id,
                       self.capabilities.get("backend_kind"),
                       self.capabilities.get("is_simulated"))
         self._prime_context()
 
+    def _bind_profile(self) -> None:
+        """Take this incarnation's prompt and sampling settings from the library.
+
+        The module constant is a fallback for a mind whose library has no
+        selected version -- during a partial bootstrap, say. It is not the
+        source of truth, and when the library answers, its text wins outright:
+        two places deciding what Ego says is how the digest in a receipt stops
+        matching the words in a transcript.
+        """
+        try:
+            bound = self.sup.call("bind_profile", namespace=self.role,
+                                  actor_id=self.role, actor_kind=self.role,
+                                  model_generation=self.model_generation)
+        except Exception as exc:
+            self.log.warning("no prompt library profile for %s (%s); running "
+                             "on the built-in baseline", self.role, exc)
+            return
+        self.profile = bound
+        self.profile_binding_id = bound["binding_id"]
+        self.profile_ref = bound["profile_ref"]
+        self.profile_prompt = bound["prompt_text"]
+        self.profile_settings = dict(bound.get("backend_arguments") or {})
+
     def _system_text(self) -> str:
+        """The exact bytes this incarnation primes its context with."""
+        base = (self.profile_prompt if self.profile_prompt is not None
+                else self.system_prompt)
         extra = self.role_cfg.system_prompt
-        return self.system_prompt + (f"\n{extra}" if extra else "")
+        return base + (f"\n{extra}" if extra else "")
 
     def _prime_context(self) -> None:
         """Seed the private context with the role's system prompt only.
@@ -124,9 +164,30 @@ class RoleProcess:
                       parse_special=True)
 
     # ------------------------------------------------------------------
-    def _infer(self, user_text: str, *, max_tokens: int = 384,
-               temperature: float = 0.0, seed: int = 1234) -> dict[str, Any]:
-        """Append one user turn to the private context and generate a reply."""
+    def _infer(self, user_text: str, *, max_tokens: int | None = None,
+               temperature: float | None = None, seed: int | None = None
+               ) -> dict[str, Any]:
+        """Append one user turn to the private context and generate a reply.
+
+        Sampling comes from the bound profile. A caller's explicit argument
+        still wins, because some call sites legitimately need a specific
+        budget for a specific question -- but a profile that resolved a
+        `temperature` nobody passed to the backend would be decorative, and
+        the binding would record a setting that never shaped anything.
+
+        `max_tokens` is the one the caller narrows rather than replaces: the
+        profile states a ceiling, so a call site asking for more than the
+        profile allows does not get it.
+        """
+        settings = self.profile_settings
+        if max_tokens is None:
+            max_tokens = int(settings.get("max_tokens", 384))
+        elif "max_tokens" in settings:
+            max_tokens = min(int(max_tokens), int(settings["max_tokens"]))
+        if temperature is None:
+            temperature = float(settings.get("temperature", 0.0))
+        if seed is None:
+            seed = int(settings.get("seed", 1234))
         rendered = self.inf.call(
             "apply_chat_template",
             messages=[{"role": "user", "content": user_text}],
@@ -135,7 +196,8 @@ class RoleProcess:
         self.inf.call("ingest_text", session_id=self.session_id, text=rendered,
                       parse_special=True)
         out = self.inf.call("generate", session_id=self.session_id,
-                            max_tokens=max_tokens, temperature=temperature, seed=seed)
+                            max_tokens=max_tokens, temperature=temperature,
+                            seed=seed)
         self.turns += 1
         return out
 
@@ -281,12 +343,19 @@ class EgoProcess(RoleProcess):
 
     # -- cognition ------------------------------------------------------
     def converse(self, *, message: str, conversation_id: str | None = None,
-                 operation_id: str | None = None, max_tokens: int = 384,
-                 temperature: float = 0.0, recall_limit: int = 5) -> dict[str, Any]:
+                 operation_id: str | None = None, max_tokens: int | None = None,
+                 temperature: float | None = None, recall_limit: int = 5
+                 ) -> dict[str, Any]:
         """One conversational turn, grounded in maintained memory.
 
         Recall searches *memory*, not raw history: contradictory raw events do
         not silently become active beliefs.
+
+        `max_tokens` and `temperature` default to **None**, not to a number:
+        a concrete default here would be passed down and would override the
+        bound profile on Ego's main path, which is precisely the case the
+        profile exists to govern. A caller that genuinely wants a specific
+        value still gets it.
         """
         recalled = self.sup.call("recall", query=message, limit=recall_limit)
         memo = "\n".join(

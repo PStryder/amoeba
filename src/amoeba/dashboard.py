@@ -179,21 +179,106 @@ const render = {
     main.appendChild(c);
   },
   async prompts(main) {
-    const p = await rpc("operator_prompt_library", {limit:30});
-    const c = card("prompt library", true);
-    c.appendChild(dump(p.current));
+    // The family tree: what is selected, what is pending, and the lineage
+    // every node resolves to. Every action here is a call into the Harness;
+    // this panel decides nothing.
+    const t = await rpc("prompt_tree", {});
+    const c = card("prompt library \u2014 cognitive family tree", true);
+    c.appendChild(table(t.nodes.map(n => ({
+      namespace: n.namespace,
+      selected: n.selected ? n.selected.profile_ref : "\u2014",
+      versions: n.version_count,
+      pending: n.pending.length,
+      experimental: n.experimental || "\u2014",
+    })), ["namespace","selected","versions","pending","experimental"]));
+    c.appendChild(el("div","pill", t.note));
+
+    // Explain what a namespace actually resolves to, level by level.
+    const erow = el("div","row");
+    const ens = el("input"); ens.placeholder = "namespace or namespace@3.7.5";
+    const ego = el("button","go","explain");
+    ego.onclick = async()=>{ try {
+      const v = ens.value.trim();
+      const args = v.includes("@") ? {profile_ref:v} : {namespace:v};
+      const x = await rpc("explain_profile", args);
+      c.appendChild(el("h2",null,"resolved " + x.profile_ref));
+      c.appendChild(table(x.lineage, ["namespace","local_version","prompt_mode",
+        "changed_prompt","resulting_prompt_chars","model_vars_set",
+        "model_vars_shadowed_by"]));
+      c.appendChild(dump({model_var_source:x.model_var_source,
+                          unset:x.unset_model_vars,
+                          prompt_sha256:x.prompt_sha256}));
+    } catch(e){ alert(e.message); } };
+    erow.append(ens, ego); c.appendChild(erow);
+
+    // Pending candidates across the whole tree, with the governance actions.
+    const pending = [];
+    for (const n of t.nodes) for (const v of n.pending)
+      pending.push({namespace:n.namespace, ...v});
     c.appendChild(el("h2",null,"pending candidates"));
-    c.appendChild(table(p.pending, ["proposal_id","role","candidate_sha256","rationale"]));
-    const row = el("div","row");
-    const id = el("input"); id.placeholder="proposal_id";
-    const acc = el("button","go","accept"), rej = el("button","go","reject");
-    acc.onclick = async()=>{ try{ await rpc("operator_prompt_decide",
-      {proposal_id:id.value, decision:"accept"}); go(current);}catch(e){alert(e.message);} };
-    rej.onclick = async()=>{ try{ await rpc("operator_prompt_decide",
-      {proposal_id:id.value, decision:"reject"}); go(current);}catch(e){alert(e.message);} };
-    row.append(id, acc, rej); c.appendChild(row);
-    c.appendChild(el("div","pill", p.note));
+    c.appendChild(table(pending, ["namespace","local_version","version_id",
+                                  "state","origin","created_by"]));
+    const grow = el("div","row");
+    const vid = el("input"); vid.placeholder = "version_id";
+    const st = el("input"); st.placeholder = "state (validated|proposed|production_approved|rejected)";
+    const setst = el("button","go","set state");
+    const sel = el("button","go","select");
+    setst.onclick = async()=>{ try{ await rpc("operator_prompt_state",
+      {version_id:vid.value, state:st.value}); go(current);}catch(e){alert(e.message);} };
+    sel.onclick = async()=>{ try{
+      const row = pending.concat(t.nodes.map(n=>n.selected).filter(Boolean));
+      const ns = (pending.find(p=>p.version_id===vid.value)||{}).namespace;
+      if (!ns) { alert("that version_id is not a pending candidate here"); return; }
+      await rpc("operator_prompt_select", {namespace:ns, version_id:vid.value});
+      go(current);}catch(e){alert(e.message);} };
+    grow.append(vid, st, setst, sel); c.appendChild(grow);
+    c.appendChild(el("div","pill",
+      "approving makes a version selectable; selecting changes what is born "
+      "next. A running Ego, Id or neuocyte keeps the profile it was bound to."));
+
+    // Cascade, previewed before it is run.
+    const crow = el("div","row");
+    const cns = el("input"); cns.placeholder = "namespace";
+    const cv = el("input"); cv.placeholder = "local_version";
+    const cm = el("input"); cm.placeholder = "none|queue|approve"; cm.value = "queue";
+    const plan = el("button","go","preview"), run = el("button","go","cascade");
+    plan.onclick = async()=>{ try{
+      const p = await rpc("operator_prompt_cascade_plan",
+        {namespace:cns.value, local_version:Number(cv.value), mode:cm.value});
+      c.appendChild(el("h2",null,"cascade plan (" + p.mode + ")"));
+      c.appendChild(table(p.steps, ["namespace","from_version","new_local_version",
+                                    "new_parent_namespace","new_parent_version"]));
+      c.appendChild(table(p.skipped, ["namespace","reason"]));
+    }catch(e){alert(e.message);} };
+    run.onclick = async()=>{ try{ await rpc("operator_prompt_cascade",
+      {namespace:cns.value, local_version:Number(cv.value), mode:cm.value});
+      go(current);}catch(e){alert(e.message);} };
+    crow.append(cns, cv, cm, plan, run); c.appendChild(crow);
     main.appendChild(c);
+
+    // What the shipped files did at the last start.
+    const b = await rpc("operator_prompt_bootstrap_report", {});
+    const bc = card("bootstrap files", true);
+    bc.appendChild(el("div","pill", b.note));
+    bc.appendChild(table(b.pending_file_deltas,
+                         ["namespace","local_version","version_id","source"]));
+    main.appendChild(bc);
+
+    // What was actually born with what.
+    const inc = await rpc("prompt_incarnations", {limit:25});
+    const ic = card("incarnations", true);
+    ic.appendChild(table(inc.bindings, ["actor_id","actor_kind","incarnation",
+                                        "profile_ref","prompt_sha256","work_id"]));
+    main.appendChild(ic);
+
+    // The older proposal log, kept because it is history.
+    const p = await rpc("operator_prompt_library", {limit:15});
+    const oc = card("root suggestions (legacy proposal log)", false);
+    oc.appendChild(table(p.pending, ["proposal_id","role","candidate_sha256","rationale"]));
+    oc.appendChild(el("div","pill",
+      "ego and id are bootstrap-only roots: these are suggested wordings, not "
+      "library candidates. Adopting one means editing the shipped prompt file."));
+    main.appendChild(oc);
   },
   async health(main) {
     const p = await rpc("system_pulse", {max_age_seconds:0});

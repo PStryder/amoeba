@@ -36,6 +36,11 @@ from __future__ import annotations
 # or mutates maintained state, the blob store, or another work item.
 NEUOCYTE = (
     "register_agent", "retire_agent", "heartbeat",
+    # Birth: resolve the profile this neuocyte is about to think with, and
+    # freeze what it actually received. Reading its own profile is not
+    # governing the library -- none of the read, evaluate or approve verbs
+    # are in this table.
+    "bind_profile",
     "lease_work", "complete_work", "fail_work",
     "acquire_snapshot", "release_snapshot_ref", "snapshot_tokens",
     "maintenance_context",
@@ -49,6 +54,7 @@ NEUOCYTE = (
 # and deliberately free of anything that decides.
 ROLE_BASE = (
     "register_agent", "retire_agent", "heartbeat",
+    "bind_profile",
     "status", "health", "capabilities",
     "recall", "get_memory", "history", "provenance", "audit_dossier",
     "get_conclusion", "get_work", "queue_stats",
@@ -88,7 +94,19 @@ ID_SENSES = (
     "id_health",
 )
 
+# The Prompt Library, split at the authority line. Id may read the whole family
+# tree, evaluate a version and propose a new one; approving, selecting and
+# cascading are Operator verbs that appear in no scope table at all. "Id may
+# not promote" is therefore a fact about the dispatcher, not a rule Id is asked
+# to respect.
+PROMPT_READ = (
+    "prompt_tree", "prompt_versions", "prompt_resolve", "prompt_diff",
+    "explain_profile", "prompt_incarnations",
+)
+
 ID_ONLY = (
+    "id_evaluate_prompt",
+    "id_propose_profile",
     "id_cite_pulse",
     "id_raise_finding",
     "id_request_investigation",
@@ -100,7 +118,7 @@ ID_ONLY = (
     "id_message_ego",
 )
 
-ID = ROLE_BASE + ID_SENSES + ID_ONLY
+ID = ROLE_BASE + ID_SENSES + PROMPT_READ + ID_ONLY
 
 
 # The external I/O adapter's scope: MCP and the HTTP API both connect with

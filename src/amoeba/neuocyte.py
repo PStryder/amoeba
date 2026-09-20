@@ -95,6 +95,11 @@ EVIDENCE: <which state references support it, or "none">"""
 
 
 class Neuocyte:
+    # A class-level default so the generation path never depends on __init__
+    # having run. None means no profile was bound and the built-in instruction
+    # plus the engine's own sampling defaults are in use.
+    profile: dict[str, Any] | None = None
+
     def __init__(self, cfg: Config, *, neuocyte_id: str) -> None:
         self.cfg = cfg
         self.neuocyte_id = neuocyte_id
@@ -133,9 +138,16 @@ class Neuocyte:
         deadline = item.get("deadline") or (time.time() + self.cfg.arbiter.neuocyte_wall_seconds)
         budget = item.get("budget_tokens") or self.cfg.arbiter.neuocyte_token_budget
 
+        # An Ego-derived worker inherits its ancestors' text physically, in
+        # the forked context; a maintenance neuocyte starts from nothing and
+        # is injected the whole resolved profile. bind_profile is told which,
+        # so the binding records what was injected rather than assuming.
+        profile = self._bind_profile(item, work_id=work_id)
         self.sup.call("register_agent", agent_id=self.neuocyte_id, role="neuocyte",
                       pid=os.getpid(), work_id=work_id,
-                      model_generation=self.model_generation)
+                      model_generation=self.model_generation,
+                      prompt_sha256=(profile or {}).get("prompt_sha256"),
+                      profile_binding_id=(profile or {}).get("binding_id"))
         try:
             result = self._execute(item, caps=caps, budget=budget, deadline=deadline)
             self.sup.call("complete_work", work_id=work_id, neuocyte_id=self.neuocyte_id,
@@ -164,6 +176,47 @@ class Neuocyte:
             self.log.exception("could not report failure for %s", work_id)
 
     # ------------------------------------------------------------------
+    def _bind_profile(self, item: dict[str, Any], *, work_id: str
+                      ) -> dict[str, Any] | None:
+        """Resolve this neuocyte's cognitive profile for this work item.
+
+        Neuocytes had no profile at all before the Prompt Library: their
+        instructions were module constants, so there was no way to specialise
+        a worker, and no record of what any of them had been told. They now
+        descend from the same family tree as the mind that spawned them --
+        ``ego.neuocyte`` for work forked from Ego, ``id.neuocyte`` for
+        maintenance -- which is what makes a specialisation like
+        ``ego.neuocyte.research`` expressible at all.
+
+        A missing profile is survivable: the built-in instruction still works,
+        and refusing to do the work because the library was incomplete would
+        be a worse failure than doing it on the baseline.
+        """
+        maintenance = item.get("work_class") == "maintenance"
+        namespace = "id.neuocyte" if maintenance else "ego.neuocyte"
+        try:
+            bound = self.sup.call(
+                "bind_profile", namespace=namespace,
+                actor_id=self.neuocyte_id, actor_kind="neuocyte",
+                work_id=work_id, model_generation=self.model_generation,
+                # Only the Ego-derived path inherits a primed context.
+                inherited_namespace=None if maintenance else "ego")
+        except Exception as exc:  # noqa: BLE001
+            self.log.warning("no prompt profile for %s (%s); using the "
+                             "built-in instruction", namespace, exc)
+            self.profile = None
+            return None
+        self.profile = bound
+        self.log.info("%s bound to %s", self.neuocyte_id, bound["profile_ref"])
+        return bound
+
+    def _profile_block(self) -> str:
+        """The profile text this neuocyte injects, as a prompt prefix."""
+        if not self.profile:
+            return ""
+        text = (self.profile.get("inject_text") or "").strip()
+        return text + "\n\n" if text else ""
+
     def _execute(self, item: dict[str, Any], *, caps: dict[str, Any],
                  budget: int, deadline: float) -> dict[str, Any]:
         objective = item["objective"]
@@ -195,8 +248,8 @@ class Neuocyte:
         instantiation = self._instantiate_from_snapshot(snapshot, caps=caps)
         board_block, board_seen = self._board_context(item)
         tools_block, tool_names = self._tools_block(item)
-        prompt = WORKER_INSTRUCTION.format(objective=item["objective"],
-                                           board=board_block, tools=tools_block)
+        prompt = self._profile_block() + WORKER_INSTRUCTION.format(
+            objective=item["objective"], board=board_block, tools=tools_block)
         rendered = self.inf.call(
             "apply_chat_template",
             messages=[{"role": "user", "content": prompt}], add_assistant=True,
@@ -271,9 +324,15 @@ class Neuocyte:
                 stop_reason = "deadline_reached"
                 break
 
-            out = self.inf.call("generate", session_id=self.session_id,
-                                max_tokens=min(remaining, 256), temperature=0.0,
-                                deadline=deadline)
+            # The profile's ceiling and sampling, narrowed by what is actually
+            # left of the budget. The Arbiter's remaining-token figure always
+            # wins: a profile cannot spend more than it was granted.
+            settings = (self.profile or {}).get("backend_arguments") or {}
+            out = self.inf.call(
+                "generate", session_id=self.session_id,
+                max_tokens=min(remaining, int(settings.get("max_tokens", 256))),
+                temperature=float(settings.get("temperature", 0.0)),
+                deadline=deadline)
             spent += int(out.get("completion_tokens") or 0)
 
             requests = parse_tool_calls(out["text"], limit=1)
@@ -482,7 +541,7 @@ class Neuocyte:
         state = self.sup.call("maintenance_context", objective=item["objective"])
         sess = self.inf.call("open_session", role="neuocyte")
         self.session_id = sess["session_id"]
-        prompt = MAINTENANCE_INSTRUCTION.format(
+        prompt = self._profile_block() + MAINTENANCE_INSTRUCTION.format(
             objective=item["objective"],
             state=json.dumps(state, indent=2, default=str)[:2500],
         )

@@ -11,6 +11,22 @@ naive neuocytes, and `board_corroboration` separates replication from echo — b
 the experiment has not been run. It is entirely possible that shared context
 spreads Ego's mistakes faster than it spreads its insight.
 
+**Does a specialised neuocyte profile actually produce better work?** The
+Prompt Library makes `ego.neuocyte.research` expressible, governed and
+attributable, and every incarnation records exactly which lineage it was born
+with — so the experiment is now *answerable*. It has not been run. Nothing in
+the system measures whether a profile performs better than its parent:
+`experimental_approved` exists and is honoured, but selecting an experimental
+lineage and comparing outcomes is manual. Id records verdicts, and a verdict is
+a judgement, not a measurement.
+
+**How much should a parent be allowed to say?** Composition accumulates down
+the whole lineage, so a three-level profile carries its root's full text plus
+every descendant's addition. That is what makes provenance honest, and it also
+means a deep tree spends context on inherited instruction before the task is
+stated. Whether `replace` should be more common than `append` below the first
+level is an open question about prompt economics, not about the mechanism.
+
 **What should a trimmed context keep?** `trim` keeps a verbatim head and tail
 because those are defensible without a model in the loop. Whether the middle is
 the least valuable part of a cognitive context is an assumption, not a finding.
@@ -114,14 +130,11 @@ state directory. There is no TLS and no remote transport.
 
 ## Built but not connected
 
-**The tool execution loop.** `ToolRegistry` validates schemas, enforces role
-permissions, bounds arguments and executes handlers, with 22 tests covering it.
-Nothing in the running system calls it. A model that emits a `<tool_call>` block
-has the request parsed, validated on demand and reported in `tool_requests`;
-it is never run, and the response says so. Closing this means a multi-turn loop
-in the role process: request -> harness executes -> result appended to context
--> generation resumes. That is real work, not a wiring task, and it was not
-done.
+Nothing currently sits in this category. The tool execution loop, which was
+here, is wired: a neuocyte's request is parsed, validated, executed by the
+Harness through `tool_invoke`, and the result appended to its context for the
+next turn, bounded by turns, token budget and deadline, every call receipted.
+See `TOOL_LOOP.md` and `tests/test_tool_loop.py`.
 
 ## Not implemented
 
@@ -135,4 +148,6 @@ done.
   the measurement would not change that decision.
 - Streaming token output over MCP.
 - Automatic context trimming, eviction or compaction.
-- Any tool with side effects outside the state directory.
+- Automatic A/B measurement of prompt profiles. `experimental_approved`
+  and the experimental selection purpose are honoured, but nothing
+  compares outcomes between lineages.
