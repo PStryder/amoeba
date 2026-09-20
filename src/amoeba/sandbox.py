@@ -1,6 +1,6 @@
-"""Sandboxed compute workspace: scratch compute with no hands on the host.
+"""Compute sandbox: ephemeral execution scratch with no hands on the host.
 
-A neuocyte can ask the Harness for an isolated workspace, run real code in it,
+A neuocyte can ask the Harness for an isolated sandbox, run real code in it,
 and propose the artifacts it produces for promotion into durable state. It
 cannot reach the host filesystem, the project source, the state database, the
 LAN, the internet, or any credential.

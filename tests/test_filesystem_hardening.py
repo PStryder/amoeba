@@ -211,7 +211,7 @@ def test_every_state_directory_is_hardened_including_ones_outside_the_root(tmp_p
         state_dir=home / "state",
         log_dir=home / "state" / "logs",
         sandbox_dir=home / "state" / "sandbox",
-        workspace_dir=home / "state" / "workspace",
+        artifact_dir=home / "state" / "artifacts",
         blob_dir=away / "blobs",          # deliberately outside state_dir
     )
     report = harden_state_tree(cfg)

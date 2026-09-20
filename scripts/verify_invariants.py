@@ -549,6 +549,60 @@ MUTATIONS: list[Mutation] = [
              "look broken rather than strict.",
     ),
     Mutation(
+        "I42", "Accepted work product exists outside the sandbox before it dies",
+        "src/amoeba/harness_api.py",
+        "            fs.write_bytes(resolved, data)\n            dest = resolved.path",
+        "            dest = resolved.path  # MUTANT: promotion copies nothing out",
+        ["test_destroying_a_sandbox_preserves_input_evidence_and_work_product"],
+        layer="artifact_promote (the copy out of the compute sandbox)",
+        note="negates the disposable-laboratory claim at its root. If "
+             "promotion records acceptance without moving the bytes, the only "
+             "copy dies with the scratch and 'safe to destroy' is false.",
+    ),
+    Mutation(
+        "I42b", "An undecided proposal lapses instead of claiming to await a decision",
+        "src/amoeba/harness_api.py",
+        '        lapsing = [dict(r) for r in mind.db.conn.execute(',
+        "        lapsing = []; _unused = (lambda *a: None)(  # MUTANT: never lapse\n"
+        "            [dict(r) for r in mind.db.conn.execute(",
+        ["test_an_undecided_proposal_lapses_rather_than_lying"],
+        layer="sandbox_destroy (the sweep of still-proposed artifacts)",
+        also=[('            " WHERE sandbox_id = ? AND status = \'proposed\'", (sandbox_id,))]',
+               '            " WHERE sandbox_id = ? AND status = \'proposed\'", (sandbox_id,))])')],
+        note="leaves rows saying 'proposed' for content that no longer exists "
+             "anywhere. Nothing crashes; the state simply asserts something "
+             "untrue, which is the failure mode worth a test.",
+    ),
+    Mutation(
+        "I43", "Sandboxed code cannot reach the other three stores",
+        "src/amoeba/sandbox.py",
+        '        harden(scratch, container_sid=sid_str, container_rights="(OI)(CI)(F)",\n'
+        '               log_name="sandbox")',
+        '        harden(scratch, container_sid=sid_str, container_rights="(OI)(CI)(F)",\n'
+        '               log_name="sandbox")\n'
+        '        harden(self.root.parent, container_sid=sid_str,  # MUTANT: grant the\n'
+        '               container_rights="(OI)(CI)(F)", log_name="sandbox")',
+        ["test_sandboxed_code_cannot_reach_filespace_blobs_or_state",
+         "test_sandboxed_code_cannot_reach_another_work_items_scratch"],
+        layer="SandboxManager.create (what the container SID is granted)",
+        note="negated by *adding* a grant, because the claim is the absence of "
+             "reach. Giving the container the whole state tree opens the blob "
+             "store, the database and every other work item's scratch at once.",
+    ),
+    Mutation(
+        "I42c", "A proposal's bytes are preserved as evidence when it is made",
+        "src/amoeba/harness_api.py",
+        "        digest = mind.blobs.put(data)",
+        "        digest = sha256_hex(data)  # MUTANT: hash but do not preserve",
+        ["test_proposal_evidence_survives_even_without_a_decision",
+         "test_an_undecided_proposal_lapses_rather_than_lying"],
+        layer="artifact_propose (content-addressing at propose time)",
+        note="the half that is easy to drop, because everything still works: "
+             "the digest is recorded, the lapse is recorded, and only the "
+             "bytes are missing. The record then describes content nobody can "
+             "ever see.",
+    ),
+    Mutation(
         "I37d", "A hard link is not a way to reach a file outside a root",
         "src/amoeba/filespace.py",
         "        if exists and not self.cfg.allow_multiply_linked:\n"

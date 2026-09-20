@@ -176,10 +176,11 @@ def test_artifact_promotion_is_proposal_then_harness_decision(stack: LiveStack):
                               rationale="a deterministic validity check",
                               proposed_by="wk_1", work_id="work_1")
         assert proposed["status"] == "proposed"
-        assert "nothing has been copied" in proposed["note"]
+        assert "nothing has been placed in the artifact store" in proposed["note"]
+        assert proposed["evidence_preserved"] is True
 
-        workspace = Path(stack.cfg.workspace_dir)
-        before = set(workspace.glob("*")) if workspace.exists() else set()
+        store = Path(stack.cfg.artifact_dir)
+        before = set(store.glob("*")) if store.exists() else set()
 
         promoted = stack.call("artifact_promote",
                               artifact_id=proposed["artifact_id"],
@@ -187,7 +188,7 @@ def test_artifact_promotion_is_proposal_then_harness_decision(stack: LiveStack):
         assert promoted["status"] == "promoted"
         assert promoted["sha256"] == proposed["sha256"]
         assert promoted["content_verified"] is True
-        after = set(workspace.glob("*"))
+        after = set(store.glob("*"))
         assert len(after) == len(before) + 1
         landed = (after - before).pop()
         assert "def check" in landed.read_text()
@@ -226,7 +227,7 @@ def test_promotion_refuses_content_that_changed_after_it_was_proposed(stack: Liv
     reviewer approves a digest; what gets copied has to be that digest and not
     whatever is on disk when the decision lands.
 
-    The failure condition is the point: nothing may reach the workspace. An
+    The failure condition is the point: nothing may reach durable storage. An
     earlier version reported the change in its return value and copied the file
     anyway, which is a note in a receipt nobody reads, not a control.
     """
@@ -243,15 +244,15 @@ def test_promotion_refuses_content_that_changed_after_it_was_proposed(stack: Liv
         stack.call("sandbox_write", sandbox_id=sid, path="work/checker.py",
                    content="import os\nos.system('calc')\n")
 
-        workspace = Path(stack.cfg.workspace_dir)
-        before = set(workspace.glob("*")) if workspace.exists() else set()
+        store = Path(stack.cfg.artifact_dir)
+        before = set(store.glob("*")) if store.exists() else set()
 
         with pytest.raises(Exception):
             stack.call("artifact_promote", artifact_id=art["artifact_id"],
                        decided_by="supervisor")
 
-        assert set(workspace.glob("*")) == before, (
-            "substituted content reached the durable workspace")
+        assert set(store.glob("*")) == before, (
+            "substituted content reached durable storage")
         listing = stack.call("artifact_list", status="rejected")
         assert any(a["artifact_id"] == art["artifact_id"] for a in listing), (
             "the artifact was neither promoted nor recorded as rejected")

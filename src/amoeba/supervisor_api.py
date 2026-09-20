@@ -651,7 +651,7 @@ def build(sup: "Supervisor") -> dict[str, Any]:
 
             base["filesystem"] = audit_paths(
                 [sup.cfg.state_dir, sup.cfg.blob_dir, sup.cfg.sandbox_dir,
-                 sup.cfg.workspace_dir])
+                 sup.cfg.artifact_dir])
         except Exception as exc:  # noqa: BLE001
             base["filesystem"] = {"error": repr(exc)}
         try:

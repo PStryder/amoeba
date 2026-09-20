@@ -82,6 +82,11 @@ class EventKind:
     ARTIFACT_PROPOSED = "artifact.proposed"
     ARTIFACT_PROMOTED = "artifact.promoted"
     ARTIFACT_REJECTED = "artifact.rejected"
+    # A proposal whose compute sandbox was destroyed before anyone
+    # decided on it. Its bytes lived only in that scratch, so it can
+    # never be promoted; saying so is better than leaving a row that
+    # claims to be awaiting a decision.
+    ARTIFACT_LAPSED = "artifact.lapsed"
 
     # host filesystem. FILE_SUPERSEDED carries the digest of the content that
     # was there before, which is what makes every write reversible.

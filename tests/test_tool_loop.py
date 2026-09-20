@@ -422,7 +422,11 @@ def test_a_neuocyte_can_propose_an_artifact_but_not_promote_it(stack):
             arguments={"path": "work/checker.py", "rationale": "reusable check"})
         assert proposed["accepted"] is True, proposed
         assert proposed["result"]["status"] == "proposed"
-        assert "nothing has been copied" in proposed["result"]["note"]
+        assert "nothing has been placed in the artifact store" in (
+            proposed["result"]["note"])
+        # Proposing preserves the bytes as evidence; it does not place
+        # them at any destination. Those are different claims.
+        assert proposed["result"]["evidence_preserved"] is True
 
         # Promotion is not in the neuocyte's vocabulary at all.
         denied = stack.call(

@@ -353,6 +353,58 @@ checked against the exact bytes that produced it.
 → `test_attaching_a_file_puts_it_in_the_work_items_sandbox`,
 `test_attaching_a_file_outside_every_root_is_refused`
 
+### The four stores
+
+Bytes live in exactly four places, with four different lifetimes. Conflating
+any two is how a "safe to destroy" claim quietly becomes false.
+
+| Name | Where | Lifetime | Written by |
+|---|---|---|---|
+| **Filespace** | configured host roots | yours; outlives Amoeba | the Harness only |
+| **Blob store** | `state_dir/blobs` | durable, content-addressed | the Harness only |
+| **Compute sandbox** | `state_dir/sandbox/<id>` | one work item, then destroyed | code running inside it |
+| **Artifact proposal** | blob store, by digest | durable evidence; never authoritative | the Harness, at propose time |
+| **Accepted artifact** | a filespace root, or `state_dir/artifacts` | durable and authoritative | the Harness, on promotion |
+
+**I42. Destroying a compute sandbox cannot destroy authoritative input,
+durable evidence, or accepted work product.** The sandbox is a disposable
+laboratory: everything that matters already lives outside it, or was promoted
+out before it died. Input stays in Filespace and is content-addressed on the
+way in; evidence is the hash chain and the blob store; accepted work product
+was copied out by the Harness at promotion.
+→ `test_destroying_a_sandbox_preserves_input_evidence_and_work_product`,
+`test_the_four_stores_are_in_different_places`
+
+**I42b. Destroying a sandbox leaves four truths standing at once.**
+
+| | after destruction |
+|---|---|
+| scratch copy | gone |
+| proposal record | lapsed / never accepted |
+| proposal bytes | preserved as evidence, retrievable by digest |
+| accepted artifact | does not exist |
+
+A proposal's bytes are content-addressed the moment it is made, so the record
+can say *both* "this was never accepted" *and* "here are exactly the bytes that
+were offered". Keeping only the first leaves a rationale describing content
+nobody can ever see; keeping the row as `proposed` asserts it still awaits a
+decision when it can never be promoted. Recovering the evidence later is a
+fresh Harness act, not a promotion — the record stays lapsed.
+→ `test_an_undecided_proposal_lapses_rather_than_lying`,
+`test_proposal_evidence_survives_even_without_a_decision`,
+`test_a_promoted_artifact_is_not_lapsed_by_the_same_teardown`
+
+**I43. Code inside a compute sandbox cannot directly mutate Filespace, the
+blob store, or another work item's state.** Movement across that boundary is
+performed only by the Harness — inputs materialised in, artifacts promoted out.
+This is what makes I42 true: if code inside could reach out, destroying the
+sandbox would not bound what it had already changed. Measured from *inside* the
+container, since a check from outside tests the Harness's opinion of the
+boundary rather than the boundary.
+→ `test_sandboxed_code_cannot_reach_filespace_blobs_or_state`,
+`test_sandboxed_code_cannot_reach_another_work_items_scratch`,
+`test_movement_across_the_boundary_is_only_ever_the_harness`
+
 **I41. A receipt's digest is ground truth, verifiable from inside.** If a
 receipt claims a neuocyte received bytes with digest D, then hashing the bytes
 actually available to that neuocyte must produce D. This holds for attachments,

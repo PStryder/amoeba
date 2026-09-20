@@ -3,7 +3,7 @@
 Three rules hold across everything in this file:
 
 1. **A neuocyte proposes; the Harness disposes.** Promotion of a board post
-   into memory, promotion of a sandbox artifact into the durable workspace, and
+   into memory, promotion of a sandbox artifact into durable storage, and
    rejuvenation of a context are all acts of the Harness. The verbs a neuocyte
    can reach create *proposals*.
 2. **Every consequential act returns a receipt.** Refusals are recorded too --
@@ -270,14 +270,33 @@ def build(sup: "Supervisor") -> dict[str, Any]:  # noqa: C901
                         reason: str = "", operation_id: str | None = None
                         ) -> dict[str, Any]:
         mgr = _sandbox_manager()
+        # Anything still merely *proposed* had its bytes only in this scratch.
+        # Destroying the sandbox is allowed to lose it -- it was never accepted
+        # -- but the row must stop claiming to be awaiting a decision.
+        lapsing = [dict(r) for r in mind.db.conn.execute(
+            "SELECT artifact_id, path, sha256 FROM artifacts"
+            " WHERE sandbox_id = ? AND status = 'proposed'", (sandbox_id,))]
         out = mgr.destroy(sandbox_id)
 
         def body(m: Mutation) -> None:
             m.sql("UPDATE sandboxes SET status = 'destroyed', destroyed_at = ?"
                   " WHERE sandbox_id = ?", (time.time(), sandbox_id))
+            for art in lapsing:
+                m.sql("UPDATE artifacts SET status = 'lapsed', decided_by = ?,"
+                      " decided_at = ?, reason = ? WHERE artifact_id = ?",
+                      (actor, time.time(),
+                       "its compute sandbox was destroyed before a decision",
+                       art["artifact_id"]))
+                m.emit(EventKind.ARTIFACT_LAPSED, {
+                    "artifact_id": art["artifact_id"], "sandbox_id": sandbox_id,
+                    "path": art["path"], "actor": actor,
+                    "sha256": art["sha256"], "evidence_preserved": True,
+                    "note": ("never accepted, and the scratch copy is gone; the "
+                             "bytes that were proposed remain retrievable by "
+                             "this digest as evidence of the proposal")})
             m.emit(EventKind.SANDBOX_DESTROYED,
                    {"sandbox_id": sandbox_id, "actor": actor,
-                    "reason": reason})
+                    "reason": reason, "artifacts_lapsed": len(lapsing)})
 
         receipt, _ = mind.writer.apply(body, actor=actor, operation_id=operation_id,
                                        bump_version=False,
@@ -292,8 +311,18 @@ def build(sup: "Supervisor") -> dict[str, Any]:  # noqa: C901
                          operation_id: str | None = None) -> dict[str, Any]:
         """A neuocyte proposes that a scratch file become durable.
 
-        Proposing copies nothing and grants nothing. It records an intention
-        that the Harness can later act on.
+        Proposing grants nothing and places nothing at any destination. It
+        records an intention the Harness can later act on.
+
+        It does, however, preserve the proposed bytes in the blob store as
+        **evidence of the proposal**. Blobs are keyed by digest, so the sha256
+        recorded here is the key: after the compute sandbox is destroyed, the
+        record can still say both "this was never accepted" and "these are
+        exactly the bytes that were offered". Without that, an abandoned
+        proposal leaves a rationale describing content nobody can ever see.
+
+        Evidence is not acceptance. A lapsed proposal stays lapsed; recovering
+        its bytes later is a fresh Harness act, not a promotion.
         """
         mgr = _sandbox_manager()
         # resolve_inside is the path check; read_file would additionally slurp
@@ -306,9 +335,14 @@ def build(sup: "Supervisor") -> dict[str, Any]:  # noqa: C901
             raise ResourceExhausted("artifact too large to promote", bytes=size,
                                     limit=MAX_PROMOTED_BYTES)
         artifact_id = new_id("art")
-        digest = sha256_hex(target.read_bytes())
+        data = target.read_bytes()
+        # Content-addressed, so the digest below is also the key the bytes are
+        # retrievable by once the sandbox is gone.
+        digest = mind.blobs.put(data)
 
         def body(m: Mutation) -> None:
+            m.register_blob(digest, size, media_type or "application/octet-stream",
+                            "artifact_proposal")
             m.sql("INSERT INTO artifacts(artifact_id, sandbox_id, proposed_by, work_id,"
                   " path, sha256, bytes, media_type, rationale, status, created_at,"
                   " state_version) VALUES (?,?,?,?,?,?,?,?,?,?,?,?)",
@@ -317,21 +351,27 @@ def build(sup: "Supervisor") -> dict[str, Any]:  # noqa: C901
             m.emit(EventKind.ARTIFACT_PROPOSED, {
                 "artifact_id": artifact_id, "sandbox_id": sandbox_id,
                 "proposed_by": proposed_by, "path": path, "bytes": size,
-                "sha256": digest, "rationale": rationale})
+                "sha256": digest, "rationale": rationale,
+                "evidence_preserved": True,
+                "note": ("the proposed bytes are retrievable by this digest "
+                         "even after the compute sandbox is destroyed")})
 
         receipt, _ = mind.writer.apply(body, actor=proposed_by,
                                        operation_id=operation_id,
                                        mutation_id=f"art-propose:{artifact_id}")
         return {"artifact_id": artifact_id, "status": "proposed", "bytes": size,
                 "sha256": digest, "receipt_id": receipt.receipt_id,
-                "note": "proposed only; nothing has been copied out of the sandbox"}
+                "evidence_preserved": True,
+                "note": ("proposed only; nothing has been placed in the artifact "
+                         "store or in your filespace. The bytes are kept as "
+                         "evidence of the proposal and are retrievable by digest.")}
 
     def artifact_promote(*, artifact_id: str, decided_by: str = "supervisor",
                          root: str | None = None, path: str | None = None,
                          operation_id: str | None = None) -> dict[str, Any]:
         """The Harness copies a proposed artifact out of the sandbox.
 
-        Without ``root`` it lands in the internal workspace under a name the
+        Without ``root`` it lands in the internal artifact store under a name the
         Harness picks. With ``root`` it lands in a configured filespace root at
         ``path`` -- this is how Amoeba produces a file you actually use, and it
         is a *decision*, made here, on a destination the person deciding named.
@@ -346,6 +386,12 @@ def build(sup: "Supervisor") -> dict[str, Any]:  # noqa: C901
             "SELECT * FROM artifacts WHERE artifact_id = ?", (artifact_id,)).fetchone()
         if row is None:
             raise NotFound("unknown artifact", artifact_id=artifact_id)
+        if row["status"] == "lapsed":
+            raise InvalidInput(
+                "this proposal lapsed when its compute sandbox was destroyed; "
+                "its content existed only in that scratch and is gone",
+                artifact_id=artifact_id, status=row["status"],
+                hint="a proposal must be decided before its work item finishes")
         if row["status"] != "proposed":
             raise InvalidInput("artifact is not awaiting a decision",
                                artifact_id=artifact_id, status=row["status"])
@@ -405,10 +451,10 @@ def build(sup: "Supervisor") -> dict[str, Any]:  # noqa: C901
             fs.write_bytes(resolved, data)
             dest = resolved.path
         else:
-            workspace = sup.cfg.workspace_dir
-            workspace.mkdir(parents=True, exist_ok=True)
+            store = sup.cfg.artifact_dir
+            store.mkdir(parents=True, exist_ok=True)
             # The Harness names the destination: artifact id + original basename.
-            dest = workspace / f"{artifact_id}_{src.name}"
+            dest = store / f"{artifact_id}_{src.name}"
             dest.write_bytes(data)
         blob = mind.blobs.put(data)
 
@@ -427,7 +473,7 @@ def build(sup: "Supervisor") -> dict[str, Any]:  # noqa: C901
                     "superseded_by": artifact_id})
             m.emit(EventKind.ARTIFACT_PROMOTED, {
                 "artifact_id": artifact_id, "decided_by": decided_by,
-                "workspace_path": dest.name, "bytes": len(data),
+                "artifact_path": dest.name, "bytes": len(data),
                 "sha256_at_proposal": row["sha256"], "sha256_on_arrival": digest,
                 "content_changed_since_proposal": digest != row["sha256"],
                 "blob": blob, "root": root,
@@ -445,7 +491,7 @@ def build(sup: "Supervisor") -> dict[str, Any]:  # noqa: C901
                                        operation_id=operation_id,
                                        mutation_id=f"art-promote:{artifact_id}")
         return {"artifact_id": artifact_id, "status": "promoted",
-                "workspace_path": dest.name, "host_path": str(dest),
+                "artifact_path": dest.name, "host_path": str(dest),
                 "root": root, "path": resolved.relpath if resolved else None,
                 "bytes": len(data), "sha256": digest,
                 "content_verified": True, "blob": blob,

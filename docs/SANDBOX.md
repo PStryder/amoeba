@@ -1,4 +1,8 @@
-# Sandboxed compute workspace
+# Compute sandbox
+
+> The compute sandbox is ephemeral execution scratch, never
+> authoritative storage. See `STORES.md` for how it differs from
+> Filespace, the blob store, and accepted artifacts.
 
 Somewhere for the swarm to turn fuzzy cognition into deterministic machinery,
 without giving it hands on the host.

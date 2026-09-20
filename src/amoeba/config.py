@@ -163,9 +163,16 @@ class Config:
         return self.state_dir / "sandbox"
 
     @property
-    def workspace_dir(self) -> Path:
-        """Durable workspace: where promoted artifacts land."""
-        return self.state_dir / "workspace"
+    def artifact_dir(self) -> Path:
+        """Accepted work product, when no filespace root was named.
+
+        Durable and outside every compute sandbox, which is the point: an
+        artifact is authoritative only once it lives here (or in a filespace
+        root) and in the blob store. Deliberately not called a "workspace" --
+        that word was doing double duty for this and for the ephemeral compute
+        sandbox, which have opposite lifetimes.
+        """
+        return self.state_dir / "artifacts"
 
     @property
     def ready_path(self) -> Path:
@@ -180,8 +187,13 @@ class Config:
         return self.state_dir / "supervisor.lock"
 
     def ensure_dirs(self) -> None:
+        # One-time rename of the old "workspace" directory. Promoted artifacts
+        # are durable, so they are moved rather than orphaned by the renaming.
+        legacy = self.state_dir / "workspace"
+        if legacy.is_dir() and not self.artifact_dir.exists():
+            legacy.rename(self.artifact_dir)
         for p in (self.state_dir, self.blob_dir, self.log_dir,
-                  self.sandbox_dir, self.workspace_dir):
+                  self.sandbox_dir, self.artifact_dir):
             p.mkdir(parents=True, exist_ok=True)
 
     def to_dict(self) -> dict[str, Any]:

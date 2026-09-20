@@ -17,7 +17,7 @@ directory was world-writable, which meant:
 * **Exfiltration.** Scratch contents — including anything a neuocyte was asked
   to work on — were readable by any process on the machine.
 * **Tampering.** The event log, the content-addressed blobs and the promoted
-  workspace were writable by any process. The hash chain detects that, but
+  artifact store were writable by any process. The hash chain detects that,
   detection after the fact is not the same as prevention.
 
 ## What hardening does
@@ -287,7 +287,7 @@ def harden_state_tree(cfg: Any, *, log_name: str = "security") -> dict[str, Any]
     """
     log = get_logger(log_name)
     targets = [cfg.state_dir, cfg.blob_dir, cfg.log_dir, cfg.sandbox_dir,
-               cfg.workspace_dir]
+               cfg.artifact_dir]
     results = []
     for t in targets:
         Path(t).mkdir(parents=True, exist_ok=True)

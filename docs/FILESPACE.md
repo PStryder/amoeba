@@ -1,5 +1,8 @@
 # Host files
 
+> Filespace is one of four stores. See `STORES.md` for the full
+> taxonomy and how they differ in lifetime and authority.
+
 Amoeba can produce files you actually use, and can be handed files to work on.
 Both go through the Harness, and both are bounded by an allowlist.
 

@@ -599,7 +599,7 @@ def build_server(cfg: Config):  # noqa: C901
         artifact_id: Annotated[str, Field(description="Artifact to promote.",
                                           max_length=64)],
         root: Annotated[str, Field(description="Destination root. Omit to keep it "
-                                               "in the internal workspace.",
+                                               "in the internal artifact store.",
                                    max_length=64)] = "",
         path: Annotated[str, Field(description="Destination path within the root.",
                                    max_length=512)] = "",

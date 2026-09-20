@@ -338,7 +338,7 @@ CREATE INDEX IF NOT EXISTS ix_board_reads_reader ON board_reads(reader, read_at)
 CREATE INDEX IF NOT EXISTS ix_board_reads_post   ON board_reads(post_id);
 
 -- ------------------------------------------------------------------
--- Sandboxed compute: scratch workspaces and promotion proposals.
+-- Compute sandboxes: ephemeral execution scratch and promotion proposals.
 -- ------------------------------------------------------------------
 CREATE TABLE IF NOT EXISTS sandboxes (
   sandbox_id    TEXT PRIMARY KEY,
@@ -358,7 +358,7 @@ CREATE TABLE IF NOT EXISTS artifacts (
   sandbox_id    TEXT,
   proposed_by   TEXT NOT NULL,
   work_id       TEXT,
-  path          TEXT NOT NULL,          -- path within the workspace
+  path          TEXT NOT NULL,          -- path within the compute sandbox
   sha256        TEXT NOT NULL,
   bytes         INTEGER NOT NULL,
   media_type    TEXT,
