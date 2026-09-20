@@ -420,6 +420,95 @@ MUTATIONS: list[Mutation] = [
         ["test_the_tool_loop_stops_at_the_deadline"],
         layer="Neuocyte._generate_with_tools (the deadline bound)",
     ),
+    Mutation(
+        "I37", "A path outside its root is refused, not clamped into it",
+        "src/amoeba/filespace.py",
+        "        if final != root_path and root_path not in final.parents:",
+        "        if False:  # MUTANT: containment check removed",
+        ["test_paths_that_leave_the_root_or_name_a_device_are_refused",
+         "test_a_refused_path_is_never_silently_clamped"],
+        layer="Filespace.resolve (the containment check)",
+        note="the component checks catch the obvious `..` cases on their own, "
+             "so this also removes them -- otherwise the claim looks defended "
+             "while a resolved junction walks straight out.",
+        also=[("        for part in parts:\n            _reject_component(part)",
+               "        for part in parts:\n            pass  # MUTANT")],
+    ),
+    Mutation(
+        "I37b", "A link is not a way out of a root",
+        "src/amoeba/filespace.py",
+        "            final = candidate.resolve()",
+        "            final = candidate.absolute()  # MUTANT: links not followed",
+        ["test_a_junction_pointing_out_of_the_root_is_refused"],
+        layer="Filespace.resolve (full resolution before the check)",
+        note="without resolving, the containment check compares a path that "
+             "still looks inside the root while pointing elsewhere.",
+    ),
+    Mutation(
+        "I37c", "A read-only root refuses writes",
+        "src/amoeba/filespace.py",
+        '        if need_write and root.mode != "read_write":',
+        "        if False:  # MUTANT: mode ignored",
+        ["test_a_read_only_root_refuses_writes"],
+        layer="Filespace.resolve (the mode check)",
+        note="write_bytes has its own check, so this also removes that one; "
+             "the claim is defended in both places deliberately.",
+        also=[('        if not resolved.writable:\n'
+               '            raise FilespaceDenied("this root is read-only", root=resolved.root_name)\n'
+               '        resolved.path.parent.mkdir(parents=True, exist_ok=True)',
+               '        resolved.path.parent.mkdir(parents=True, exist_ok=True)')]),
+    Mutation(
+        "I39", "No neuocyte tool names a filespace root",
+        "src/amoeba/tools.py",
+        '        params=[ToolParam("path", "string", "relative path inside the sandbox",\n'
+        '                          required=True, max_length=512),\n'
+        '                ToolParam("rationale", "string", "why this is worth keeping",\n'
+        '                          required=True, max_length=2000)],',
+        '        params=[ToolParam("path", "string", "relative path inside the sandbox",\n'
+        '                          required=True, max_length=512),\n'
+        '                ToolParam("root", "string", "MUTANT: model-chosen destination",\n'
+        '                          max_length=64),\n'
+        '                ToolParam("rationale", "string", "why this is worth keeping",\n'
+        '                          required=True, max_length=2000)],',
+        ["test_a_neuocyte_has_no_tool_that_reaches_the_host_filesystem"],
+        layer="the propose_artifact schema (what a model can address)",
+        note="negated by adding, because the claim is the absence of a verb. "
+             "Letting a neuocyte name the destination moves the decision to "
+             "put bytes on disk from the promoter to the proposer.",
+    ),
+    Mutation(
+        "I40", "A file outside every root cannot be handed in",
+        "src/amoeba/filespace.py",
+        '        raise FilespaceDenied(\n'
+        '            "path is not inside any configured filespace root",\n'
+        '            path=str(target), known_roots=sorted(self._roots))',
+        "        name = sorted(self._roots)[0]  # MUTANT: accept anything\n"
+        "        return ResolvedPath(name, target.name, target, True, target.exists())",
+        ["test_attaching_a_file_outside_every_root_is_refused"],
+        layer="Filespace.resolve_host_path (the allowlist check)",
+    ),
+    Mutation(
+        "I38", "Prior content is preserved before an overwrite",
+        "src/amoeba/harness_api.py",
+        "            if sup.cfg.filespace.snapshot_before_overwrite:\n"
+        "                existing = resolved.path.read_bytes()\n"
+        "                prior_sha = mind.blobs.put(existing)\n"
+        "                prior_bytes = len(existing)",
+        "            if False:  # MUTANT: overwrite destroys\n"
+        "                existing = resolved.path.read_bytes()\n"
+        "                prior_sha = mind.blobs.put(existing)\n"
+        "                prior_bytes = len(existing)",
+        ["test_an_overwrite_supersedes_and_the_prior_version_is_restorable"],
+        layer="file_write (the snapshot before the write)",
+    ),
+    Mutation(
+        "I38b", "A delete keeps its content recoverable",
+        "src/amoeba/harness_api.py",
+        "        if resolved.path.is_file() and sup.cfg.filespace.snapshot_before_overwrite:",
+        "        if False:  # MUTANT: delete destroys",
+        ["test_a_delete_keeps_the_content_recoverable"],
+        layer="file_delete (the snapshot before the unlink)",
+    ),
 ]
 
 

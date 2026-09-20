@@ -285,6 +285,52 @@ counting runs in flight, never by a speedup ratio, which a run simply getting
 faster can produce.
 → `test_sandboxes_run_concurrently_rather_than_serialised`
 
+### Host files
+
+**I37. Nothing outside a configured filespace root is reachable.** Roots are an
+allowlist in config. A path that does not resolve inside one is refused — not
+sanitised, not clamped into the root, refused — and there is no default or
+fallback destination, so losing the root name produces an error rather than a
+write somewhere arbitrary.
+→ `test_paths_that_leave_the_root_or_name_a_device_are_refused`,
+`test_a_refused_path_is_never_silently_clamped`,
+`test_an_absolute_host_path_outside_every_root_is_refused`
+
+**I37b. Containment survives links.** A junction or symlink inside a root is an
+ordinary-looking name that resolves elsewhere, which no string check can catch.
+Paths are resolved fully and re-checked for containment, listings do not walk
+through links, and writes refuse to go through one at all.
+→ `test_a_junction_pointing_out_of_the_root_is_refused`,
+`test_listing_does_not_walk_through_a_junction`
+
+**I37c. A read-only root is read-only.** The mode is checked when the path is
+resolved, before any handler sees it.
+→ `test_a_read_only_root_refuses_writes`,
+`test_a_read_only_root_refuses_writes_through_the_harness`,
+`test_promotion_cannot_target_a_read_only_root`
+
+**I38. No write destroys.** Prior content is content-addressed into the blob
+store before any overwrite, delete or promotion-over, and the digest goes in
+the event log, so every version is recoverable. Restoring is itself a write, so
+undo does not lose the version it replaces.
+→ `test_an_overwrite_supersedes_and_the_prior_version_is_restorable`,
+`test_a_delete_keeps_the_content_recoverable`,
+`test_restoring_does_not_lose_the_version_it_replaces`
+
+**I39. A neuocyte has no verb that reaches the host filesystem.** Files leave a
+sandbox only as a proposal that the Harness decides on, and no neuocyte tool
+names a filespace root. The decision to put bytes on disk, and where, belongs
+to whoever promotes.
+→ `test_a_neuocyte_has_no_tool_that_reaches_the_host_filesystem`,
+`test_promotion_can_target_a_filespace_root`
+
+**I40. Nothing is read that was not named.** A host file enters Amoeba only via
+`file_attach`, which takes an explicit path, requires it to be inside a root,
+and content-addresses it on the way in so a finding about a file can later be
+checked against the exact bytes that produced it.
+→ `test_attaching_a_file_puts_it_in_the_work_items_sandbox`,
+`test_attaching_a_file_outside_every_root_is_refused`
+
 ---
 
 ## 3. Data model

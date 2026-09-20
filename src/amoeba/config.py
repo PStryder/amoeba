@@ -90,6 +90,35 @@ class RoleConfig:
 
 
 @dataclass(slots=True)
+class FilespaceRoot:
+    """One host directory Amoeba is allowed to touch, and how.
+
+    Nothing outside the configured roots is reachable. This is an allowlist at
+    the Harness layer rather than a check inside a tool, so there is no handler
+    that could be reached with a path the resolver never approved.
+    """
+    name: str = ""
+    path: str = ""
+    mode: str = "read_only"          # read_only | read_write
+    description: str = ""
+
+    def to_dict(self) -> dict[str, Any]:
+        return {k: getattr(self, k) for k in self.__slots__}
+
+
+@dataclass(slots=True)
+class FilespaceConfig:
+    roots: list[FilespaceRoot] = field(default_factory=list)
+    max_read_bytes: int = 4 * 1024 * 1024
+    max_write_bytes: int = 16 * 1024 * 1024
+    max_listing: int = 500
+    # Prior content is content-addressed before any overwrite or delete, so a
+    # write is always reversible. Turning this off means a neuocyte-authored
+    # write can destroy a file, which is the thing the design exists to stop.
+    snapshot_before_overwrite: bool = True
+
+
+@dataclass(slots=True)
 class Config:
     state_dir: Path = Path("F:/hexylab/amoeba-state")
     runtime_dir: Path = Path("F:/hexylab/amoeba-runtime")
@@ -103,6 +132,7 @@ class Config:
     backend: BackendConfig = field(default_factory=BackendConfig)
     arbiter: ArbiterConfig = field(default_factory=ArbiterConfig)
     sandbox: SandboxConfig = field(default_factory=SandboxConfig)
+    filespace: FilespaceConfig = field(default_factory=FilespaceConfig)
     homeostasis: "HomeostasisSettings" = field(default_factory=lambda: HomeostasisSettings())
     ego: RoleConfig = field(default_factory=RoleConfig)
     id: RoleConfig = field(default_factory=RoleConfig)
@@ -194,5 +224,24 @@ def load_config(path: str | os.PathLike[str] | None = None) -> Config:
         _apply(cfg.sandbox, raw["sandbox"], "sandbox")
     if "homeostasis" in raw:
         _apply(cfg.homeostasis, raw["homeostasis"], "homeostasis")
+    if "filespace" in raw:
+        fs = dict(raw["filespace"])
+        roots = fs.pop("roots", [])
+        _apply(cfg.filespace, fs, "filespace")
+        cfg.filespace.roots = [_root(r, i) for i, r in enumerate(roots)]
     cfg.ensure_dirs()
     return cfg
+
+
+def _root(raw: dict[str, Any], index: int) -> FilespaceRoot:
+    unknown = set(raw) - set(FilespaceRoot.__slots__)
+    if unknown:
+        raise ValueError(f"unknown filespace.roots[{index}] key(s): {sorted(unknown)}")
+    root = FilespaceRoot(**raw)
+    if not root.name or not root.path:
+        raise ValueError(f"filespace.roots[{index}] needs both name and path")
+    if root.mode not in ("read_only", "read_write"):
+        raise ValueError(
+            f"filespace.roots[{index}].mode must be read_only or read_write, "
+            f"got {root.mode!r}")
+    return root

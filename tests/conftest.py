@@ -112,7 +112,8 @@ class LiveStack:
 
 
 def _write_stack_config(tmp_path: Path, *, kind: str = "deterministic",
-                        overrides: dict[str, Any] | None = None) -> Path:
+                        overrides: dict[str, Any] | None = None,
+                        extra_toml: str = "") -> Path:
     ports = [_free_port() for _ in range(4)]
     state = (tmp_path / "state").as_posix()
     lines = [
@@ -149,14 +150,16 @@ def _write_stack_config(tmp_path: Path, *, kind: str = "deterministic",
     ]
     for key, value in (overrides or {}).items():
         lines.append(f"{key} = {value!r}")
+    if extra_toml:
+        lines += ["", extra_toml]
     path = tmp_path / "stack.toml"
     path.write_text("\n".join(lines), encoding="utf-8")
     return path
 
 
 def start_stack(tmp_path: Path, *, kind: str = "deterministic",
-                timeout: float = 180.0) -> LiveStack:
-    cfg_path = _write_stack_config(tmp_path, kind=kind)
+                timeout: float = 180.0, extra_toml: str = "") -> LiveStack:
+    cfg_path = _write_stack_config(tmp_path, kind=kind, extra_toml=extra_toml)
     cfg = load_config(cfg_path)
     env = dict(os.environ)
     env["PYTHONPATH"] = os.pathsep.join([str(ROOT / "src"), env.get("PYTHONPATH", "")])

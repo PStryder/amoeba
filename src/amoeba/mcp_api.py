@@ -467,6 +467,147 @@ def build_server(cfg: Config):  # noqa: C901
         """
         return facade.envelope(facade.call("board_corroboration", post_id=post_id))
 
+    # ---------------- host files ----------------
+    @mcp.tool(title="Files: what Amoeba may read and write")
+    @guarded
+    def mind_file_roots() -> dict[str, Any]:
+        """List the host directories Amoeba is allowed to touch, and how.
+
+        Nothing outside these is reachable. If the list is empty, Amoeba has no
+        host filesystem access at all -- which is the default.
+        """
+        return facade.envelope(facade.call("file_roots"))
+
+    @mcp.tool(title="Files: list")
+    @guarded
+    def mind_file_list(
+        root: Annotated[str, Field(description="Configured root name.", max_length=64)],
+        path: Annotated[str, Field(description="Subdirectory within the root.",
+                                   max_length=512)] = "",
+        limit: Annotated[int, Field(description="Max entries.", ge=1, le=500)] = 200,
+    ) -> dict[str, Any]:
+        """List files inside one configured root."""
+        return facade.envelope(
+            {"files": facade.call("file_list", root=root, path=path, limit=limit)})
+
+    @mcp.tool(title="Files: read")
+    @guarded
+    def mind_file_read(
+        root: Annotated[str, Field(description="Configured root name.", max_length=64)],
+        path: Annotated[str, Field(description="Path relative to the root.",
+                                   max_length=512)],
+    ) -> dict[str, Any]:
+        """Read a file from a configured root."""
+        return facade.envelope(facade.call("file_read", root=root, path=path,
+                                           actor="operator"))
+
+    @mcp.tool(title="Files: write")
+    @guarded
+    def mind_file_write(
+        root: Annotated[str, Field(description="Configured root name (must be "
+                                               "read_write).", max_length=64)],
+        path: Annotated[str, Field(description="Path relative to the root.",
+                                   max_length=512)],
+        content: Annotated[str, Field(description="File contents.")],
+        rationale: Annotated[str, Field(description="Why this is being written.",
+                                        max_length=2000)] = "",
+    ) -> dict[str, Any]:
+        """Write a file, preserving whatever was there before.
+
+        If the path already exists its content is content-addressed into the
+        blob store first and the digest is recorded, so the previous version
+        stays recoverable with `mind_file_restore`. A write here supersedes;
+        it does not destroy.
+        """
+        return facade.envelope(facade.call(
+            "file_write", root=root, path=path, content=content,
+            actor="operator", rationale=rationale))
+
+    @mcp.tool(title="Files: versions of a path")
+    @guarded
+    def mind_file_versions(
+        root: Annotated[str, Field(description="Configured root name.", max_length=64)],
+        path: Annotated[str, Field(description="Path relative to the root.",
+                                   max_length=512)],
+        limit: Annotated[int, Field(description="Max versions.", ge=1, le=200)] = 50,
+    ) -> dict[str, Any]:
+        """Every recorded version of one path, newest first.
+
+        Reconstructed from the event log rather than a separate index, so it
+        cannot drift from what actually happened. `restorable` says whether the
+        content is still in the blob store.
+        """
+        return facade.envelope({"versions": facade.call(
+            "file_versions", root=root, path=path, limit=limit)})
+
+    @mcp.tool(title="Files: restore an earlier version")
+    @guarded
+    def mind_file_restore(
+        root: Annotated[str, Field(description="Configured root name.", max_length=64)],
+        path: Annotated[str, Field(description="Path relative to the root.",
+                                   max_length=512)],
+        sha256: Annotated[str, Field(description="Digest from mind_file_versions.",
+                                     max_length=64)],
+    ) -> dict[str, Any]:
+        """Put an earlier version of a file back, by digest.
+
+        Restoring is itself a write, so whatever is currently there is
+        snapshotted too: undo is not a way to lose the current version.
+        """
+        return facade.envelope(facade.call("file_restore", root=root, path=path,
+                                           sha256=sha256, actor="operator"))
+
+    @mcp.tool(title="Files: delete")
+    @guarded
+    def mind_file_delete(
+        root: Annotated[str, Field(description="Configured root name.", max_length=64)],
+        path: Annotated[str, Field(description="Path relative to the root.",
+                                   max_length=512)],
+        reason: Annotated[str, Field(description="Why.", max_length=2000)] = "",
+    ) -> dict[str, Any]:
+        """Delete a file, keeping its content recoverable by digest."""
+        return facade.envelope(facade.call("file_delete", root=root, path=path,
+                                           actor="operator", reason=reason))
+
+    @mcp.tool(title="Files: hand a file to a work item")
+    @guarded
+    def mind_file_attach(
+        path: Annotated[str, Field(description="Absolute host path, inside a "
+                                               "configured root.", max_length=1024)],
+        work_id: Annotated[str, Field(description="Work item to attach it to.",
+                                      max_length=64)],
+    ) -> dict[str, Any]:
+        """Give a work item a file to work on.
+
+        The file is content-addressed on the way in and copied into that work
+        item's sandbox. Nothing is read that was not named here, and the named
+        file still has to be inside a configured root.
+        """
+        return facade.envelope(facade.call("file_attach", path=path,
+                                           work_id=work_id, actor="operator"))
+
+    @mcp.tool(title="Files: promote a proposed artifact to disk")
+    @guarded
+    def mind_artifact_promote(
+        artifact_id: Annotated[str, Field(description="Artifact to promote.",
+                                          max_length=64)],
+        root: Annotated[str, Field(description="Destination root. Omit to keep it "
+                                               "in the internal workspace.",
+                                   max_length=64)] = "",
+        path: Annotated[str, Field(description="Destination path within the root.",
+                                   max_length=512)] = "",
+    ) -> dict[str, Any]:
+        """Decide that something a neuocyte produced becomes a real file.
+
+        The content is re-hashed at the moment of copying and refused if it
+        changed since it was proposed, and anything already at the destination
+        is snapshotted first. The neuocyte that proposed it never named this
+        destination.
+        """
+        return facade.envelope(facade.call(
+            "artifact_promote", artifact_id=artifact_id, decided_by="operator",
+            root=root or None, path=path or None))
+
     # ---------------- provenance ----------------
     @mcp.tool(title="Provenance: resolve an operation")
     @guarded

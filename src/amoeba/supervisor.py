@@ -23,6 +23,7 @@ from typing import Any, Sequence
 
 from .arbiter import Arbiter, ResourceSnapshot
 from .config import Config, load_config
+from .filespace import Filespace
 from .errors import (
     BackendUnavailable, InvalidInput, MindError, NotFound, ResourceExhausted,
 )
@@ -131,6 +132,7 @@ class Supervisor:
         self._last_snapshot_publish = 0.0
         self._unreachable_since: dict[str, float] = {}
         self.sandboxes: SandboxManager | None = None
+        self.filespace: Filespace | None = None
         self._method_cache: dict[str, Any] | None = None
         # One sandbox per work item, owned by the Harness. A neuocyte never
         # names a sandbox and never creates or destroys one: it is resolved
@@ -248,6 +250,17 @@ class Supervisor:
                            hardening["audit"]["exposed_paths"])
         self.mind = Mind(self.cfg)
         self.homeostasis.mind = self.mind
+        # Configured host roots are Peter's directories, not Amoeba's state,
+        # so they are deliberately NOT hardened: locking down a directory the
+        # user works in would be a surprising side effect of pointing Amoeba
+        # at it.
+        self.filespace = Filespace(self.cfg.filespace)
+        if self.filespace.available():
+            self.log.info("filespace roots: %s",
+                          [r["name"] for r in self.filespace.roots()])
+        else:
+            self.log.info("no filespace roots configured; Amoeba has no host "
+                          "filesystem access")
         if self.cfg.sandbox.enabled:
             self.sandboxes = SandboxManager(self.cfg.sandbox_dir)
             ok, detail = self.sandboxes.available()

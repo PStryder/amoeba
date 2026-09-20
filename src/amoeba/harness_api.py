@@ -17,6 +17,7 @@ from __future__ import annotations
 
 import shutil
 import time
+from pathlib import Path
 from typing import TYPE_CHECKING, Any, Sequence
 
 from .errors import IntegrityError, InvalidInput, NotFound, ResourceExhausted
@@ -325,12 +326,20 @@ def build(sup: "Supervisor") -> dict[str, Any]:  # noqa: C901
                 "note": "proposed only; nothing has been copied out of the sandbox"}
 
     def artifact_promote(*, artifact_id: str, decided_by: str = "supervisor",
+                         root: str | None = None, path: str | None = None,
                          operation_id: str | None = None) -> dict[str, Any]:
-        """The Harness copies a proposed artifact into the durable workspace.
+        """The Harness copies a proposed artifact out of the sandbox.
 
-        The destination is chosen by the Harness. The caller never names a host
-        path, and the bytes are re-hashed on arrival so the receipt describes
-        what actually landed rather than what was promised.
+        Without ``root`` it lands in the internal workspace under a name the
+        Harness picks. With ``root`` it lands in a configured filespace root at
+        ``path`` -- this is how Amoeba produces a file you actually use, and it
+        is a *decision*, made here, on a destination the person deciding named.
+        The neuocyte that proposed the artifact never sees either.
+
+        The bytes are re-hashed on arrival so the receipt describes what landed
+        rather than what was promised, and anything already at the destination
+        is content-addressed first, so promoting over a file supersedes it
+        rather than destroying it.
         """
         row = mind.db.conn.execute(
             "SELECT * FROM artifacts WHERE artifact_id = ?", (artifact_id,)).fetchone()
@@ -374,11 +383,32 @@ def build(sup: "Supervisor") -> dict[str, Any]:  # noqa: C901
                 artifact_id=artifact_id, sha256_at_proposal=row["sha256"],
                 sha256_on_arrival=digest)
 
-        workspace = sup.cfg.workspace_dir
-        workspace.mkdir(parents=True, exist_ok=True)
-        # The Harness names the destination: artifact id + original basename.
-        dest = workspace / f"{artifact_id}_{src.name}"
-        dest.write_bytes(data)
+        prior_sha = prior_bytes = None
+        resolved = None
+        if root is not None:
+            # An explicit destination: still resolved through the allowlist,
+            # and still refused if it escapes or the root is read-only.
+            fs = _filespace()
+            try:
+                resolved = fs.resolve(root, path or src.name, need_write=True)
+            except InvalidInput as exc:
+                _deny(decided_by, exc.message,
+                      {"root": root, "path": (path or src.name)[:200],
+                       "operation": "promote", "artifact_id": artifact_id})
+                raise
+            if resolved.exists and resolved.path.is_file() \
+                    and sup.cfg.filespace.snapshot_before_overwrite:
+                existing = resolved.path.read_bytes()
+                prior_sha = mind.blobs.put(existing)
+                prior_bytes = len(existing)
+            fs.write_bytes(resolved, data)
+            dest = resolved.path
+        else:
+            workspace = sup.cfg.workspace_dir
+            workspace.mkdir(parents=True, exist_ok=True)
+            # The Harness names the destination: artifact id + original basename.
+            dest = workspace / f"{artifact_id}_{src.name}"
+            dest.write_bytes(data)
         blob = mind.blobs.put(data)
 
         def body(m: Mutation) -> None:
@@ -386,19 +416,39 @@ def build(sup: "Supervisor") -> dict[str, Any]:  # noqa: C901
             m.sql("UPDATE artifacts SET status = 'promoted', decided_by = ?,"
                   " decided_at = ?, sha256 = ? WHERE artifact_id = ?",
                   (decided_by, time.time(), digest, artifact_id))
+            if prior_sha:
+                m.register_blob(prior_sha, prior_bytes or 0,
+                                "application/octet-stream", "file_version")
+                m.emit(EventKind.FILE_SUPERSEDED, {
+                    "root": root, "path": resolved.relpath,
+                    "host_path": str(dest), "prior_sha256": prior_sha,
+                    "prior_bytes": prior_bytes, "restorable": True,
+                    "superseded_by": artifact_id})
             m.emit(EventKind.ARTIFACT_PROMOTED, {
                 "artifact_id": artifact_id, "decided_by": decided_by,
                 "workspace_path": dest.name, "bytes": len(data),
                 "sha256_at_proposal": row["sha256"], "sha256_on_arrival": digest,
                 "content_changed_since_proposal": digest != row["sha256"],
-                "blob": blob})
+                "blob": blob, "root": root,
+                "path": resolved.relpath if resolved else None,
+                "host_path": str(dest)})
+            if root is not None:
+                m.emit(EventKind.FILE_WRITTEN, {
+                    "root": root, "path": resolved.relpath,
+                    "host_path": str(dest), "actor": decided_by,
+                    "bytes": len(data), "sha256": digest,
+                    "rationale": f"promotion of artifact {artifact_id}",
+                    "overwrote": bool(prior_sha)})
 
         receipt, _ = mind.writer.apply(body, actor=decided_by,
                                        operation_id=operation_id,
                                        mutation_id=f"art-promote:{artifact_id}")
         return {"artifact_id": artifact_id, "status": "promoted",
-                "workspace_path": dest.name, "bytes": len(data), "sha256": digest,
+                "workspace_path": dest.name, "host_path": str(dest),
+                "root": root, "path": resolved.relpath if resolved else None,
+                "bytes": len(data), "sha256": digest,
                 "content_verified": True, "blob": blob,
+                "overwrote": bool(prior_sha), "prior_sha256": prior_sha,
                 "receipt_id": receipt.receipt_id}
 
     def artifact_reject(*, artifact_id: str, reason: str,
@@ -436,6 +486,254 @@ def build(sup: "Supervisor") -> dict[str, Any]:  # noqa: C901
     # ==================================================================
     # Context homeostasis
     # ==================================================================
+    # ==================================================================
+    # Host filesystem
+    # ==================================================================
+    def _filespace():
+        if sup.filespace is None or not sup.filespace.available():
+            raise ResourceExhausted(
+                "no filespace roots are configured; Amoeba has nowhere on "
+                "disk it is permitted to read or write")
+        return sup.filespace
+
+    def _deny(actor: str, reason: str, detail: dict[str, Any]) -> None:
+        """A refused path is a fact about how the mind governed itself."""
+        def body(m: Mutation) -> None:
+            m.emit(EventKind.FILE_DENIED,
+                   {"actor": actor, "reason": reason, **detail})
+
+        mind.writer.apply(body, actor=actor, bump_version=False)
+
+    def file_roots() -> dict[str, Any]:
+        if sup.filespace is None:
+            return {"filespace_available": False, "roots": [],
+                    "detail": "filespace not initialised"}
+        return sup.filespace.capabilities()
+
+    def file_list(*, root: str, path: str = "", limit: int = 200
+                  ) -> list[dict[str, Any]]:
+        return _filespace().list(root, path, limit=limit)
+
+    def file_read(*, root: str, path: str, max_bytes: int | None = None,
+                  actor: str = "supervisor") -> dict[str, Any]:
+        fs = _filespace()
+        try:
+            resolved = fs.resolve(root, path)
+        except InvalidInput as exc:
+            _deny(actor, exc.message, {"root": root, "path": path[:200],
+                                       "operation": "read"})
+            raise
+        data, truncated = fs.read_bytes(resolved, max_bytes=max_bytes)
+        return {**resolved.to_dict(), "bytes": len(data), "truncated": truncated,
+                "sha256": sha256_hex(data),
+                "content": data.decode("utf-8", "replace")}
+
+    def file_write(*, root: str, path: str, content: str,
+                   actor: str = "supervisor", rationale: str = "",
+                   operation_id: str | None = None) -> dict[str, Any]:
+        """Write a file, preserving whatever was there before.
+
+        The prior bytes are content-addressed into the blob store *before* the
+        write and the digest goes into the event log, so a write is always a
+        supersession rather than a destruction. `file_restore` puts any earlier
+        version back by digest.
+
+        This is a Harness verb. A neuocyte reaches the host filesystem only by
+        proposing an artifact, which is decided separately.
+        """
+        fs = _filespace()
+        try:
+            resolved = fs.resolve(root, path, need_write=True)
+        except InvalidInput as exc:
+            _deny(actor, exc.message, {"root": root, "path": path[:200],
+                                       "operation": "write"})
+            raise
+
+        data = content.encode("utf-8")
+        prior_sha = prior_bytes = None
+        if resolved.exists and resolved.path.is_file():
+            if sup.cfg.filespace.snapshot_before_overwrite:
+                existing = resolved.path.read_bytes()
+                prior_sha = mind.blobs.put(existing)
+                prior_bytes = len(existing)
+            else:
+                prior_sha = None
+
+        out = fs.write_bytes(resolved, data)
+
+        def body(m: Mutation) -> None:
+            if prior_sha:
+                m.register_blob(prior_sha, prior_bytes or 0,
+                                "application/octet-stream", "file_version")
+                m.emit(EventKind.FILE_SUPERSEDED, {
+                    "root": root, "path": resolved.relpath,
+                    "host_path": str(resolved.path),
+                    "prior_sha256": prior_sha, "prior_bytes": prior_bytes,
+                    "restorable": True,
+                    "note": "previous content is recoverable by this digest"})
+            m.emit(EventKind.FILE_WRITTEN, {
+                "root": root, "path": resolved.relpath,
+                "host_path": str(resolved.path), "actor": actor,
+                "bytes": out["bytes"], "sha256": out["sha256"],
+                "rationale": rationale[:500],
+                "overwrote": bool(prior_sha)})
+
+        receipt, _ = mind.writer.apply(body, actor=actor,
+                                       operation_id=operation_id)
+        return {**out, "overwrote": bool(prior_sha),
+                "prior_sha256": prior_sha,
+                "receipt_id": receipt.receipt_id,
+                "note": ("the previous content is preserved and restorable"
+                         if prior_sha else "no previous file at this path")}
+
+    def file_delete(*, root: str, path: str, actor: str = "supervisor",
+                    reason: str = "", operation_id: str | None = None
+                    ) -> dict[str, Any]:
+        """Delete a file, keeping its content recoverable."""
+        fs = _filespace()
+        try:
+            resolved = fs.resolve(root, path, need_write=True)
+        except InvalidInput as exc:
+            _deny(actor, exc.message, {"root": root, "path": path[:200],
+                                       "operation": "delete"})
+            raise
+        prior_sha = prior_bytes = None
+        if resolved.path.is_file() and sup.cfg.filespace.snapshot_before_overwrite:
+            existing = resolved.path.read_bytes()
+            prior_sha = mind.blobs.put(existing)
+            prior_bytes = len(existing)
+        out = fs.delete(resolved)
+
+        def body(m: Mutation) -> None:
+            if prior_sha:
+                m.register_blob(prior_sha, prior_bytes or 0,
+                                "application/octet-stream", "file_version")
+            m.emit(EventKind.FILE_DELETED, {
+                "root": root, "path": resolved.relpath,
+                "host_path": str(resolved.path), "actor": actor,
+                "reason": reason[:500], "prior_sha256": prior_sha,
+                "prior_bytes": prior_bytes, "restorable": bool(prior_sha)})
+
+        receipt, _ = mind.writer.apply(body, actor=actor,
+                                       operation_id=operation_id)
+        return {**out, "prior_sha256": prior_sha,
+                "receipt_id": receipt.receipt_id,
+                "note": ("content is recoverable by digest via file_restore"
+                         if prior_sha else "content was NOT snapshotted")}
+
+    def file_restore(*, root: str, path: str, sha256: str,
+                     actor: str = "supervisor", operation_id: str | None = None
+                     ) -> dict[str, Any]:
+        """Put an earlier version back, by digest.
+
+        The counterpart that makes supersession meaningful. Restoring is itself
+        a write, so the content being replaced is snapshotted too -- undo is
+        not a way to lose the current version.
+        """
+        fs = _filespace()
+        resolved = fs.resolve(root, path, need_write=True)
+        if not mind.blobs.exists(sha256):
+            raise NotFound("no stored content with that digest", sha256=sha256,
+                           hint="file_versions lists the digests for a path")
+        data = mind.blobs.get(sha256)
+
+        prior_sha = prior_bytes = None
+        if resolved.exists and resolved.path.is_file():
+            existing = resolved.path.read_bytes()
+            prior_sha = mind.blobs.put(existing)
+            prior_bytes = len(existing)
+        out = fs.write_bytes(resolved, data)
+
+        def body(m: Mutation) -> None:
+            if prior_sha:
+                m.register_blob(prior_sha, prior_bytes or 0,
+                                "application/octet-stream", "file_version")
+            m.emit(EventKind.FILE_RESTORED, {
+                "root": root, "path": resolved.relpath,
+                "host_path": str(resolved.path), "actor": actor,
+                "restored_sha256": sha256, "replaced_sha256": prior_sha,
+                "bytes": out["bytes"]})
+
+        receipt, _ = mind.writer.apply(body, actor=actor,
+                                       operation_id=operation_id)
+        return {**out, "restored_sha256": sha256, "replaced_sha256": prior_sha,
+                "receipt_id": receipt.receipt_id}
+
+    def file_versions(*, root: str, path: str, limit: int = 50
+                      ) -> list[dict[str, Any]]:
+        """Every recorded version of one path, newest first.
+
+        Reconstructed from the event log rather than a separate index, so it
+        cannot drift from what actually happened.
+        """
+        from .store.events import read_events
+
+        resolved = _filespace().resolve(root, path)
+        wanted = (EventKind.FILE_WRITTEN, EventKind.FILE_SUPERSEDED,
+                  EventKind.FILE_DELETED, EventKind.FILE_RESTORED)
+        out: list[dict[str, Any]] = []
+        for ev in read_events(mind.db.conn, kinds=list(wanted), limit=2000):
+            payload = ev.payload(mind.blobs) or {}
+            if payload.get("root") != root or payload.get("path") != resolved.relpath:
+                continue
+            digest = (payload.get("prior_sha256") if ev.kind in
+                      (EventKind.FILE_SUPERSEDED, EventKind.FILE_DELETED)
+                      else payload.get("sha256"))
+            if not digest:
+                continue
+            out.append({"sha256": digest, "kind": ev.kind, "seq": ev.seq,
+                        "ts": ev.ts, "actor": ev.actor_id,
+                        "bytes": payload.get("bytes") or payload.get("prior_bytes"),
+                        "restorable": mind.blobs.exists(digest)})
+        out.sort(key=lambda r: r["seq"], reverse=True)
+        return out[:limit]
+
+    def file_attach(*, path: str, work_id: str, actor: str = "supervisor",
+                    as_name: str | None = None, operation_id: str | None = None
+                    ) -> dict[str, Any]:
+        """Hand a host file to a work item so a neuocyte can work on it.
+
+        Nothing is read that was not named here, and the named file still has
+        to be inside a configured root. The content is content-addressed on the
+        way in, so what a neuocyte saw is recoverable later by digest -- a
+        finding about a file can be checked against the exact bytes that
+        produced it.
+        """
+        fs = _filespace()
+        try:
+            resolved = fs.resolve_host_path(path)
+        except InvalidInput as exc:
+            _deny(actor, exc.message, {"path": path[:200], "operation": "attach",
+                                       "work_id": work_id})
+            raise
+        data, truncated = fs.read_bytes(resolved)
+        if truncated:
+            raise ResourceExhausted(
+                "file exceeds the filespace read limit",
+                limit=sup.cfg.filespace.max_read_bytes, path=resolved.relpath)
+
+        digest = mind.blobs.put(data)
+        sandbox_id = sup.sandbox_for_work(work_id, owner=actor)
+        name = as_name or Path(resolved.path).name
+        dest = f"work/{Path(name).name}"
+        _sandbox_manager().write_file(sandbox_id, dest, data.decode("utf-8", "replace"))
+
+        def body(m: Mutation) -> None:
+            m.register_blob(digest, len(data), "application/octet-stream",
+                            "attachment")
+            m.emit(EventKind.FILE_ATTACHED, {
+                "root": resolved.root_name, "path": resolved.relpath,
+                "host_path": str(resolved.path), "work_id": work_id,
+                "sandbox_id": sandbox_id, "sandbox_path": dest,
+                "bytes": len(data), "sha256": digest, "actor": actor})
+
+        receipt, _ = mind.writer.apply(body, actor=actor,
+                                       operation_id=operation_id)
+        return {"root": resolved.root_name, "path": resolved.relpath,
+                "work_id": work_id, "sandbox_id": sandbox_id,
+                "sandbox_path": dest, "bytes": len(data), "sha256": digest,
+                "receipt_id": receipt.receipt_id}
+
     # ==================================================================
     # Tool execution
     # ==================================================================
@@ -564,6 +862,11 @@ def build(sup: "Supervisor") -> dict[str, Any]:  # noqa: C901
         "artifact_reject": artifact_reject, "artifact_list": artifact_list,
         # tool execution
         "tool_invoke": tool_invoke, "tool_schemas": tool_schemas,
+        # host filesystem
+        "file_roots": file_roots, "file_list": file_list,
+        "file_read": file_read, "file_write": file_write,
+        "file_delete": file_delete, "file_restore": file_restore,
+        "file_versions": file_versions, "file_attach": file_attach,
         # homeostasis
         "context_report": context_report, "context_assess": context_assess,
         "context_rejuvenate": context_rejuvenate,

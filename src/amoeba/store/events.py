@@ -83,6 +83,15 @@ class EventKind:
     ARTIFACT_PROMOTED = "artifact.promoted"
     ARTIFACT_REJECTED = "artifact.rejected"
 
+    # host filesystem. FILE_SUPERSEDED carries the digest of the content that
+    # was there before, which is what makes every write reversible.
+    FILE_WRITTEN = "file.written"
+    FILE_SUPERSEDED = "file.superseded"
+    FILE_DELETED = "file.deleted"
+    FILE_RESTORED = "file.restored"
+    FILE_ATTACHED = "file.attached"
+    FILE_DENIED = "file.denied"
+
     # context homeostasis
     CONTEXT_MEASURED = "context.measured"
     CONTEXT_PRESSURE = "context.pressure"
