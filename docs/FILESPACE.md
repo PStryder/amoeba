@@ -95,15 +95,54 @@ path than POSIX. Each of these is refused explicitly:
 | device names (`CON`, `NUL`, `COM1`) | open a device, not a file |
 | trailing dots and spaces | Windows strips them, so `x.txt.` and `x.txt` are one file that compares as two names |
 | symlinks and junctions | a link inside the root can point anywhere |
+| **hard links** | a second name for the same file record; nothing about the path is unusual, so only the link count reveals it |
 
 Whitespace is deliberately *not* stripped from a path. Stripping would turn
 `notes.txt ` into `notes.txt` silently — resolving the ambiguity instead of
 refusing it, which is the opposite of the job.
 
-Links are the interesting case, because the string looks fine: a junction
-inside a root is an ordinary-looking name that resolves elsewhere. Paths are
-resolved fully and re-checked for containment, listings skip links rather than
-walking through them, and writes refuse to go through one at all.
+Symlinks and junctions are the first interesting case, because the string
+looks fine: a junction inside a root is an ordinary-looking name that resolves
+elsewhere. Paths are resolved fully and re-checked for containment, listings
+skip them rather than walking through, and writes refuse to go through one.
+
+**Hard links are the harder case**, and the first implementation was wrong
+about them. A hard link is not a pointer to a file — it *is* the file, a second
+directory entry for the same record. There is nothing to resolve,
+`is_symlink()` is false, and containment says "inside the root" and is telling
+the truth about the path while being wrong about the file.
+
+Measured, not reasoned about:
+
+```
+mklink /H out\innocent.txt private\secret.txt
+  same volume serial + file index, st_nlink = 2, is_symlink() = False
+  containment: INSIDE
+  READ   -> returned "ORIGINAL SECRET"   ← leak
+  WRITE  -> outside file unchanged
+  DELETE -> outside name survived
+```
+
+So the read was a genuine leak: the allowlist was a claim about paths, not
+about files. Files with more than one name are now refused at resolution, and
+listings show them flagged `multiply_linked` / `accessible: false` rather than
+hiding them.
+
+The write result deserves explaining rather than celebrating. `write_bytes`
+writes a temp file and renames it over the target, which replaces the
+*directory entry* — so a write never modifies an existing file record in place
+and cannot reach a file's other names. That is real, but it was accidental, and
+rewriting it as `path.write_bytes(data)` would silently make write-through
+live. It is pinned by a test. Its flip side: writing to a legitimately
+hard-linked file silently breaks the link, leaving the other name with the old
+content.
+
+Delete is safe by NTFS semantics — the record survives until its last name is
+removed.
+
+`allow_multiply_linked = true` turns the refusal off. It is off by default, and
+turning it on really does open the door; there is a test that pins that too, so
+the flag cannot quietly stop meaning anything.
 
 ## Residual risk, stated plainly
 

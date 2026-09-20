@@ -31,9 +31,19 @@ whatever ``Path`` happens to do:
 | device names (``CON``, ``NUL``, ``COM1``) | open a device, not a file, wherever they appear |
 | trailing dots and spaces | Windows silently strips them, so ``secret.txt.`` and ``secret.txt`` are the same file but compare differently |
 | symlinks and junctions | a link inside the root can point anywhere |
+| **hard links** | a second name for the same file record; nothing about the path is unusual, so only the link count reveals it |
 
-Links are handled by resolving fully and re-checking containment, and writes
-refuse to go *through* a link at all.
+Symlinks and junctions are handled by resolving fully and re-checking
+containment, and writes refuse to go *through* one at all.
+
+Hard links are a different problem and were missed on the first pass. A
+hard link does not *point* at a file, it **is** the file: a second
+directory entry for the same MFT record. ``resolve()`` has nothing to
+resolve, ``is_symlink()`` is False, and containment correctly reports the
+path as inside the root while the record is also reachable under a name
+outside it. Measured before the fix: a planted hard link read content from
+outside the root. The only signal is the file's link count, so a file with
+more than one name is refused.
 
 ## The honest gap
 
@@ -114,6 +124,21 @@ def _reject_component(part: str) -> None:
         raise FilespaceDenied("invalid character in path", component=part)
 
 
+def _link_count(path: Path) -> int:
+    """How many names this file record has.
+
+    Windows populates ``st_nlink`` from the file's link count, so a hard link
+    is detectable even though nothing about the *path* is unusual. Anything
+    that cannot be stat'd is reported as 1 rather than raising: the callers
+    treat a count above 1 as a refusal, and failing to stat should not become
+    an accidental grant.
+    """
+    try:
+        return int(os.stat(path).st_nlink)
+    except OSError:
+        return 1
+
+
 class Filespace:
     """Resolution and raw IO. Receipts and events belong to the Harness."""
 
@@ -159,6 +184,11 @@ class Filespace:
                           "SNAPSHOTTING IS DISABLED: writes can destroy content"),
             "max_read_bytes": self.cfg.max_read_bytes,
             "max_write_bytes": self.cfg.max_write_bytes,
+            "hard_links": ("files with more than one name are refused: a hard "
+                           "link is the same file record under another name, so "
+                           "path containment does not bound it"
+                           if not self.cfg.allow_multiply_linked else
+                           "ALLOWED: a hard link can reach a file outside a root"),
             "residual_risk": ("resolution and open are not atomic; a link "
                               "swapped between them would be followed"),
         }
@@ -227,6 +257,18 @@ class Filespace:
             raise FilespaceDenied(
                 "refusing to write through a symbolic link or junction",
                 root=root_name, path=relpath)
+        if exists and not self.cfg.allow_multiply_linked:
+            links = _link_count(final)
+            if links > 1:
+                # Containment passed and was honest about the path. A hard link
+                # is a second name for the same file record, so the file is
+                # also reachable somewhere this root does not cover -- possibly
+                # outside it entirely. `resolve()` has nothing to resolve and
+                # `is_symlink()` is False, so this is the only signal there is.
+                raise FilespaceDenied(
+                    "refusing a file with more than one name (hard link); it is "
+                    "reachable outside this root",
+                    root=root_name, path=relpath, link_count=links)
 
         return ResolvedPath(root_name=root_name, relpath="/".join(parts),
                             path=final, writable=root.mode == "read_write",
@@ -290,11 +332,18 @@ class Filespace:
                 stat = path.stat()
             except OSError:
                 continue
+            links = int(getattr(stat, "st_nlink", 1) or 1)
             yield {
                 "path": path.relative_to(root_path).as_posix(),
                 "is_dir": path.is_dir(),
                 "bytes": stat.st_size if path.is_file() else None,
                 "modified": stat.st_mtime,
+                # Surfaced rather than hidden: the entry exists, and whether it
+                # may be opened is a separate answer the caller should be able
+                # to see the reason for.
+                "multiply_linked": links > 1 and path.is_file(),
+                "accessible": not (links > 1 and path.is_file()
+                                   and not self.cfg.allow_multiply_linked),
             }
             count += 1
 
@@ -315,6 +364,16 @@ class Filespace:
         failure part-way leaves the previous file intact rather than a truncated
         one. Snapshotting of the prior content is the Harness's job -- it owns
         the blob store and the event log.
+
+        The rename has a second effect that was found by experiment rather than
+        designed: it replaces the *directory entry*, so a write never modifies
+        an existing file record in place. A hard link in the root therefore
+        cannot be used to write through to the file's other names -- the link
+        is broken and the new bytes land in a new record. That is a real
+        property and it is pinned by a test, because rewriting this as
+        ``path.write_bytes(data)`` would silently make write-through live
+        again. It is a second line of defence: multiply-linked files are
+        refused at resolution.
         """
         if len(data) > self.cfg.max_write_bytes:
             raise ResourceExhausted("file exceeds the filespace write limit",

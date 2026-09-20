@@ -253,3 +253,133 @@ def test_capabilities_state_the_residual_risk(fs):
     assert "refused" in caps["outside_roots"]
     assert "not atomic" in caps["residual_risk"]
     assert "reversible" in caps["overwrite"]
+
+
+# ---------------------------------------------------------------------------
+# Hard links: the trap where nothing about the path is unusual.
+#
+# A symlink or junction points at something, so resolving it and re-checking
+# containment catches it. A hard link is not a pointer: it is a second
+# directory entry for the same file record. `resolve()` has nothing to resolve
+# and `is_symlink()` is False, so path containment says "inside the root" and
+# is telling the truth about the path while being wrong about the file.
+#
+# Measured before it was fixed: reading through a planted hard link returned
+# content from outside the root.
+# ---------------------------------------------------------------------------
+def _hardlink(link: Path, target: Path) -> bool:
+    r = subprocess.run(["cmd", "/c", "mklink", "/H", str(link), str(target)],
+                       capture_output=True, text=True)
+    return r.returncode == 0
+
+
+@pytest.mark.skipif(sys.platform != "win32", reason="NTFS hard links are Windows-only")
+def test_a_hard_link_into_the_root_cannot_be_used_to_read_outside_it(fs):
+    """The leak this was found by.
+
+    Path containment passes and is correct about the path. The file is still
+    reachable under another name that the root does not cover.
+    """
+    link = fs.rw / "innocent.txt"
+    if not _hardlink(link, fs.outside / "secret.txt"):
+        pytest.skip("could not create a hard link (same volume required)")
+
+    # The premise: nothing about this path looks wrong.
+    assert link.is_symlink() is False
+    assert os.stat(link).st_nlink == 2
+    assert link.resolve().parent == fs.rw
+
+    with pytest.raises(FilespaceDenied) as exc:
+        fs.resolve("out", "innocent.txt")
+    assert "hard link" in exc.value.message
+
+    with pytest.raises(FilespaceDenied):
+        fs.resolve("out", "innocent.txt", need_write=True)
+
+    assert (fs.outside / "secret.txt").read_bytes() == b"SECRET"
+
+
+@pytest.mark.skipif(sys.platform != "win32", reason="NTFS hard links are Windows-only")
+def test_a_hard_linked_file_is_listed_but_marked_inaccessible(fs):
+    """Shown, not hidden.
+
+    The entry exists and pretending otherwise would be its own kind of lie.
+    Whether it may be opened is a separate answer, and the listing carries the
+    reason so it is visible rather than mysterious.
+    """
+    link = fs.rw / "innocent.txt"
+    if not _hardlink(link, fs.outside / "secret.txt"):
+        pytest.skip("could not create a hard link")
+
+    entry = next(e for e in fs.list("out") if e["path"] == "innocent.txt")
+    assert entry["multiply_linked"] is True
+    assert entry["accessible"] is False
+    ordinary = next(e for e in fs.list("out") if e["path"] == "existing.txt")
+    assert ordinary["multiply_linked"] is False
+    assert ordinary["accessible"] is True
+
+
+@pytest.mark.skipif(sys.platform != "win32", reason="NTFS hard links are Windows-only")
+def test_allowing_multiply_linked_files_is_a_deliberate_choice(fs):
+    """The escape hatch exists, and turning it on really does open the door.
+
+    Pinned so the default cannot quietly become permissive: if this stops
+    reading through the link, the config flag has stopped meaning anything.
+    """
+    link = fs.rw / "innocent.txt"
+    if not _hardlink(link, fs.outside / "secret.txt"):
+        pytest.skip("could not create a hard link")
+
+    fs.cfg.allow_multiply_linked = True
+    data, _ = fs.read_bytes(fs.resolve("out", "innocent.txt"))
+    assert data == b"SECRET", (
+        "with the flag on this should read through; if it does not, the flag "
+        "is not the thing controlling this behaviour")
+
+
+@pytest.mark.skipif(sys.platform != "win32", reason="NTFS hard links are Windows-only")
+def test_a_write_replaces_the_directory_entry_rather_than_the_file_record(fs):
+    """Pinning behaviour that is load-bearing and was found by experiment.
+
+    `write_bytes` writes a temporary file and renames it over the target, which
+    replaces the *directory entry*. An existing file record is therefore never
+    modified in place, so a write cannot reach a file's other names even if one
+    slipped past resolution.
+
+    This is a second line of defence -- multiply-linked files are refused at
+    resolution -- but it is real, and rewriting this as `path.write_bytes(data)`
+    would silently make write-through live again. Hence a test rather than a
+    comment.
+    """
+    link = fs.rw / "innocent.txt"
+    if not _hardlink(link, fs.outside / "secret.txt"):
+        pytest.skip("could not create a hard link")
+
+    fs.cfg.allow_multiply_linked = True     # get past resolution deliberately
+    resolved = fs.resolve("out", "innocent.txt", need_write=True)
+    fs.write_bytes(resolved, b"OVERWRITTEN")
+
+    assert (fs.outside / "secret.txt").read_bytes() == b"SECRET", (
+        "the write reached the file's other name; write_bytes is no longer "
+        "replacing the directory entry")
+    assert (fs.rw / "innocent.txt").read_bytes() == b"OVERWRITTEN"
+    assert os.stat(fs.outside / "secret.txt").st_nlink == 1, (
+        "the link should have been broken by the rename")
+
+
+@pytest.mark.skipif(sys.platform != "win32", reason="NTFS hard links are Windows-only")
+def test_deleting_a_hard_link_does_not_remove_the_other_name(fs):
+    """NTFS semantics, asserted rather than assumed."""
+    link = fs.rw / "innocent.txt"
+    if not _hardlink(link, fs.outside / "secret.txt"):
+        pytest.skip("could not create a hard link")
+
+    fs.cfg.allow_multiply_linked = True
+    fs.delete(fs.resolve("out", "innocent.txt", need_write=True))
+    assert (fs.outside / "secret.txt").read_bytes() == b"SECRET"
+
+
+def test_capabilities_state_the_hard_link_policy(fs):
+    assert "refused" in fs.capabilities()["hard_links"]
+    fs.cfg.allow_multiply_linked = True
+    assert "ALLOWED" in fs.capabilities()["hard_links"]

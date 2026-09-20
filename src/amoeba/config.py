@@ -116,6 +116,13 @@ class FilespaceConfig:
     # write is always reversible. Turning this off means a neuocyte-authored
     # write can destroy a file, which is the thing the design exists to stop.
     snapshot_before_overwrite: bool = True
+    # An NTFS hard link is not a pointer to a file, it *is* the file: a
+    # second directory entry for the same record. Path containment says
+    # "inside the root" and is telling the truth about the path while
+    # being wrong about the file. Measured: reading through a planted hard
+    # link returned content from outside the root. Refusing multiply-linked
+    # files is what keeps the allowlist a statement about files.
+    allow_multiply_linked: bool = False
 
 
 @dataclass(slots=True)

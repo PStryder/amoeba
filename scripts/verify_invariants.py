@@ -488,6 +488,21 @@ MUTATIONS: list[Mutation] = [
         layer="Filespace.resolve_host_path (the allowlist check)",
     ),
     Mutation(
+        "I37d", "A hard link is not a way to reach a file outside a root",
+        "src/amoeba/filespace.py",
+        "        if exists and not self.cfg.allow_multiply_linked:\n"
+        "            links = _link_count(final)\n"
+        "            if links > 1:",
+        "        if False:\n"
+        "            links = _link_count(final)\n"
+        "            if links > 1:",
+        ["test_a_hard_link_into_the_root_cannot_be_used_to_read_outside_it"],
+        layer="Filespace.resolve (the link-count check)",
+        note="the leak this was found by. Path containment passes and is "
+             "correct about the path; only the file's link count says the "
+             "record has another name the root does not cover.",
+    ),
+    Mutation(
         "I38", "Prior content is preserved before an overwrite",
         "src/amoeba/harness_api.py",
         "            if sup.cfg.filespace.snapshot_before_overwrite:\n"

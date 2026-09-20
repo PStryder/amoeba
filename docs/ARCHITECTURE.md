@@ -309,6 +309,16 @@ resolved, before any handler sees it.
 `test_a_read_only_root_refuses_writes_through_the_harness`,
 `test_promotion_cannot_target_a_read_only_root`
 
+**I37d. Containment is about files, not only paths.** An NTFS hard link is a
+second directory entry for the same file record, so nothing about the path is
+unusual: `resolve()` has nothing to resolve and `is_symlink()` is false, and
+containment says "inside the root" while being wrong about the file. Measured
+before it was fixed — a planted hard link read content from outside the root.
+Files with more than one name are refused, and listings mark them.
+→ `test_a_hard_link_into_the_root_cannot_be_used_to_read_outside_it`,
+`test_a_hard_linked_file_is_listed_but_marked_inaccessible`,
+`test_a_write_replaces_the_directory_entry_rather_than_the_file_record`
+
 **I38. No write destroys.** Prior content is content-addressed into the blob
 store before any overwrite, delete or promotion-over, and the digest goes in
 the event log, so every version is recoverable. Restoring is itself a write, so
