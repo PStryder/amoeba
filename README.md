@@ -747,7 +747,7 @@ Let's find out.
 
 ## License
 
-TBD
+MIT
 
 ---
 
