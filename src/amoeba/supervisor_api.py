@@ -1016,6 +1016,32 @@ def build(sup: "Supervisor") -> dict[str, Any]:
                                  "trigger id")}
             time.sleep(0.1)
 
+    def role_answer(*, trigger_id: str, wait_seconds: float = 0.0
+                    ) -> dict[str, Any]:
+        """The answer of record for one queued request.
+
+        `_await_turn` says an unanswered request's answer stays retrievable by
+        trigger id. Nothing exposed it, so a caller whose wait elapsed had the
+        answer written durably against its request and no way to read it.
+
+        A conversational surface needs exactly this: ask, let go of the
+        connection, and come back. A thought that takes continuation turns
+        outlives any single HTTP request, and holding a socket open for the
+        duration is not the same thing as being able to collect an answer.
+
+        Read-only and scoped to one request. It reports on the question the
+        caller asked and carries no authority over the role that answers it.
+        """
+        settled = _await_turn(trigger_id,
+                              timeout=max(0.0, float(wait_seconds)))
+        result = settled.get("result") or {}
+        out = {"trigger_id": trigger_id, "status": settled["status"],
+               "answer": result.get("answer", ""),
+               "is_simulated": bool(result.get("is_simulated"))}
+        if settled.get("note"):
+            out["note"] = settled["note"]
+        return out
+
     def _label_simulation(result: dict[str, Any] | None,
                           limitations: list[str]) -> None:
         """Say plainly when text came from a stub rather than a model.
@@ -1640,6 +1666,7 @@ def build(sup: "Supervisor") -> dict[str, Any]:
         # cognitive verbs
         "ego_converse": ego_converse, "ego_investigate": ego_investigate,
         "ego_recall": ego_recall, "ego_status": ego_status,
+        "role_answer": role_answer,
         "id_introspect": id_introspect, "id_health": id_health, "id_audit": id_audit,
         "id_disagreements": id_disagreements, "id_maintenance": id_maintenance,
         # misc

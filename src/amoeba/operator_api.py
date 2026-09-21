@@ -72,6 +72,7 @@ OPERATOR_VERBS = (
     "sandbox_capabilities", "sandbox_list",
     # conversation
     "ego_converse", "ego_investigate", "ego_recall", "ego_status",
+    "role_answer",
     "operator_consult_id", "operator_backchannel",
     # homeostasis
     "context_report", "context_assess", "context_rejuvenate",
@@ -207,6 +208,8 @@ def build(sup: "Supervisor") -> dict[str, Any]:
     # Conversation
     # ==================================================================
     def operator_consult_id(*, question: str, scope: str = "all",
+                            wait: bool = True,
+                            wait_seconds: float | None = None,
                             operation_id: str | None = None) -> dict[str, Any]:
         """Ask Id something directly.
 
@@ -225,8 +228,16 @@ def build(sup: "Supervisor") -> dict[str, Any]:
         receipt, _ = mind.writer.apply(body, actor="operator",
                                        operation_id=operation_id,
                                        bump_version=False)
+        # The wait is the caller's to choose. Holding the connection open for
+        # two minutes is fine for a script and wrong for a browser, which can
+        # queue the question and collect the answer with `role_answer`.
+        # Not `operation_id`: `id_introspect` opens its own operation and has
+        # never taken one. Passing it raised TypeError on every call, so this
+        # verb answered nothing from the day it was written -- a whole
+        # operator surface that no test ever called.
         answer = sup.methods()["id_introspect"](question=question, scope=scope,
-                                                operation_id=operation_id)
+                                                wait=wait,
+                                                wait_seconds=wait_seconds)
         return {"consult_id": consult_id, "receipt_id": receipt.receipt_id,
                 "answer": answer}
 

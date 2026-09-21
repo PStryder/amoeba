@@ -61,6 +61,22 @@ DASHBOARD_HTML = """<!doctype html>
   .pill { display:inline-block; padding:.05rem .45rem; border-radius:999px;
           font-size:11px; border:1px solid var(--line); color:var(--dim); }
   .good { color:var(--good); } .warn { color:var(--warn); } .bad { color:var(--bad); }
+  .chat { grid-column:1/-1; display:flex; flex-direction:column;
+          height:calc(100vh - 8.5rem); min-height:20rem; }
+  .chat > * { width:min(58rem,100%); margin-left:auto; }
+  .stream { flex:1; overflow-y:auto; display:flex; flex-direction:column;
+            gap:1.25rem; padding:.25rem .2rem 1.5rem; }
+  .turn .who { font-size:11px; text-transform:uppercase; letter-spacing:.09em;
+               color:var(--dim); margin-bottom:.2rem; }
+  .turn.them .who { color:var(--accent); }
+  .said { white-space:pre-wrap; word-break:break-word; line-height:1.55; }
+  .turn.me .said { color:var(--dim); }
+  .waiting { color:var(--dim); font-style:italic; font-size:13px; }
+  .failed { color:var(--bad); white-space:pre-wrap; line-height:1.5; }
+  .notice { color:var(--bad); font-size:12px; padding:.35rem 0; }
+  .composer { display:flex; gap:.5rem; align-items:flex-end;
+              border-top:1px solid var(--line); padding-top:.6rem; }
+  .composer textarea { min-height:3.4rem; max-height:16rem; }
   table { width:100%; border-collapse:collapse; font-size:12px; }
   th, td { text-align:left; padding:.25rem .4rem; border-bottom:1px solid var(--line); }
   th { color:var(--dim); font-weight:500; }
@@ -81,15 +97,64 @@ const PANELS = ["overview","work","blackboard","memory","artifacts","prompts",
 let session = localStorage.getItem("amoeba_operator") || "";
 let current = "overview";
 
+// Read the response before believing it. This used to call `r.json()`
+// unconditionally, so an HTML error page -- which is what the stock server
+// returns for a refused or malformed request -- reached the operator as
+// `Unexpected token '<', "<!DOCTYPE "...`. That names the parser's problem
+// and not the operator's, and it points at the wrong thing to fix.
 async function rpc(method, params={}) {
-  const r = await fetch("/operator/rpc", {
-    method:"POST",
-    headers:{"Content-Type":"application/json","X-Amoeba-Operator":session},
-    body: JSON.stringify({jsonrpc:"2.0", id:Date.now(), method, params})
-  });
-  const j = await r.json();
-  if (j.error) throw new Error(j.error.message + " (" + j.error.code + ")");
+  let r;
+  try {
+    r = await fetch("/operator/rpc", {
+      method:"POST",
+      headers:{"Content-Type":"application/json","X-Amoeba-Operator":session},
+      body: JSON.stringify({jsonrpc:"2.0", id:Date.now(), method, params})
+    });
+  } catch (e) {
+    console.error("rpc transport", method, e);
+    throw new Error("could not reach Amoeba \u2014 is the supervisor running?");
+  }
+  const ctype = (r.headers.get("content-type") || "").toLowerCase();
+  const raw = await r.text();
+  if (r.status === 401 || r.status === 403) {
+    console.error("rpc refused", method, r.status, raw.slice(0,300));
+    throw expired();
+  }
+  if (!ctype.includes("json")) {
+    // Diagnosis goes to the console; the operator gets a sentence.
+    console.error("rpc non-JSON", method, r.status, ctype, raw.slice(0,600));
+    throw new Error("Amoeba answered " + r.status + " with " +
+      (ctype || "no content type") + " rather than a result");
+  }
+  let j;
+  try { j = JSON.parse(raw); }
+  catch (e) {
+    console.error("rpc unparseable", method, r.status, raw.slice(0,600));
+    throw new Error("Amoeba's answer was not valid JSON");
+  }
+  if (j.error) {
+    if (j.error.code === -32000) throw expired();
+    const e = new Error(j.error.message + " (" + j.error.code + ")");
+    e.code = j.error.code;
+    throw e;
+  }
   return j.result;
+}
+function expired() {
+  const e = new Error("this operator session is not valid \u2014 enter the " +
+                      "token the supervisor printed at startup");
+  e.reauth = true;
+  return e;
+}
+function tokenRow(after) {
+  const row = el("div","row");
+  const i = el("input"); i.placeholder = "operator session token";
+  const b = el("button","go","use");
+  b.onclick = ()=>{ session = i.value.trim();
+    localStorage.setItem("amoeba_operator", session);
+    (after || (()=>go(current)))(); };
+  row.append(i,b);
+  return row;
 }
 const el = (t,c,x) => { const n=document.createElement(t); if(c)n.className=c;
                         if(x!==undefined)n.textContent=x; return n; };
@@ -149,6 +214,129 @@ function table(rows, cols) {
     cols.forEach(c=>tr.appendChild(el("td",null, r[c]===undefined?"":String(r[c]))));
     t.appendChild(tr); });
   return t;
+}
+
+// ---------------------------------------------------------------------
+// The operator's conversations
+// ---------------------------------------------------------------------
+// Ephemeral by design. The transcript lives here while the page is open and
+// nowhere else: Ego's continuity is Ego's own, and a chat log replayed back
+// at it would be a second memory telling a slightly different story. A reload
+// starting empty is correct, not a missing feature.
+const POLL_MS = 1500;
+const GIVE_UP_MS = 20 * 60 * 1000;
+
+// The operation completing is not the answer arriving. The envelope's status
+// belongs to the operation; the request's own answer is collected separately.
+function triggerOf(env) {
+  if (env && env.status === "failed") {
+    const err = ((env.result || {}).error) || {};
+    throw new Error(err.message || "Amoeba could not accept the message");
+  }
+  const id = ((env || {}).result || {}).trigger_id;
+  if (!id) throw new Error("the message was accepted but Amoeba returned " +
+                           "no way to collect its answer");
+  return id;
+}
+
+function conversation(main, spec) {
+  const chat = el("div","chat");
+  const stream = el("div","stream");
+  if (spec.note) chat.appendChild(el("div","pill",spec.note));
+  const notice = el("div","notice"); notice.hidden = true;
+  const composer = el("div","composer");
+  const box = el("textarea"); box.placeholder = spec.placeholder;
+  const send = el("button","go","send");
+  composer.append(box, send);
+  chat.append(stream, notice, composer);
+  main.appendChild(chat);
+
+  // Follow the conversation only for a reader already at the bottom. Yanking
+  // the viewport away from something somebody scrolled up to read is worse
+  // than making them scroll back down.
+  const atBottom = () =>
+    stream.scrollHeight - stream.scrollTop - stream.clientHeight < 96;
+  const follow = (was) => { if (was) stream.scrollTop = stream.scrollHeight; };
+
+  function say(who, text, side, cls) {
+    const was = atBottom();
+    const turn = el("div","turn "+side);
+    turn.appendChild(el("div","who",who));
+    const body = el("div",cls||"said",text);
+    turn.appendChild(body);
+    stream.appendChild(turn);
+    follow(was);
+    return {turn: turn, body: body};
+  }
+
+  function complain(e) {
+    notice.hidden = false;
+    notice.textContent = e.message;
+    if (e.reauth) chat.insertBefore(tokenRow(()=>go(current)), composer);
+  }
+
+  async function collect(trigger_id) {
+    const until = Date.now() + GIVE_UP_MS;
+    for (;;) {
+      // This request's answer, by this request's id. A thought spanning
+      // continuation turns is still answering the message that began it, and
+      // the operator never has to know that happened.
+      const s = await rpc("role_answer", {trigger_id: trigger_id});
+      if (s.status === "completed") return s.answer;
+      if (s.status === "unanswerable")
+        throw new Error("the thought ended without an answer to this message");
+      if (s.status === "expired")
+        throw new Error("this message was not delivered");
+      if (Date.now() > until)
+        throw new Error("still queued after twenty minutes; it has not been " +
+                        "lost and will be answered");
+      await new Promise(r => setTimeout(r, POLL_MS));
+    }
+  }
+
+  async function submit() {
+    const text = box.value.trim();
+    if (!text || send.disabled) return;
+    send.disabled = true;
+    notice.hidden = true; notice.textContent = "";
+    const mine = say("operator", text, "me");
+    let trigger_id;
+    try {
+      trigger_id = await spec.open(text);
+    } catch (e) {
+      // It never left. Take the turn back out and leave the text where the
+      // operator put it rather than losing what they wrote.
+      stream.removeChild(mine.turn);
+      complain(e);
+      send.disabled = false;
+      return;
+    }
+    box.value = "";
+    const pending = say(spec.them, spec.waiting, "them", "waiting");
+    try {
+      const answer = await collect(trigger_id);
+      const was = atBottom();
+      pending.body.className = "said";
+      pending.body.textContent = answer || "(it answered with nothing)";
+      follow(was);
+    } catch (e) {
+      pending.body.className = "failed";
+      pending.body.textContent = e.message;
+      if (e.reauth) complain(e);
+    }
+    send.disabled = false;
+  }
+
+  send.onclick = submit;
+  box.onkeydown = (e) => {
+    // Enter sends, Shift+Enter writes a newline. `isComposing` keeps an IME
+    // candidate selection from being read as a send.
+    if (e.key !== "Enter" || e.shiftKey || e.isComposing) return;
+    if (e.ctrlKey || e.altKey || e.metaKey) return;
+    e.preventDefault();
+    submit();
+  };
+  if (box.focus) box.focus();
 }
 
 const render = {
@@ -431,28 +619,29 @@ const render = {
     c.appendChild(table(h, ["seq","kind","actor_id"])); main.appendChild(c);
   },
   async converse(main) {
-    const c = card("chat with ego", true);
-    const t = el("textarea"); t.placeholder = "message to Ego…";
-    const b = el("button","go","send"); const out = el("pre");
-    b.onclick = async()=>{ out.textContent="thinking…";
-      try { out.textContent = JSON.stringify(
-        await rpc("ego_converse",{message:t.value}), null, 2); }
-      catch(e){ out.textContent = e.message; } };
-    const row = el("div","row"); row.append(b);
-    c.append(t, row, out); main.appendChild(c);
+    // Queued, not waited on. Ego may take continuation turns before it has
+    // anything terminal to say, and a browser holding a socket open for two
+    // minutes to find that out is the wrong shape for both ends.
+    conversation(main, {
+      them: "ego",
+      placeholder: "message to Ego…",
+      waiting: "Ego is thinking…",
+      open: async (text) => triggerOf(
+        await rpc("ego_converse", {message:text, wait:false})),
+    });
   },
   async ["consult id"](main) {
-    const c = card("consult id", true);
-    const t = el("textarea"); t.placeholder = "question for Id…";
-    const b = el("button","go","ask"); const out = el("pre");
-    b.onclick = async()=>{ out.textContent="thinking…";
-      try { out.textContent = JSON.stringify(
-        await rpc("operator_consult_id",{question:t.value}), null, 2); }
-      catch(e){ out.textContent = e.message; } };
-    const row = el("div","row"); row.append(b);
-    c.append(t, row, out,
-      el("div","pill","an input into Id's reasoning; it carries no capability"));
-    main.appendChild(c);
+    // Deliberately its own surface. Asking Id to look at the organism is not
+    // the same act as talking to Ego, and one transcript holding both would
+    // blur two different kinds of authority into one scrollback.
+    conversation(main, {
+      them: "id",
+      placeholder: "question for Id…",
+      waiting: "Id is looking…",
+      note: "an input into Id's reasoning; it carries no capability",
+      open: async (text) => triggerOf(
+        (await rpc("operator_consult_id", {question:text, wait:false})).answer),
+    });
   },
   async backchannel(main) {
     const b = await rpc("operator_backchannel", {limit:40});
@@ -481,13 +670,8 @@ async function go(panel) {
   catch (e) {
     const c = card("error", true);
     c.appendChild(el("pre",null,e.message));
-    if (String(e.message).includes("-32000")) {
-      const row = el("div","row");
-      const i = el("input"); i.placeholder = "operator session token";
-      const b = el("button","go","use");
-      b.onclick = ()=>{ session = i.value.trim();
-        localStorage.setItem("amoeba_operator", session); go(current); };
-      row.append(i,b); c.appendChild(row);
+    if (e.reauth) {
+      c.appendChild(tokenRow());
       c.appendChild(el("div","pill",
         "the supervisor prints this token at startup"));
     }
