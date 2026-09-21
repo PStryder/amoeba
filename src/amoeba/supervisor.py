@@ -60,21 +60,43 @@ class SingleInstanceLock:
         self.path = path
         self.fh: Any = None
 
+    ATTEMPTS = 5
+
     def acquire(self) -> None:
+        """Take the lock, clearing a dead holder's if that is what is there.
+
+        Clearing a stale lock races two ways, and a restart hits both. The
+        previous supervisor can release its own lock between our seeing it and
+        our unlinking it, so the unlink finds nothing; and another supervisor
+        can create a fresh lock between our unlink and our open, so the open
+        finds one. The first killed a restart with FileNotFoundError. So every
+        attempt goes back to the top: the exclusive create is the only step
+        that decides ownership, and whoever holds the lock is re-judged each
+        time rather than assumed from a check that has since gone stale.
+        """
         self.path.parent.mkdir(parents=True, exist_ok=True)
-        try:
-            fd = os.open(self.path, os.O_CREAT | os.O_EXCL | os.O_RDWR)
-        except FileExistsError:
-            stale = self._is_stale()
-            if not stale:
-                raise ResourceExhausted(
-                    "another supervisor already owns this state directory",
-                    lock=str(self.path), holder=self._holder(),
-                )
-            os.unlink(self.path)
-            fd = os.open(self.path, os.O_CREAT | os.O_EXCL | os.O_RDWR)
-        os.write(fd, json.dumps({"pid": os.getpid(), "started": time.time()}).encode())
-        self.fh = fd
+        for _ in range(self.ATTEMPTS):
+            try:
+                fd = os.open(self.path, os.O_CREAT | os.O_EXCL | os.O_RDWR)
+            except FileExistsError:
+                if not self._is_stale():
+                    raise ResourceExhausted(
+                        "another supervisor already owns this state directory",
+                        lock=str(self.path), holder=self._holder(),
+                    ) from None
+                try:
+                    os.unlink(self.path)
+                except FileNotFoundError:
+                    pass    # its holder released it first; the next create decides
+                continue
+            os.write(fd, json.dumps({"pid": os.getpid(),
+                                     "started": time.time()}).encode())
+            self.fh = fd
+            return
+        raise ResourceExhausted(
+            "could not take the state directory lock; it kept changing hands",
+            lock=str(self.path), holder=self._holder(),
+        )
 
     def _holder(self) -> dict[str, Any]:
         try:
