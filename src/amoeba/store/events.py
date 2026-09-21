@@ -152,6 +152,13 @@ class EventKind:
     ROLE_ENVIRONMENT_BUILT = "role.environment_built"
     ROLE_TURN_BEGAN = "role.turn_began"
     ROLE_TOOL_INVOKED = "role.tool_invoked"
+    ROLE_TRIGGER_QUEUED = "role.trigger_queued"
+    ROLE_TRIGGER_CLAIMED = "role.trigger_claimed"
+    ROLE_TRIGGER_CONSUMED = "role.trigger_consumed"
+    ROLE_TRIGGER_RECOVERED = "role.trigger_recovered"
+    ROLE_TURN_ENDED = "role.turn_ended"
+    ROLE_TURN_ABANDONED = "role.turn_abandoned"
+    ROLE_CONTINUATION_SCHEDULED = "role.continuation_scheduled"
 
     # arbiter / side channel
     RESOURCE_DECISION = "resource.decision"

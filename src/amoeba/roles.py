@@ -79,6 +79,22 @@ overwritten regardless of what the model asked for.
 """
 
 
+CONTEXT_PRESSURE_MARKERS = ("context budget", "context window",
+                            "exceeds the configured context", "context full")
+
+
+def _is_context_pressure(exc: BaseException) -> bool:
+    """Is this the context filling up rather than something breaking?
+
+    Matched on the message because the inference service reports it across an
+    RPC boundary, where the original exception type does not survive. Narrow
+    on purpose: a broad match here would route real failures into the
+    homeostasis path and hide them.
+    """
+    text = str(exc).lower()
+    return any(marker in text for marker in CONTEXT_PRESSURE_MARKERS)
+
+
 class RoleProcess:
     """Shared machinery: inference session, supervisor link, RPC server, heartbeat."""
 
@@ -118,6 +134,8 @@ class RoleProcess:
         # unexplainable.
         self.environment: dict[str, Any] | None = None
         self.environment_blob: str | None = None
+        # The turn this role is executing right now, if any. One at a time.
+        self.current_turn_id: str | None = None
         self.started_at = time.time()
         self.turns = 0
         self._stop = threading.Event()
@@ -308,7 +326,8 @@ class RoleProcess:
 
     def _turn(self, user_text: str, *, trigger: str = "", max_tokens: int | None = None,
               temperature: float | None = None, max_tool_turns: int | None = None,
-              deadline: float | None = None) -> dict[str, Any]:
+              deadline: float | None = None,
+              environment: dict[str, Any] | None = None) -> dict[str, Any]:
         """One bounded cognitive turn with the environment and the tool loop.
 
         Environment, then turn input, then generation; a tool request is run
@@ -322,7 +341,16 @@ class RoleProcess:
         and the model's own token budget. Whichever binds first ends the turn
         and the reason is returned rather than swallowed.
         """
-        env_block = self._begin_turn(trigger or user_text[:200])
+        if environment is not None:
+            # Built by the Harness when it claimed this turn, in the same
+            # transaction that froze the trigger bundle. Reusing it is what
+            # makes the recorded environment and the recorded inputs describe
+            # the same instant.
+            self.environment = environment["manifest"]
+            self.environment_blob = environment.get("environment_blob")
+            env_block = ENVIRONMENT_BLOCK.format(environment=environment["text"])
+        else:
+            env_block = self._begin_turn(trigger or user_text[:200])
         max_tool_turns = (self.cfg.arbiter.max_tool_turns
                           if max_tool_turns is None else max_tool_turns)
         if deadline is None:
@@ -418,6 +446,7 @@ class RoleProcess:
             "health": self.health,
             "signal": self.receive_signal,
             "context_stats": self.context_stats,
+            "refresh_session": self.refresh_session,
             "shutdown": self.shutdown,
         }
 
@@ -481,6 +510,144 @@ class RoleProcess:
         return {"stopping": True}
 
     # ------------------------------------------------------------------
+    # ------------------------------------------------------------------
+    # The turn loop: a persistent identity running bounded turns
+    # ------------------------------------------------------------------
+    def turn_loop(self) -> None:
+        """Claim a turn, run it, close it, repeat.
+
+        This is the structural guarantee that a persistent role never has two
+        cognitive turns in flight. There is exactly **one** of this thread per
+        role process, so a second concurrent turn is not forbidden by a check
+        somebody could remove -- there is no thread to run it on. The Harness
+        holds the same guarantee independently, as a unique index over open
+        turns, so neither side is trusted alone.
+
+        Cognitive RPCs no longer execute cognition. They put a trigger in the
+        mailbox and, if the caller wants an answer, wait for the turn that
+        consumes it. That is why there is one ingestion path rather than a
+        fast lane for an idle role and a queue for a busy one.
+        """
+        poll = max(0.05, float(self.cfg.scheduler.poll_seconds))
+        while not self._stop.is_set():
+            claimed = None
+            try:
+                claimed = self.sup.call(
+                    "role_claim_turn", role=self.role,
+                    incarnation=self.incarnation, profile_ref=self.profile_ref,
+                    prompt_sha256=(self.profile or {}).get("prompt_sha256"),
+                    config_sha256=(self.profile or {}).get("config_sha256"),
+                    model_generation=self.model_generation)
+            except Exception:  # noqa: BLE001
+                # The Harness being briefly unreachable is not a reason to
+                # stop being a role; supervision will restore it.
+                self.log.debug("could not claim a turn", exc_info=True)
+                self._stop.wait(poll)
+                continue
+
+            turn = (claimed or {}).get("turn")
+            if not turn:
+                self._stop.wait(poll)
+                continue
+            self._run_claimed_turn(turn, (claimed or {}).get("environment"))
+
+    def _run_claimed_turn(self, turn: dict[str, Any],
+                          environment: dict[str, Any] | None) -> None:
+        """Run one bounded turn against an already-frozen input set.
+
+        The profile, the environment and the trigger bundle were all fixed by
+        the Harness in a single transaction before this ran. Nothing here
+        reopens them: a trigger that arrives now waits for the next turn.
+        """
+        turn_id = turn["turn_id"]
+        self.current_turn_id = turn_id
+        stop_reason, result, tool_calls = "model_stop", None, 0
+        try:
+            out = self._turn(
+                turn["text"], trigger=f"turn {turn_id}",
+                environment=environment,
+                deadline=time.time() + self.cfg.scheduler.turn_wall_seconds)
+            stop_reason = self._stop_reason_for(out)
+            tool_calls = out.get("tool_call_count", 0)
+            result = self.on_turn(turn, out)
+        except BackendUnavailable as exc:
+            stop_reason = "backend_error"
+            result = {"error": str(exc)[:500]}
+            self.log.warning("turn %s: backend unavailable: %s", turn_id, exc)
+        except Exception as exc:  # noqa: BLE001
+            if _is_context_pressure(exc):
+                # A full context is a healthy organism hitting a known limit,
+                # not a broken one. It is a turn outcome the Harness knows how
+                # to answer -- rejuvenate at this boundary, then continue --
+                # and reporting it as a role failure would send it to the
+                # crash path instead of the homeostasis one.
+                stop_reason = "context_pressure"
+                result = {"context_pressure": str(exc)[:300]}
+                self.log.info("turn %s hit context pressure; reporting it and "
+                              "letting the Harness decide", turn_id)
+            else:
+                stop_reason = "role_failure"
+                result = {"error": f"{type(exc).__name__}: {exc}"[:500]}
+                self.log.exception("turn %s failed", turn_id)
+        finally:
+            self.current_turn_id = None
+            try:
+                self.sup.call("role_complete_turn", turn_id=turn_id,
+                              stop_reason=stop_reason,
+                              tool_call_count=tool_calls, result=result)
+            except Exception:  # noqa: BLE001
+                # The turn stays open and recovery will requeue its triggers.
+                # Claiming otherwise would lose the inputs.
+                self.log.exception("could not close turn %s; its triggers "
+                                   "remain claimed and will be recovered",
+                                   turn_id)
+
+    def refresh_session(self, *, session_id: str | None = None,
+                        reason: str = "") -> dict[str, Any]:
+        """Adopt a session the Harness put in place of this one.
+
+        Called by the supervisor after it rejuvenates this role, between
+        turns. The role does not rewrite its own context: `context_rejuvenate`
+        is Harness-initiated and deliberately absent from every role scope, so
+        a role that decided it needed more room could not simply take it.
+
+        Identity survives. Incarnation, profile binding, and the mailbox are
+        untouched -- a replacement session is not a new mind, and triggers the
+        interrupted turn never consumed are still queued.
+        """
+        if session_id and session_id != self.session_id:
+            self.session_id = session_id
+            self.log.info("%s continuing on session %s (%s)", self.role,
+                          session_id, reason or "harness rejuvenation")
+        return {"role": self.role, "session_id": self.session_id}
+
+    def _stop_reason_for(self, out: dict[str, Any]) -> str:
+        """Map what actually happened onto a first-class stop reason.
+
+        Kept distinct rather than collapsed into "the turn ended", because
+        they drive different continuation behaviour: a thought that ran out of
+        output tokens is unfinished, and one the model chose to end is not.
+        Detectable from the substrate without the model having to cooperate.
+        """
+        internal = out.get("stop_reason")
+        if internal in ("deadline_reached", "tool_turn_limit_reached"):
+            return internal
+        if not self.environment:
+            return "no_environment"
+        finish = (out.get("finish_reason") or "").lower()
+        if finish in ("length", "max_tokens", "truncated"):
+            return "max_output_tokens"
+        if finish in ("cancelled", "canceled", "aborted"):
+            return "cancelled"
+        return "model_stop"
+
+    def on_turn(self, turn: dict[str, Any], out: dict[str, Any]
+                ) -> dict[str, Any]:
+        """What this role does with a completed turn. Overridden per role."""
+        return {"text": strip_tool_calls(out.get("text", ""))[:4000],
+                "is_simulated": bool(out.get("is_simulated")),
+                "model_generation": out.get("model_generation")}
+
     def serve(self) -> int:
         self.connect()
         server = RpcServer(self.cfg.supervisor_host, self.port, token=self.token,
@@ -491,6 +658,10 @@ class RoleProcess:
         server.serve_in_thread()
         threading.Thread(target=self.heartbeat_loop, daemon=True,
                          name=f"{self.role}-heartbeat").start()
+        # Exactly one turn thread. This is the per-role serialization: two
+        # concurrent turns have nowhere to run.
+        threading.Thread(target=self.turn_loop, daemon=True,
+                         name=f"{self.role}-turns").start()
         self.log.info("%s listening on %s:%s", self.role, self.cfg.supervisor_host, self.port)
         (self.cfg.state_dir / f"{self.role}.ready").write_text(
             json.dumps({"pid": os.getpid(), "port": self.port,
@@ -536,6 +707,46 @@ class RoleProcess:
 class EgoProcess(RoleProcess):
     role = "ego"
     system_prompt = EGO_SYSTEM
+
+    def on_turn(self, turn: dict[str, Any], out: dict[str, Any]
+                ) -> dict[str, Any]:
+        """Commit what an Ego turn produced.
+
+        A conclusion is recorded when the turn actually answered something,
+        so the record carries Ego's outward cognition rather than every
+        housekeeping wake. Id audits conclusions against evidence, and a
+        conclusion nobody claimed is noise in that audit.
+        """
+        text = strip_tool_calls(out.get("text", "")).strip()
+        answered = [t for t in turn.get("triggers", [])
+                    if t["kind"] in ("user_input", "operator_message")]
+        conclusion_id = None
+        if text and answered:
+            try:
+                res = self.sup.call(
+                    "record_conclusion", claim=text[:2000], produced_by="ego",
+                    evidence=[{"note": f"turn {turn['turn_id']}"}]
+                    + [{"note": f"trigger {t['trigger_id']}"} for t in answered],
+                    model_identity=out.get("model_generation"),
+                    # The operation that asked. Without it a conclusion cannot
+                    # be resolved back to the request that produced it, and
+                    # `audit_dossier` has nothing to audit against.
+                    operation_id=turn.get("operation_id"))
+                conclusion_id = res.get("conclusion_id")
+            except Exception:  # noqa: BLE001
+                self.log.debug("could not record conclusion", exc_info=True)
+        return {"answer": text[:4000], "conclusion_id": conclusion_id,
+                "answered_triggers": [t["trigger_id"] for t in answered],
+                "tool_calls": out.get("tool_calls", []),
+                "tool_requests": [{"name": c.get("tool"),
+                                   "accepted": c.get("accepted")}
+                                  for c in out.get("tool_calls", [])],
+                "environment_sha256": out.get("environment_sha256"),
+                "profile_ref": out.get("profile_ref"),
+                # Carried all the way out. A caller must never have to guess
+                # whether text came from a model or from a deterministic stub.
+                "is_simulated": bool(out.get("is_simulated")),
+                "model_generation": out.get("model_generation")}
 
     def methods(self) -> dict[str, Any]:
         return {
@@ -683,6 +894,25 @@ class EgoProcess(RoleProcess):
 class IdProcess(RoleProcess):
     role = "id"
     system_prompt = ID_SYSTEM
+
+    def on_turn(self, turn: dict[str, Any], out: dict[str, Any]
+                ) -> dict[str, Any]:
+        """What an Id turn produced.
+
+        Deliberately does not auto-commit anything. Id's consequential acts go
+        through its own effectors during the turn, each individually receipted
+        and attributed; a turn that silently wrote state afterwards would put
+        an unattributed act between the thought and the record.
+        """
+        return {"text": strip_tool_calls(out.get("text", "")).strip()[:4000],
+                "tool_calls": out.get("tool_calls", []),
+                "environment_sha256": out.get("environment_sha256"),
+                "profile_ref": out.get("profile_ref"),
+                "is_simulated": bool(out.get("is_simulated")),
+                "model_generation": out.get("model_generation"),
+                # Id is never told what Ego would say in its own defence.
+                "asked_ego_to_defend_itself": False,
+                "trigger_kinds": [t["kind"] for t in turn.get("triggers", [])]}
 
     def methods(self) -> dict[str, Any]:
         return {

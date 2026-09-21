@@ -347,13 +347,50 @@ def test_maintenance_workers_get_no_ego_snapshot(stack: LiveStack):
     assert isinstance(result["state_references"], list)
 
 
-def test_side_channel_signal_changes_no_state(stack: LiveStack):
+def test_a_transient_signal_changes_no_state(stack: LiveStack):
+    """A nudge is still a nudge, and still changes nothing.
+
+    `durable=False` is the old behaviour, kept for liveness-style hints. Its
+    price is stated: a transient signal cannot enter a trigger bundle, so it
+    cannot influence cognition either.
+    """
     before = stack.call("status")["state_version"]
     ack = stack.call("side_channel", to_role="ego", kind="urgency",
-                     payload={"level": "high"}, from_role="id")
-    assert ack["accepted"] is True
-    assert "no state changed" in ack["note"]
+                     payload={"level": "high"}, from_role="id", durable=False)
+    assert ack["durable"] is False
+    assert ack["trigger_id"] is None
+    assert "cannot enter a trigger bundle" in ack["note"]
     assert stack.call("status")["state_version"] == before
+
+
+def test_a_message_that_reaches_cognition_is_attributable(stack: LiveStack):
+    """Delivery may be transient. Influence may not be unaudited.
+
+    The backchannel used to push into an in-memory list the role drained into
+    its own cognition -- a receipt-free message with no author, no body and no
+    record shaping what a persistent mind thought. A message that can wake a
+    role is now a durable trigger carrying all three.
+    """
+    ack = stack.call("side_channel", to_role="ego", kind="urgency",
+                     payload={"message": "your work queue is backing up"},
+                     from_role="id")
+    assert ack["durable"] is True
+    assert ack["trigger_id"]
+
+    mailbox = stack.call("role_mailbox", role="ego")["ego"]
+    queued = {t["trigger_id"]: t for t in mailbox["next_triggers"]}
+    consumed = None
+    if ack["trigger_id"] not in queued:
+        # Already taken into a turn; it is attributable there instead.
+        for turn in stack.call("role_turns", role="ego")["turns"]:
+            detail = stack.call("role_turn", turn_id=turn["turn_id"])
+            for trig in detail["triggers"]:
+                if trig["trigger_id"] == ack["trigger_id"]:
+                    consumed = trig
+    found = queued.get(ack["trigger_id"]) or consumed
+    assert found, "the message is neither queued nor recorded against a turn"
+    assert found["source"] == "id", "the author was not preserved"
+    assert "backing up" in (found["summary"] or "")
 
 
 # ---------------------------------------------------------------------------
@@ -687,3 +724,211 @@ def test_a_role_credential_cannot_reach_another_roles_effectors(stack: LiveStack
     finally:
         ego.close()
         ident.close()
+
+
+# ---------------------------------------------------------------------------
+# persistent roles: real processes, real scope tables, real scheduling
+# ---------------------------------------------------------------------------
+def _wait_for(fn, timeout=30.0, interval=0.25):
+    deadline = time.time() + timeout
+    while time.time() < deadline:
+        value = fn()
+        if value:
+            return value
+        time.sleep(interval)
+    return None
+
+
+def test_id_wakes_at_startup_and_ego_stays_quiet(tmp_path: Path):
+    """Id forms an initial view; Ego does not talk to itself.
+
+    A persistent identity that generates cognition because its process exists
+    is not the same as one that responds to the world. Ego waits.
+    """
+    stack = start_stack(tmp_path)
+    try:
+        id_turn = _wait_for(
+            lambda: [t for t in stack.call("role_turns", role="id")["turns"]
+                     if "startup" in t["trigger_kinds"]])
+        assert id_turn, "Id never received its startup turn"
+        assert stack.call("role_turns", role="ego")["turns"] == [], \
+            "Ego generated a turn with nothing to respond to"
+        assert stack.call("role_mailbox")["ego"]["state"] == "idle"
+    finally:
+        stack.stop()
+
+
+def test_input_arriving_during_an_ego_turn_is_queued_not_injected(tmp_path: Path):
+    """The load-bearing runtime claim, against real processes.
+
+    Before this, `ego_converse` called into the Ego process synchronously and
+    the role's RPC server is threaded -- two callers produced two concurrent
+    turns against one inference session. Now there is one ingestion path and
+    one turn at a time.
+
+    The precondition matters: the second input has to arrive while a turn is
+    genuinely *running*. Two inputs submitted before Ego reaches a boundary
+    are correctly bundled into one turn, which is a different guarantee and is
+    covered separately.
+    """
+    stack = start_stack(tmp_path)
+    try:
+        first = stack.call("ego_converse", message="first message",
+                           wait=False)["result"]
+
+        # Wait until Ego has actually opened a turn for it.
+        running = _wait_for(
+            lambda: stack.call("role_mailbox", role="ego")["ego"]["current_turn"],
+            timeout=60.0, interval=0.02)
+        assert running, "Ego never opened a turn for the first input"
+        running_turn = running["turn_id"]
+
+        second = stack.call("ego_converse", message="second message",
+                            wait=False)["result"]
+
+        # While that turn is open, the new input is queued and unseen.
+        detail = stack.call("role_turn", turn_id=running_turn)
+        assert second["trigger_id"] not in {t["trigger_id"]
+                                            for t in detail["triggers"]}, \
+            "an input arriving mid-turn was injected into it"
+
+        def second_consumed():
+            row = stack.call("role_turn", turn_id=running_turn)
+            turns = stack.call("role_turns", role="ego")["turns"]
+            for t in turns:
+                if t["turn_id"] == running_turn:
+                    continue
+                d = stack.call("role_turn", turn_id=t["turn_id"])
+                if second["trigger_id"] in {x["trigger_id"] for x in d["triggers"]}:
+                    return t
+            return None
+
+        later = _wait_for(second_consumed, timeout=120.0)
+        assert later, "the queued input was never given a turn"
+        assert later["turn_id"] != running_turn
+
+        # And the two turns did not overlap.
+        turns = {t["turn_id"]: t for t in
+                 stack.call("role_turns", role="ego")["turns"]}
+        a, b = turns[running_turn], turns[later["turn_id"]]
+        assert a["finished_at"] and b["started_at"] >= a["finished_at"], \
+            "the second turn began before the first ended"
+    finally:
+        stack.stop()
+
+
+def test_inputs_arriving_together_are_bundled_into_one_turn(tmp_path: Path):
+    """A burst before a boundary becomes one bundle, not one turn each.
+
+    The counterpart to the test above. Ego waking once for four things that
+    happened while it was busy is the point of bundling; waking four times
+    would be the thrash it exists to avoid.
+    """
+    stack = start_stack(tmp_path)
+    try:
+        submitted = [
+            stack.call("ego_converse", message=f"message {i}",
+                       wait=False)["result"]["trigger_id"]
+            for i in range(3)]
+
+        def all_consumed():
+            for t in stack.call("role_turns", role="ego")["turns"]:
+                d = stack.call("role_turn", turn_id=t["turn_id"])
+                got = {x["trigger_id"] for x in d["triggers"]}
+                if set(submitted) <= got:
+                    return t
+            return None
+
+        turn = _wait_for(all_consumed, timeout=90.0)
+        assert turn, "the burst was never bundled into a single turn"
+        assert turn["trigger_count"] >= 3
+    finally:
+        stack.stop()
+
+
+def test_a_role_turn_records_profile_environment_and_triggers(tmp_path: Path):
+    """Profile + environment + trigger bundle, all recoverable afterwards."""
+    stack = start_stack(tmp_path)
+    try:
+        submitted = stack.call("ego_converse", message="tell me something",
+                               wait=False)["result"]
+        # The turn that consumed *this* input, not merely the newest completed
+        # one: a truncated turn schedules a continuation, and `role_turns`
+        # returns newest first, so "the first completed turn" is the
+        # continuation rather than the turn that read the message.
+        def consuming_turn():
+            for t in stack.call("role_turns", role="ego")["turns"]:
+                if t["status"] != "completed":
+                    continue
+                d = stack.call("role_turn", turn_id=t["turn_id"])
+                if submitted["trigger_id"] in {x["trigger_id"]
+                                               for x in d["triggers"]}:
+                    return d
+            return None
+
+        detail = _wait_for(consuming_turn, timeout=90.0)
+        assert detail, "no completed Ego turn consumed the submitted input"
+        assert detail["profile_ref"] == "ego@1"
+        assert detail["environment_sha256"] and detail["environment_blob"]
+        assert detail["stop_reason"]
+        assert detail["bundle"]["triggers"], "the bundle was not recoverable"
+        assert detail["environment"]["role"] == "ego"
+        assert submitted["trigger_id"] in {t["trigger_id"]
+                                           for t in detail["triggers"]}
+        # The bundle the model read is the bundle on the record.
+        assert "<turn_input>" in detail["bundle"]["text"]
+    finally:
+        stack.stop()
+
+
+def test_id_receives_a_deterministic_heartbeat(tmp_path: Path):
+    """Id is logically always on without being a token furnace.
+
+    The heartbeat is explicit input with its own kind, not a fake user
+    message: Id can tell the difference between the world asking something and
+    the clock coming round.
+    """
+    stack = start_stack(tmp_path, scheduler={"id_heartbeat_seconds": 4.0})
+    try:
+        beat = _wait_for(
+            lambda: [t for t in stack.call("role_turns", role="id")["turns"]
+                     if "heartbeat" in t["trigger_kinds"]], timeout=60.0)
+        assert beat, "Id never received a heartbeat turn"
+        detail = stack.call("role_turn", turn_id=beat[0]["turn_id"])
+        kinds = {t["kind"] for t in detail["triggers"]}
+        assert "heartbeat" in kinds and "user_input" not in kinds
+        assert any("homeostatic" in (t["summary"] or "")
+                   for t in detail["triggers"])
+    finally:
+        stack.stop()
+
+
+def test_an_idle_organism_does_not_spin(tmp_path: Path):
+    """Quiet means quiet: no unbounded zero-delay turn loop."""
+    stack = start_stack(tmp_path, scheduler={"id_heartbeat_seconds": 0.0})
+    try:
+        time.sleep(6)
+        turns = stack.call("role_turns")["turns"]
+        # Startup for Id, plus whatever continuations that thought needed, and
+        # nothing else. Certainly not one turn per poll tick.
+        assert len(turns) <= 6, [t["trigger_kinds"] for t in turns]
+        assert not [t for t in turns if t["role"] == "ego"]
+    finally:
+        stack.stop()
+
+
+def test_the_operator_can_see_the_mailbox(tmp_path: Path):
+    stack = start_stack(tmp_path)
+    try:
+        mb = stack.call("role_mailbox")
+        for role in ("ego", "id"):
+            assert mb[role]["state"] in ("idle", "queued", "processing",
+                                         "heartbeat_wait", "recovering")
+            assert "queued" in mb[role] and "current_turn" in mb[role]
+        stack.call("operator_message_role", role="ego",
+                   message="have a look at the work queue")
+        assert _wait_for(
+            lambda: stack.call("role_mailbox", role="ego")["ego"]["queued"]
+            or [t for t in stack.call("role_turns", role="ego")["turns"]])
+    finally:
+        stack.stop()

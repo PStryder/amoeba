@@ -445,6 +445,44 @@ def build(sup: "Supervisor") -> dict[str, Any]:
                                work_id=work_id,
                                lease_seconds=sup.cfg.arbiter.lease_seconds)
 
+    def _wake_owner_of_work(work_id: str, *, kind: str, summary: str) -> None:
+        """Queue a trigger for the role that asked for this work, if any.
+
+        Relevance is taken from `origin_actor` on the work row -- an explicit
+        recorded relationship, not a guess. Work Ego did not originate does
+        not wake Ego, which is what keeps a busy neuocyte fleet from turning
+        into a wake storm.
+
+        Maintenance work originated by Id wakes Id for the same reason. Work
+        originated by the supervisor or the operator wakes nobody: no
+        persistent role is waiting on it.
+
+        Best effort on purpose. A work item is complete whether or not anyone
+        was told, and failing the completion because a mailbox write failed
+        would lose the result to protect a notification.
+        """
+        from . import mailbox
+
+        try:
+            row = mind.work.get_work(work_id)
+        except Exception:  # noqa: BLE001
+            return
+        owner = (row or {}).get("origin_actor")
+        if owner not in mailbox.ROLES:
+            return
+        try:
+            sup.methods()["role_enqueue_trigger"](
+                role=owner, kind=kind, source="harness", source_ref=work_id,
+                summary=summary[:mailbox.MAX_SUMMARY],
+                payload={"work_id": work_id,
+                         "objective": (row or {}).get("objective"),
+                         "work_class": (row or {}).get("work_class"),
+                         "status": (row or {}).get("status")},
+                correlation_id=(row or {}).get("operation_id"))
+        except Exception:  # noqa: BLE001
+            sup.log.debug("could not queue %s trigger for %s", kind, work_id,
+                          exc_info=True)
+
     def complete_work(*, work_id: str, neuocyte_id: str, fencing_token: int,
                       result: Any, pinned_state_ver: int | None = None
                       ) -> dict[str, Any]:
@@ -455,6 +493,8 @@ def build(sup: "Supervisor") -> dict[str, Any]:
         # Scratch does not outlive the work that produced it. Anything worth
         # keeping had to be proposed and promoted, which is the only way out.
         sup.release_work_sandbox(work_id, reason="work completed")
+        _wake_owner_of_work(work_id, kind="work_completed",
+                            summary=f"work {work_id} you requested has completed")
         return {"receipt_id": receipt.receipt_id, "state_version": receipt.result_version,
                 "replayed": receipt.replayed}
 
@@ -464,12 +504,21 @@ def build(sup: "Supervisor") -> dict[str, Any]:
                                  fencing_token=fencing_token, failure=failure,
                                  requeue=requeue)
         sup.release_work_sandbox(work_id, reason="work failed")
+        if not requeue:
+            # A requeued failure is an attempt, not an outcome: waking the
+            # owner for it would report a conclusion that has not been reached.
+            _wake_owner_of_work(
+                work_id, kind="work_failed",
+                summary=f"work {work_id} you requested failed: {failure[:200]}")
         return {"receipt_id": receipt.receipt_id}
 
     def cancel_work(*, work_id: str, actor: str = "supervisor", reason: str = ""
                     ) -> dict[str, Any]:
         receipt = mind.work.cancel(work_id=work_id, actor=actor, reason=reason)
         sup.release_work_sandbox(work_id, reason=f"work cancelled: {reason}"[:200])
+        _wake_owner_of_work(
+            work_id, kind="work_cancelled",
+            summary=f"work {work_id} you requested was cancelled: {reason[:200]}")
         return {"receipt_id": receipt.receipt_id}
 
     def get_work(*, work_id: str) -> dict[str, Any]:
@@ -624,33 +673,141 @@ def build(sup: "Supervisor") -> dict[str, Any]:
             "result": result, "limitations": limitations, "replayed": False,
         }
 
+    def _await_turn(trigger_id: str, *, timeout: float) -> dict[str, Any]:
+        """Wait for the turn that consumes a specific trigger.
+
+        Waiting is a convenience for the caller, not a different ingestion
+        path. The trigger is durable and ordered the moment it is queued, and
+        whether anyone is blocked on it changes nothing about when Ego sees
+        it. A caller that gives up gets "still queued" and the cognition
+        happens anyway.
+        """
+        from . import mailbox
+
+        deadline = time.time() + max(0.0, timeout)
+        while True:
+            row = mind.db.conn.execute(
+                "SELECT status, turn_id FROM role_triggers WHERE trigger_id = ?",
+                (trigger_id,)).fetchone()
+            if row is None:
+                raise NotFound("trigger disappeared", trigger_id=trigger_id)
+            if row["status"] == "expired":
+                return {"status": "expired", "turn_id": None,
+                        "note": "undeliverable after repeated failures"}
+            if row["status"] == "consumed" and row["turn_id"]:
+                turn = mind.db.conn.execute(
+                    "SELECT * FROM role_turns WHERE turn_id = ?",
+                    (row["turn_id"],)).fetchone()
+                if turn is not None and turn["status"] != "running":
+                    result = None
+                    if turn["result_sha256"]:
+                        try:
+                            result = mind.blobs.get_json(turn["result_sha256"])
+                        except Exception:  # noqa: BLE001
+                            result = None
+                    return {"status": "completed", "turn_id": row["turn_id"],
+                            "stop_reason": turn["stop_reason"],
+                            "result": result,
+                            "environment_sha256": turn["environment_sha256"],
+                            "profile_ref": turn["profile_ref"]}
+            if time.time() >= deadline:
+                return {"status": row["status"], "turn_id": row["turn_id"],
+                        "note": ("still queued; Ego will process it at a turn "
+                                 "boundary and the answer is retrievable by "
+                                 "trigger id")}
+            time.sleep(0.1)
+
+    def _parse_audit(text: str) -> dict[str, Any]:
+        """Pull VERDICT / FINDING / UNRESOLVED out of an audit turn.
+
+        Reports whether a verdict was actually stated, so an unparsed reply is
+        distinguishable from a judged one. Defaulting silently to
+        "inconclusive" would let a formatting failure look like a considered
+        finding.
+        """
+        verdict, finding, unresolved, stated = "inconclusive", "", "", False
+        for line in (text or "").splitlines():
+            upper = line.upper()
+            if upper.startswith("VERDICT:"):
+                candidate = line.split(":", 1)[1].strip().lower()
+                for known in ("supported", "contested", "unsupported",
+                              "inconclusive"):
+                    if known in candidate:
+                        verdict, stated = known, True
+                        break
+            elif upper.startswith("FINDING:"):
+                finding = line.split(":", 1)[1].strip()
+            elif upper.startswith("UNRESOLVED:"):
+                unresolved = line.split(":", 1)[1].strip()
+        return {"verdict": verdict, "finding": finding,
+                "unresolved": unresolved, "verdict_stated": stated}
+
+    def _label_simulation(result: dict[str, Any] | None,
+                          limitations: list[str]) -> None:
+        """Say plainly when text came from a stub rather than a model.
+
+        Restored after the turn model briefly lost it. A caller must never
+        have to guess whether a cognitive result is real inference, and the
+        organism claiming otherwise by omission is exactly the kind of
+        overclaiming every other surface here is built to avoid.
+        """
+        if isinstance(result, dict) and result.get("is_simulated"):
+            limitations.append(
+                "SIMULATED BACKEND: this text was produced by a deterministic "
+                "stub, not by model inference")
+
     def ego_converse(*, message: str, conversation_id: str | None = None,
-                     idempotency_key: str | None = None, max_tokens: int = 384,
-                     temperature: float = 0.0) -> dict[str, Any]:
+                     idempotency_key: str | None = None,
+                     max_tokens: int | None = None,
+                     temperature: float | None = None,
+                     wait: bool = True, wait_seconds: float | None = None
+                     ) -> dict[str, Any]:
+        """Give Ego something to think about, and optionally wait for it.
+
+        This used to call into the Ego process synchronously, which meant two
+        callers ran two cognitive turns concurrently against one inference
+        session. Input is now queued in the Harness-owned mailbox and consumed
+        at a turn boundary.
+
+        There is deliberately no fast path for an idle Ego. One truthful
+        ingestion path means conversational ordering is the queue order, not a
+        race between whoever called while Ego happened to be free.
+        """
         def run(op_id: str, limitations: list[str]) -> dict[str, Any]:
-            out = sup.client("ego").call(
-                "converse", message=message, conversation_id=conversation_id,
-                operation_id=op_id, max_tokens=max_tokens, temperature=temperature,
-            )
-            if out.get("is_simulated"):
+            queued = sup.methods()["role_enqueue_trigger"](
+                role="ego", kind="user_input", source="operator",
+                summary=message.strip()[:400],
+                payload={"message": message[:16000],
+                         "conversation_id": conversation_id},
+                correlation_id=conversation_id, operation_id=op_id)
+            out: dict[str, Any] = {"trigger_id": queued["trigger_id"],
+                                   "status": "queued",
+                                   "conversation_id": conversation_id}
+            if not wait:
                 limitations.append(
-                    "SIMULATED BACKEND: this text was produced by a deterministic "
-                    "stub, not by model inference"
-                )
-            evidence = [{"memory_id": m} for m in out.get("cited_memory_ids", [])]
-            evidence.append({"note": f"operation {op_id} inference events"})
-            cid, _ = mind.memory.record_conclusion(
-                claim=out["answer"][:2000] or "(empty answer)",
-                produced_by="ego", evidence=evidence,
-                uncertainty=None, operation_id=op_id,
-                model_identity=out.get("model_generation"),
-            )
-            out["conclusion_id"] = cid
-            if out.get("tool_requests"):
+                    "queued only; the answer is not in this response")
+                return out
+            settled = _await_turn(
+                queued["trigger_id"],
+                timeout=(sup.cfg.scheduler.submit_wait_seconds
+                         if wait_seconds is None else wait_seconds))
+            out.update(settled)
+            result = settled.get("result") or {}
+            _label_simulation(result, limitations)
+            out["is_simulated"] = bool(result.get("is_simulated"))
+            out["model_generation"] = result.get("model_generation")
+            out["tool_requests"] = result.get("tool_requests", [])
+            out["answer"] = result.get("answer", "")
+            out["conclusion_id"] = result.get("conclusion_id")
+            out["tool_calls"] = result.get("tool_calls", [])
+            if settled["status"] != "completed":
                 limitations.append(
-                    "model requested tools; they were parsed and recorded but "
-                    "ego_converse does not execute tools"
-                )
+                    "Ego had not reached this input before the wait elapsed; "
+                    "it remains queued and will be processed")
+            elif settled.get("stop_reason") not in ("model_stop", None):
+                limitations.append(
+                    f"the turn ended with {settled['stop_reason']!r}; the "
+                    "Harness may have scheduled a continuation")
             return out
 
         return _run_operation("ego_converse", "ego",
@@ -659,27 +816,53 @@ def build(sup: "Supervisor") -> dict[str, Any]:
 
     def ego_investigate(*, question: str, constraints: str = "",
                         budget_tokens: int | None = None,
-                        idempotency_key: str | None = None) -> dict[str, Any]:
+                        idempotency_key: str | None = None,
+                        wait: bool = True, wait_seconds: float | None = None
+                        ) -> dict[str, Any]:
+        """Ask Ego to investigate something.
+
+        Through the mailbox, like every other input. This used to call into
+        the Ego process directly, which meant it ran a generation against the
+        same inference session a queued turn might already be using.
+
+        Ego is told what to investigate and reaches for its own senses and
+        effectors from there -- requesting work, reading the board, recording
+        a conclusion. That is better than handing it a pre-assembled context:
+        the environment already tells it what it can do, and what it actually
+        used is then on the record as tool calls.
+        """
         def run(op_id: str, limitations: list[str]) -> dict[str, Any]:
-            out = sup.client("ego").call("investigate", question=question,
-                                         constraints=constraints, operation_id=op_id)
-            if out.get("is_simulated"):
-                limitations.append("SIMULATED BACKEND: not model inference")
-            snap = ensure_snapshot(operation_id=op_id)
-            admitted = admit_work(
-                objective=f"{question} :: {out.get('plan') or 'investigate'}",
-                work_class="user", origin_actor="ego", operation_id=op_id,
-                budget_tokens=budget_tokens, snapshot_id=snap["snapshot_id"],
-            )
-            if not admitted["admitted"]:
-                limitations.append(f"work not admitted: {admitted['reason']}")
-            out["snapshot_id"] = snap["snapshot_id"]
-            out["work"] = admitted
-            out["accepted_scope"] = {
-                "question": question, "constraints": constraints,
-                "budget_tokens": admitted.get("granted_budget_tokens"),
-                "deadline": admitted.get("deadline"),
-            }
+            framing = f"investigate: {question.strip()}"
+            if constraints.strip():
+                framing += f"\nconstraints: {constraints.strip()}"
+            queued = sup.methods()["role_enqueue_trigger"](
+                role="ego", kind="user_input", source="operator",
+                summary=framing[:400],
+                payload={"question": question[:8000],
+                         "constraints": constraints[:2000],
+                         "budget_tokens": budget_tokens,
+                         "intent": "investigate"},
+                operation_id=op_id)
+            out: dict[str, Any] = {"trigger_id": queued["trigger_id"],
+                                   "status": "queued", "question": question}
+            if not wait:
+                limitations.append("queued only; the answer is not in this "
+                                   "response")
+                return out
+            settled = _await_turn(
+                queued["trigger_id"],
+                timeout=(sup.cfg.scheduler.submit_wait_seconds
+                         if wait_seconds is None else wait_seconds))
+            out.update(settled)
+            result = settled.get("result") or {}
+            _label_simulation(result, limitations)
+            out["is_simulated"] = bool(result.get("is_simulated"))
+            out["claim"] = result.get("answer", "")
+            out["conclusion_id"] = result.get("conclusion_id")
+            if settled["status"] != "completed":
+                limitations.append(
+                    "Ego had not reached this before the wait elapsed; it "
+                    "remains queued and will be processed")
             return out
 
         return _run_operation("ego_investigate", "ego",
@@ -714,19 +897,51 @@ def build(sup: "Supervisor") -> dict[str, Any]:
         return out
 
     def id_introspect(*, question: str, scope: str = "all",
-                      idempotency_key: str | None = None) -> dict[str, Any]:
+                      idempotency_key: str | None = None,
+                      wait: bool = True, wait_seconds: float | None = None
+                      ) -> dict[str, Any]:
+        """Ask Id to look at the organism and say what it sees.
+
+        Queued rather than called. Id previously answered this on whatever
+        thread the RPC arrived on, against the same session its own turns use.
+
+        The measured state is no longer pre-assembled into the prompt: Id has
+        `system_pulse`, `verify_integrity`, `disagreements` and the rest in its
+        environment, and reaching for them leaves a record of what it actually
+        looked at rather than what it was handed.
+        """
         def run(op_id: str, limitations: list[str]) -> dict[str, Any]:
-            out = sup.client("id").call("introspect", question=question, scope=scope,
-                                        operation_id=op_id)
-            if out.get("is_simulated"):
-                limitations.append("SIMULATED BACKEND: not model inference")
-            limitations.append(
-                "the 'measured' block is read from durable state; the "
-                "'interpretation' block is model output and is not evidence"
-            )
+            queued = sup.methods()["role_enqueue_trigger"](
+                role="id", kind="operator_message", source="operator",
+                summary=f"introspect ({scope}): {question.strip()}"[:400],
+                payload={"question": question[:8000], "scope": scope,
+                         "intent": "introspect"},
+                operation_id=op_id)
+            out: dict[str, Any] = {"trigger_id": queued["trigger_id"],
+                                   "status": "queued", "question": question}
+            if not wait:
+                limitations.append("queued only")
+                return out
+            settled = _await_turn(
+                queued["trigger_id"],
+                timeout=(sup.cfg.scheduler.submit_wait_seconds
+                         if wait_seconds is None else wait_seconds))
+            out.update(settled)
+            result = settled.get("result") or {}
+            _label_simulation(result, limitations)
+            out["is_simulated"] = bool(result.get("is_simulated"))
+            out["interpretation"] = result.get("text", "")
+            out["measurement_source"] = (
+                "Id's own senses, invoked during the turn and recorded as "
+                "tool calls")
+            out["interpretation_source"] = "model inference over what it read"
+            if settled["status"] != "completed":
+                limitations.append("Id had not reached this before the wait "
+                                   "elapsed; it remains queued")
             return out
 
-        return _run_operation("id_introspect", "id", {"question": question, "scope": scope},
+        return _run_operation("id_introspect", "id",
+                              {"question": question, "scope": scope},
                               idempotency_key, run)
 
     def id_health(*, scope: str = "all") -> dict[str, Any]:
@@ -758,36 +973,125 @@ def build(sup: "Supervisor") -> dict[str, Any]:
             base["sandbox"] = {"error": repr(exc)}
         return base
 
-    def id_audit(*, conclusion_id: str | None = None, operation_id: str | None = None,
-                 focus: str = "", idempotency_key: str | None = None) -> dict[str, Any]:
+    def id_audit(*, conclusion_id: str | None = None,
+                 operation_id: str | None = None, focus: str = "",
+                 idempotency_key: str | None = None,
+                 wait: bool = True, wait_seconds: float | None = None
+                 ) -> dict[str, Any]:
+        """Ask Id to audit a conclusion against the record.
+
+        Queued like any other input, so it cannot run a generation against the
+        session a claimed turn may already hold.
+
+        The split is sharper than before. The **evidence review is resolved by
+        the Harness** -- the dossier, the hash chain, whatever content could
+        not be resolved -- so it is measured fact rather than something the
+        model reported about itself. Only the verdict and the findings come
+        from Id's turn. Id still reaches for `audit_dossier` during that turn
+        through its own senses, and what it consulted is recorded as tool
+        calls.
+
+        Ego is never consulted. Not once, anywhere in this path.
+        """
+        if not conclusion_id and not operation_id:
+            raise NotFound("audit needs a conclusion_id or an operation_id")
+        target = conclusion_id or operation_id
+
         def run(op_id: str, limitations: list[str]) -> dict[str, Any]:
-            out = sup.client("id").call("audit", conclusion_id=conclusion_id,
-                                        operation_id_target=operation_id, focus=focus,
-                                        operation_id=op_id)
-            if out.get("is_simulated"):
-                limitations.append("SIMULATED BACKEND: not model inference")
+            framing = (f"audit conclusion {target}"
+                       + (f" (focus: {focus})" if focus.strip() else "")
+                       + ". Use audit_dossier to resolve the recorded evidence, "
+                         "and judge only from what the record shows. Finish "
+                         "with exactly three lines:\n"
+                         "VERDICT: supported | contested | unsupported | "
+                         "inconclusive\n"
+                         "FINDING: <one sentence>\n"
+                         "UNRESOLVED: <what the record does not establish>")
+            queued = sup.methods()["role_enqueue_trigger"](
+                role="id", kind="operator_message", source="operator",
+                source_ref=target, summary=framing[:400],
+                payload={"conclusion_id": conclusion_id,
+                         "operation_id_target": operation_id,
+                         "focus": focus[:2000], "intent": "audit"},
+                operation_id=op_id)
+
+            # Measured, by the Harness, regardless of what Id says.
+            dossier = sup.methods()["audit_dossier"](
+                conclusion_id=conclusion_id, operation_id=operation_id)
+            reviewed = {
+                "ego_consulted": False,
+                "resolved_from": "durable record only",
+                "hash_chain_ok": dossier.get("hash_chain_ok"),
+                "events": dossier.get("events", []),
+                "operation_id": dossier.get("operation_id"),
+                "conclusion": dossier.get("conclusion"),
+                "unresolved_content": dossier.get("unresolved_content", []),
+            }
+            out: dict[str, Any] = {
+                "trigger_id": queued["trigger_id"], "status": "queued",
+                "conclusion_id": conclusion_id,
+                "target_kind": "conclusion" if conclusion_id else "operation",
+                "target_id": target,
+                "asked_ego_to_defend_itself": False,
+                "evidence_reviewed": reviewed,
+                "verdict": "inconclusive", "findings": [], "unresolved": "",
+            }
+            if not wait:
+                limitations.append("queued only; no verdict yet")
+                return out
+
+            settled = _await_turn(
+                queued["trigger_id"],
+                timeout=(sup.cfg.scheduler.submit_wait_seconds
+                         if wait_seconds is None else wait_seconds))
+            out.update(settled)
+            out["evidence_reviewed"] = reviewed
+            out["asked_ego_to_defend_itself"] = False
+            result = settled.get("result") or {}
+            _label_simulation(result, limitations)
+            out["is_simulated"] = bool(result.get("is_simulated"))
+
+            # The structured verdict survived the move onto the turn model. It
+            # used to be parsed inside the role; the turn is generic, so it is
+            # parsed here. Losing it because the transport changed would be a
+            # capability quietly disappearing.
+            parsed = _parse_audit(result.get("text", ""))
+            out["verdict"] = parsed["verdict"]
+            out["findings"] = [parsed["finding"]] if parsed["finding"] else []
+            out["unresolved"] = parsed["unresolved"]
+            out["finding"] = parsed["finding"] or result.get("text", "")
+            if not parsed["verdict_stated"]:
+                limitations.append(
+                    "Id did not state a verdict in the expected form; "
+                    "'inconclusive' here means unparsed, not judged")
+            if settled["status"] != "completed":
+                limitations.append("Id had not reached this before the wait "
+                                   "elapsed; it remains queued")
+                return out
+
             audit_id, _ = mind.memory.record_audit(
                 target_kind=out["target_kind"], target_id=out["target_id"],
                 verdict=out["verdict"], focus=focus or None,
-                findings=out.get("findings"), unresolved=out.get("unresolved"),
-                evidence={"hash_chain_ok": out["evidence_reviewed"].get("hash_chain_ok"),
-                          "event_count": len(out["evidence_reviewed"].get("events", [])),
+                findings=out["findings"], unresolved=out["unresolved"],
+                evidence={"hash_chain_ok": reviewed.get("hash_chain_ok"),
+                          "event_count": len(reviewed.get("events", [])),
                           "unresolved_content":
-                              out["evidence_reviewed"].get("unresolved_content", [])},
+                              reviewed.get("unresolved_content", [])},
                 operation_id=op_id,
             )
             out["audit_id"] = audit_id
-            if out["evidence_reviewed"].get("unresolved_content"):
-                limitations.append("some referenced content could not be resolved; "
-                                   "the audit is incomplete")
-            # A contested audit of an Ego conclusion is a real disagreement, and
-            # it is recorded as one rather than quietly overwriting the claim.
+            if reviewed.get("unresolved_content"):
+                limitations.append("some referenced content could not be "
+                                   "resolved; the audit is incomplete")
+            # A contested audit of an Ego conclusion is a real disagreement,
+            # and it is recorded as one rather than quietly overwriting the
+            # claim.
             if conclusion_id and out["verdict"] in ("contested", "unsupported"):
                 concl = mind.memory.get_conclusion(conclusion_id)
                 did, _ = mind.memory.open_disagreement(
                     subject_kind="conclusion", subject_id=conclusion_id,
                     claim_a=concl["claim"], actor_a=concl["produced_by"],
-                    claim_b="; ".join(out.get("findings") or ["contested"]),
+                    claim_b="; ".join(out["findings"] or ["contested"]),
                     actor_b="id",
                     evidence_a={"conclusion_evidence": concl.get("evidence", [])},
                     evidence_b={"audit_id": audit_id},
@@ -797,8 +1101,9 @@ def build(sup: "Supervisor") -> dict[str, Any]:
             return out
 
         return _run_operation("id_audit", "id",
-                              {"conclusion_id": conclusion_id, "operation_id": operation_id,
-                               "focus": focus}, idempotency_key, run)
+                              {"conclusion_id": conclusion_id,
+                               "operation_id": operation_id, "focus": focus},
+                              idempotency_key, run)
 
     def id_disagreements(*, scope: str = "open", limit: int = 20) -> dict[str, Any]:
         items = mind.memory.get_disagreements(status=scope, limit=limit)
@@ -941,11 +1246,50 @@ def build(sup: "Supervisor") -> dict[str, Any]:
 
     # ------------------------------------------------------------------
     def side_channel(*, to_role: str, kind: str, payload: dict[str, Any] | None = None,
-                     from_role: str = "supervisor") -> dict[str, Any]:
+                     from_role: str = "supervisor", durable: bool = True
+                     ) -> dict[str, Any]:
+        """Deliver a message to a persistent role.
+
+        Delivery may be transient; influence may not be unaudited. This used
+        to push into an in-memory list on the role process, bounded at 64 and
+        dropping the oldest -- and Id's `status()` drained that list into its
+        own cognition. A receipt-free message was therefore shaping persistent
+        cognition with no author, no body and no record.
+
+        A message that can wake a role or enter its cognitive input is now
+        queued in the durable mailbox, with its author, its exact body and its
+        consumption relationship on the record. The transient signal is still
+        delivered for liveness-style nudges, and `durable=False` keeps that
+        behaviour for a caller that genuinely wants a hint rather than an
+        input -- but it then cannot enter a trigger bundle.
+        """
+        from . import mailbox
+
         if to_role not in ("ego", "id"):
             raise InvalidInput("side channel targets ego or id", to_role=to_role)
-        return sup.client(to_role).call("signal", kind=kind, payload=payload or {},
-                                        from_role=from_role)
+        body = payload or {}
+        queued = None
+        if durable:
+            summary = str(body.get("message") or body.get("summary")
+                          or f"{kind} from {from_role}")
+            queued = sup.methods()["role_enqueue_trigger"](
+                role=to_role, kind="role_message", source=from_role or "supervisor",
+                summary=summary[:mailbox.MAX_SUMMARY],
+                payload={"kind": kind, "from_role": from_role, "body": body})
+        transient: dict[str, Any] = {}
+        try:
+            transient = sup.client(to_role).call(
+                "signal", kind=kind, payload=body, from_role=from_role)
+        except Exception as exc:  # noqa: BLE001
+            # The durable trigger is what matters; a role that is restarting
+            # will still see the message at its next turn.
+            transient = {"accepted": False, "reason": str(exc)[:200]}
+        return {**transient, "durable": bool(queued),
+                "trigger_id": (queued or {}).get("trigger_id"),
+                "note": ("queued in the role mailbox and attributable; it "
+                         "becomes cognitive input at a turn boundary"
+                         if queued else
+                         "transient only; this cannot enter a trigger bundle")}
 
     def shutdown() -> dict[str, Any]:
         sup._stop.set()

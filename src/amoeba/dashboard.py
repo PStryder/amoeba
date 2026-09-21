@@ -70,7 +70,7 @@ DASHBOARD_HTML = """<!doctype html>
 
 <script>
 const PANELS = ["overview","work","blackboard","memory","artifacts","prompts",
-                "environment",
+                "environment","turns",
                 "health","provenance","converse","consult id","backchannel"];
 let session = localStorage.getItem("amoeba_operator") || "";
 let current = "overview";
@@ -280,6 +280,76 @@ const render = {
       "ego and id are bootstrap-only roots: these are suggested wordings, not "
       "library candidates. Adopting one means editing the shipped prompt file."));
     main.appendChild(oc);
+  },
+  async turns(main) {
+    // What each persistent role is doing, what is waiting for it, and what it
+    // has thought recently. A cockpit over Harness state: the scheduler is
+    // deterministic substrate, and nothing here decides anything.
+    const mb = await rpc("role_mailbox", {});
+    for (const role of ["ego","id"]) {
+      const r = mb[role];
+      const c = card(role + " \u2014 " + r.state, true);
+      c.appendChild(dump({
+        state: r.state,
+        queued: r.queued,
+        queued_kinds: r.queued_kinds,
+        current_turn: r.current_turn ? r.current_turn.turn_id : null,
+        current_profile: r.current_turn ? r.current_turn.profile_ref : null,
+        last_stop_reason: r.last_turn ? r.last_turn.stop_reason : null,
+        next_heartbeat_in: r.next_heartbeat
+          ? Math.max(0, Math.round(r.next_heartbeat - Date.now()/1000)) + "s"
+          : null,
+      }));
+      if (r.next_triggers.length) {
+        c.appendChild(el("h2",null,"waiting for the next turn"));
+        c.appendChild(table(r.next_triggers,
+                            ["kind","source","summary","trigger_id"]));
+      }
+      main.appendChild(c);
+    }
+
+    const t = await rpc("role_turns", {limit:30});
+    const c = card("recent bounded turns", true);
+    c.appendChild(table(t.turns.map(x => ({
+      turn_id: x.turn_id, role: x.role, why: (x.trigger_kinds||[]).join(","),
+      n: x.trigger_count, stop_reason: x.stop_reason, status: x.status,
+      tools: x.tool_call_count, continues: x.parent_turn || "",
+    })), ["turn_id","role","why","n","stop_reason","status","tools","continues"]));
+    c.appendChild(el("div","pill",
+      "a continuation is a new bounded turn whose parent is recorded, not an "
+      "invisible extension of the previous one"));
+
+    // Drill into one turn: the exact bundle and environment it was given.
+    const row = el("div","row");
+    const id = el("input"); id.placeholder = "turn_id";
+    const go2 = el("button","go","inspect");
+    go2.onclick = async()=>{ try {
+      const d = await rpc("role_turn", {turn_id:id.value.trim()});
+      c.appendChild(el("h2",null,"turn " + d.turn_id));
+      c.appendChild(dump({profile_ref:d.profile_ref,
+                          environment_sha256:d.environment_sha256,
+                          bundle_sha256:d.bundle_sha256,
+                          stop_reason:d.stop_reason,
+                          parent_turn:d.parent_turn}));
+      c.appendChild(table(d.triggers,
+                          ["kind","source","summary","status","deliveries"]));
+      if (d.bundle) c.appendChild(dump(d.bundle.text));
+    } catch(e){ alert(e.message); } };
+    row.append(id, go2); c.appendChild(row);
+
+    // Put something in a role's mailbox. Input, not authority.
+    const mrow = el("div","row");
+    const who = el("input"); who.placeholder = "ego|id"; who.value = "ego";
+    const msg = el("input"); msg.placeholder = "message";
+    const send = el("button","go","queue message");
+    send.onclick = async()=>{ try{
+      await rpc("operator_message_role", {role:who.value.trim(), message:msg.value});
+      go(current);}catch(e){alert(e.message);} };
+    mrow.append(who, msg, send); c.appendChild(mrow);
+    c.appendChild(el("div","pill",
+      "a message wakes the role and is attributable; it carries no authority, "
+      "and the role acts only through its own effectors"));
+    main.appendChild(c);
   },
   async environment(main) {
     // What each role is told it can do, right now. The same manifest the

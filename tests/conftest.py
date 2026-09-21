@@ -111,8 +111,23 @@ class LiveStack:
         self.client.close()
 
 
+# Scheduler settings for a test stack. The deterministic backend always
+# reports finish_reason="length", so every role turn genuinely truncates and
+# pulls its full continuation chain -- at the production default that is four
+# turns per input and the suite crawls. One continuation still exercises the
+# path; the bound itself is covered by unit tests and a mutation.
+TEST_SCHEDULER = {
+    "poll_seconds": 0.2,
+    "id_heartbeat_seconds": 0.0,     # tests that want a heartbeat ask for one
+    "max_continuations": 1,
+    "submit_wait_seconds": 45.0,
+    "turn_wall_seconds": 60.0,
+}
+
+
 def _write_stack_config(tmp_path: Path, *, kind: str = "deterministic",
                         overrides: dict[str, Any] | None = None,
+                        scheduler: dict[str, Any] | None = None,
                         extra_toml: str = "") -> Path:
     ports = [_free_port() for _ in range(5)]
     state = (tmp_path / "state").as_posix()
@@ -140,6 +155,9 @@ def _write_stack_config(tmp_path: Path, *, kind: str = "deterministic",
             f"n_gpu_layers = {real.backend.n_gpu_layers}",
             "n_ctx = 8192", "n_seq_max = 6",
         ]
+    sched = {**TEST_SCHEDULER, **(scheduler or {})}
+    lines += ["", "[scheduler]"]
+    lines += [f"{k} = {v!r}" for k, v in sched.items()]
     lines += [
         "",
         "[arbiter]",
@@ -159,8 +177,10 @@ def _write_stack_config(tmp_path: Path, *, kind: str = "deterministic",
 
 
 def start_stack(tmp_path: Path, *, kind: str = "deterministic",
-                timeout: float = 180.0, extra_toml: str = "") -> LiveStack:
-    cfg_path = _write_stack_config(tmp_path, kind=kind, extra_toml=extra_toml)
+                timeout: float = 180.0, extra_toml: str = "",
+                scheduler: dict[str, Any] | None = None) -> LiveStack:
+    cfg_path = _write_stack_config(tmp_path, kind=kind, extra_toml=extra_toml,
+                                   scheduler=scheduler)
     cfg = load_config(cfg_path)
     env = dict(os.environ)
     env["PYTHONPATH"] = os.pathsep.join([str(ROOT / "src"), env.get("PYTHONPATH", "")])

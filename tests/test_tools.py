@@ -208,12 +208,28 @@ def test_default_registry_is_read_only(registry: ToolRegistry):
         assert registry.get(name).mutates_state is False
 
 
-def test_ego_converse_records_tool_requests_without_executing_them(stack):
-    """ego_converse parses and reports requests; it does not run them."""
+def test_ego_converse_reports_what_ego_actually_invoked(stack):
+    """The claim flipped, deliberately.
+
+    This used to assert that `ego_converse` parsed tool requests and did not
+    run them. Ego now has a bounded Harness-mediated tool loop, so a request
+    is validated, executed and fed back inside the same turn -- and what
+    comes back describes what was *invoked*, not what was merely asked for.
+    Reporting a request as unexecuted would now be the false statement.
+    """
     turn = stack.call("ego_converse", message="anything",
                       idempotency_key="tool-report-1")
-    assert "tool_requests" in turn["result"]
-    assert isinstance(turn["result"]["tool_requests"], list)
+    result = turn["result"]
+    assert isinstance(result.get("tool_requests"), list)
+    assert isinstance(result.get("tool_calls"), list)
+    for call in result["tool_calls"]:
+        # Every recorded call was either run or refused, with a reason.
+        assert "accepted" in call
+        if not call["accepted"]:
+            assert call.get("reason")
+    assert not any("does not execute tools" in lim
+                   for lim in turn["limitations"]), \
+        "a stale limitation says Ego cannot do what it now does"
 
 
 def test_the_execution_loop_is_wired_and_the_docs_say_so():
@@ -268,10 +284,18 @@ def test_execution_stays_out_of_the_neuocyte_process():
             "the Harness, not the process holding the model output")
 
 
-def test_ego_converse_reports_tool_requests_as_unexecuted(stack):
-    """The limitation is load-bearing: a client must not assume tools ran."""
+def test_a_simulated_answer_is_always_labelled(stack):
+    """The limitation that is still load-bearing.
+
+    The "tools were not executed" caveat is gone because it became false. This
+    one has not: a client must never have to guess whether a cognitive result
+    came from model inference or a deterministic stub. It was briefly lost
+    when conversation moved onto the turn model, which is exactly why it is
+    asserted here rather than assumed.
+    """
     turn = stack.call("ego_converse", message="anything",
                       idempotency_key="tool-not-run")
-    assert isinstance(turn["result"]["tool_requests"], list)
-    if turn["result"]["tool_requests"]:
-        assert any("does not execute tools" in lim for lim in turn["limitations"])
+    result = turn["result"]
+    assert result.get("is_simulated") is True
+    assert any("SIMULATED BACKEND" in lim for lim in turn["limitations"]), \
+        turn["limitations"]

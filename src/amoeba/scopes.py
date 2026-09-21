@@ -59,6 +59,13 @@ ROLE_BASE = (
     # cognitive act, so it is deliberately not model-facing: the role asks for
     # it on the model's behalf and hands the answer over.
     "role_environment",
+    # Claiming and closing a bounded turn. Also not model-facing: scheduling
+    # your own next thought is not a cognitive act, and a mind that could
+    # would be scheduling itself.
+    "role_claim_turn", "role_complete_turn", "role_abandon_turn",
+    # Putting something in the *other* role's mailbox goes through the
+    # governed messaging effectors, not through this.
+    "role_enqueue_trigger",
     "status", "health", "capabilities",
     "recall", "get_memory", "history", "provenance", "audit_dossier",
     "get_conclusion", "get_work", "queue_stats",

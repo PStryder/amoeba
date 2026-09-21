@@ -165,7 +165,8 @@ disagreement; Ego's claim is not rewritten.
 
 **I22. The side channel changes nothing.** Signals are transient, bounded and
 receipt-free; consequential changes go through the writer.
-→ `test_side_channel_signal_changes_no_state`
+→ `test_a_transient_signal_changes_no_state`,
+`test_a_message_that_reaches_cognition_is_attributable`
 
 **I23. A model can request a tool call; it cannot perform one.** Requests are
 parsed out of generated text, validated against a declared schema, checked
@@ -703,6 +704,132 @@ widen it, and are not a parameter any caller can supply.
 `test_every_model_variable_reaches_the_backend`,
 `test_harness_constraints_narrow_and_never_widen`
 
+### Persistent roles and bounded turns
+
+Full reference: `TURNS.md` (the mailbox, trigger bundles, Ego and Id wake
+semantics, stop reasons, continuation, context homeostasis, crash recovery and
+turn provenance).
+
+Ego and Id are persistent **identities** whose cognition happens in bounded
+turns. The Harness owns when a turn begins, what triggered it, what inputs are
+admitted and what happens when it ends; the model owns only the reasoning
+inside one.
+
+**I64. A persistent role runs one bounded turn at a time.** Defended twice: the
+role process runs exactly one turn thread, so a second concurrent turn has
+nowhere to execute, and `role_turns` carries a partial unique index over open
+turns so a second claim is a constraint violation. Before this, `ego_converse`
+called into the Ego process synchronously over a threaded RPC server, and two
+callers produced two concurrent turns against one inference session.
+Serialization is per role: Ego and Id still run concurrently, and neuocytes are
+untouched.
+→ `test_a_role_cannot_have_two_turns_at_once`,
+`test_ego_and_id_run_concurrently`,
+`test_input_arriving_during_an_ego_turn_is_queued_not_injected`
+
+**I65. Input arriving during a turn waits for the next boundary.** The profile,
+the environment manifest and the trigger bundle are frozen in one transaction
+before generation starts, and nothing reopens them. Events wake cognition; they
+do not interrupt it. Queued is also not *seen*: a trigger becomes a cognitive
+input only when a turn bundles it, and being claimed by a role that then died
+is not consumption either.
+→ `test_input_arriving_during_a_turn_waits_for_the_next_one`,
+`test_queued_is_not_seen`, `test_trigger_order_is_deterministic_and_bundled`,
+`test_a_burst_larger_than_the_bundle_leaves_the_rest_queued`,
+`test_the_bundle_preserves_every_member_identity`,
+`test_inputs_arriving_together_are_bundled_into_one_turn`
+
+**I66. Turn-end reasons are first class.** `model_stop`, `max_output_tokens`,
+`token_budget_exhausted`, `tool_turn_limit_reached`, `deadline_reached`,
+`cancelled`, `context_pressure`, `backend_error`, `role_failure`,
+`no_environment` — not collapsed into "the turn ended", because they drive
+different continuation behaviour. Detected from the substrate rather than from
+the model cooperating.
+→ `test_stop_reasons_are_recorded_distinctly`
+
+**I67. The Harness continues an interrupted thought.** A non-terminal stop
+earns another turn, decided by the Harness. A thought cut off by an output
+ceiling cannot be relied on to ask for its own continuation, because being cut
+off is what stopped it. A continuation is a new bounded turn with `parent_turn`
+recorded, not an invisible extension.
+→ `test_a_non_terminal_stop_schedules_a_continuation`,
+`test_a_terminal_stop_leaves_the_role_idle`
+
+**I68. The continuation chain is bounded.** Found by running it: with a backend
+that always truncated, every turn scheduled a successor that also truncated,
+and the organism burned its context until inference refused the prompt. An
+unbounded continuation policy is a token furnace. The chain stops at
+`max_continuations` and that is recorded rather than silent.
+→ `test_the_continuation_chain_is_bounded`,
+`test_continuation_depth_counts_only_the_chain`
+
+**I69. A role that dies mid-turn does not swallow its inputs.** Triggers are
+consumed at commit, not at claim, so a turn left running by a process that is
+gone returns its inputs to the queue with `deliveries` incremented — a replay
+is visible rather than looking like a new event. At-least-once with preserved
+identity, stated rather than claimed away as exactly-once. A trigger that
+repeatedly outlives the role reading it expires instead of becoming an undying
+poison message.
+→ `test_a_role_that_dies_mid_turn_does_not_swallow_its_inputs`,
+`test_a_trigger_that_keeps_killing_the_role_expires`,
+`test_a_completed_turn_does_not_reconsume_its_triggers`
+
+**I70. A turn records exactly what caused it.** Role, incarnation, profile
+reference and digest, environment digest and blob, the bundle digest and blob,
+trigger kinds, stop reason, model generation and `parent_turn`. The bundle and
+environment are content-addressed *before* the turn runs, so a past turn's
+inputs are read back rather than recomputed from state that has moved. Later
+changes never rewrite a historical turn.
+→ `test_a_turn_records_what_caused_it`,
+`test_later_changes_do_not_rewrite_a_historical_turn`,
+`test_queued_at_and_consumed_by_remain_distinguishable`,
+`test_a_role_turn_records_profile_environment_and_triggers`
+
+**I71. The scheduler is substrate, never a cognitive component.** No scheduler
+neuocyte, no supervisor neuocyte, no arbiter agent: the scheduling modules
+contain no inference calls at all, and a test asserts it. `role_claim_turn`,
+`role_complete_turn` and `role_enqueue_trigger` sit in the role *process* scope
+and are not model-facing — claiming your own next turn is not a cognitive act,
+and a mind that could would be scheduling itself. Cognition may decide what it
+wants; Harness physics decides when execution happens.
+→ `test_the_scheduler_is_substrate_not_a_cognitive_component`,
+`test_the_turn_verbs_are_not_offered_to_the_model`,
+`test_the_mailbox_is_absent_from_the_external_surface`
+
+**I72. One ingestion path: cognition happens only in claimed turns.** A verb
+that calls into a role process to make it think bypasses the mailbox and runs
+a generation against the session a claimed turn may already be using --
+`converse`, `investigate`, `introspect` and `audit` all did. There is
+deliberately no fast lane for an idle role: that would make conversational
+ordering a race between whoever called while the role happened to be free.
+Status, health and snapshot calls into a role are allowed, because they read
+rather than generate.
+&rarr; `test_no_verb_generates_cognition_outside_the_mailbox`
+
+**Cognitive results never lose their labelling.** A simulated backend is
+declared as a limitation on every cognitive verb, and `is_simulated` is carried
+out through the turn result. This was briefly lost when conversation moved onto
+the turn model, which is why it is asserted rather than assumed.
+&rarr; `test_simulated_backend_is_labelled_on_every_cognitive_result`,
+`test_a_simulated_answer_is_always_labelled`
+
+**Rejuvenation stays Harness-initiated.** `context_rejuvenate` is in no role
+scope. A role reports `context_pressure` and the Harness reclaims context
+between turns, then hands over the replacement session; identity, incarnation,
+profile binding and mailbox all survive.
+&rarr; `test_ego_cannot_reach_a_prohibited_power`
+
+**Ego wakes because something relevant happened.** Never because its process
+exists. Relevance comes from a recorded relationship — `origin_actor` on the
+work row — not a heuristic, so work Ego did not originate does not wake it.
+Id additionally gets a startup turn and a deterministic heartbeat that backs
+off while the organism is quiet; the heartbeat is explicit input with its own
+kind, not a fake user message.
+→ `test_id_wakes_at_startup_and_ego_stays_quiet`,
+`test_id_receives_a_deterministic_heartbeat`,
+`test_an_idle_organism_does_not_spin`,
+`test_the_operator_can_see_the_mailbox`
+
 ### Profile, environment, turn input
 
 Three things reach a mind, and conflating any two is how a system ends up
@@ -852,6 +979,8 @@ on disk (`blobs/ab/cd/<sha256>.blob`).
 | `conclusion_evidence` | what a conclusion rests on | `event_id`, `blob_sha256`, `memory_id` |
 | `work_items` | leased queue | `work_id`, `objective`, `work_class`, `origin_actor`, `snapshot_id`, `model_generation`, `pinned_state_ver`, `status`, `lease_owner`, `lease_expires`, `attempt`, `fencing_token`, `budget_tokens`, `deadline`, `maintenance_depth` |
 | `operations` | externally visible units | `operation_id`, `kind`, `actor`, `status`, `idempotency_key`, `request_blob`, `result_blob`, `limitations` |
+| `role_triggers` | the durable role mailbox | `trigger_id`, `target_role`, `kind`, `source`, `source_ref`, `summary`, `payload_sha256`, `status`, `turn_id`, `deliveries` |
+| `role_turns` | one bounded turn of a persistent role | `turn_id`, `role`, `incarnation`, `profile_ref`, `environment_sha256`/`_blob`, `bundle_sha256`/`_blob`, `stop_reason`, `parent_turn` |
 | `prompt_versions` | immutable nodes of the cognitive family tree | `version_id`, `namespace`, `local_version`, `parent_namespace`, `parent_version` (the pin), `prompt_mode`, `prompt_text`, `model_vars`, `local_sha256`, `state`, `origin` |
 | `prompt_selections` | which approved version new incarnations get | `namespace`, `purpose`, `version_id`, `selected_by` |
 | `prompt_evaluations` | Id's advisory verdicts | `evaluation_id`, `version_id`, `evaluator`, `verdict`, `evidence` |

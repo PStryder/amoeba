@@ -554,6 +554,79 @@ CREATE TABLE IF NOT EXISTS incarnation_profiles (
 CREATE INDEX IF NOT EXISTS ix_incarnation_actor
   ON incarnation_profiles(actor_id, created_at);
 
+-- ===================================================================
+-- Persistent roles: the mailbox, the bundle, and the turn
+-- ===================================================================
+-- Ego and Id are persistent identities whose cognition happens in bounded
+-- turns. The Harness owns when a turn begins, what woke it, what inputs it is
+-- given, and what happens when it ends; the model owns only the reasoning
+-- inside it. These three tables are where that ownership lives.
+
+-- One thing that happened which a role may need to think about. Being queued
+-- is NOT being seen: a trigger becomes a cognitive input only when the Harness
+-- puts it in a specific turn's bundle.
+CREATE TABLE IF NOT EXISTS role_triggers (
+  trigger_id    TEXT PRIMARY KEY,
+  target_role   TEXT NOT NULL,           -- ego | id
+  kind          TEXT NOT NULL,           -- see mailbox.TRIGGER_KINDS
+  source        TEXT NOT NULL,           -- who or what produced it
+  source_ref    TEXT,                    -- work_id, interaction_id, post_id...
+  summary       TEXT NOT NULL DEFAULT '',-- bounded, rendered to the model
+  payload_sha256 TEXT,                   -- immutable full payload, if any
+  correlation_id TEXT,
+  operation_id  TEXT,                    -- the externally visible unit
+                                         -- that produced this trigger
+  causal_parent TEXT,                    -- the turn that caused this one
+  status        TEXT NOT NULL,           -- queued|claimed|consumed|expired
+  bundle_id     TEXT,                    -- set when claimed
+  turn_id       TEXT,                    -- the turn that consumed it
+  created_at    REAL NOT NULL,
+  claimed_at    REAL,
+  consumed_at   REAL,
+  deliveries    INTEGER NOT NULL DEFAULT 0,
+  state_version INTEGER NOT NULL
+);
+CREATE INDEX IF NOT EXISTS ix_trigger_queue
+  ON role_triggers(target_role, status, created_at);
+CREATE INDEX IF NOT EXISTS ix_trigger_turn ON role_triggers(turn_id);
+
+-- One bounded turn of a persistent role. Rows are append-only: a turn is
+-- opened, then closed with its stop reason. The environment and profile are
+-- recorded as digests plus an immutable blob so the exact cognition can be
+-- reconstructed after the library and the world have moved on.
+CREATE TABLE IF NOT EXISTS role_turns (
+  turn_id          TEXT PRIMARY KEY,
+  role             TEXT NOT NULL,
+  incarnation      INTEGER,
+  profile_ref      TEXT,
+  profile_sha256   TEXT,
+  environment_sha256 TEXT,
+  environment_blob TEXT,
+  bundle_id        TEXT,
+  bundle_sha256    TEXT,                 -- digest of the exact rendered bundle
+  bundle_blob      TEXT,                 -- the bundle bytes, recoverable
+  trigger_kinds    TEXT NOT NULL DEFAULT '[]',
+  trigger_count    INTEGER NOT NULL DEFAULT 0,
+  started_at       REAL NOT NULL,
+  finished_at      REAL,
+  status           TEXT NOT NULL,        -- running|completed|failed|abandoned
+  stop_reason      TEXT,                 -- see mailbox.STOP_REASONS
+  model_generation TEXT,
+  tool_call_count  INTEGER NOT NULL DEFAULT 0,
+  result_sha256    TEXT,
+  parent_turn      TEXT,                 -- the turn this continues
+  operation_id     TEXT,
+  state_version    INTEGER NOT NULL
+);
+CREATE INDEX IF NOT EXISTS ix_role_turn ON role_turns(role, started_at);
+CREATE INDEX IF NOT EXISTS ix_role_turn_status ON role_turns(role, status);
+
+-- Exactly one turn may be open per persistent role. A UNIQUE index over
+-- (role) filtered to open turns makes a second concurrent turn a constraint
+-- violation in the database rather than a convention somebody has to keep.
+CREATE UNIQUE INDEX IF NOT EXISTS ux_one_open_turn_per_role
+  ON role_turns(role) WHERE status = 'running';
+
 CREATE TABLE IF NOT EXISTS conversations (
   conversation_id TEXT PRIMARY KEY,
   created_at      REAL NOT NULL,

@@ -83,6 +83,54 @@ class SandboxConfig:
 
 
 @dataclass(slots=True)
+class SchedulerConfig:
+    """When a persistent role gets another bounded turn.
+
+    Deterministic substrate, not policy a model negotiates. Every number here
+    is configuration rather than a constant buried in a loop, because "how
+    often does Id think when nothing is happening" is an operational question
+    somebody will want to answer differently.
+    """
+
+    # How often a role process asks the Harness whether it has a turn to run.
+    # This is the latency between something being queued and cognition
+    # starting, so it is short; it costs one cheap query per role per tick.
+    poll_seconds: float = 0.5
+
+    # Id's periodic homeostatic review when nothing else has woken it. Id is
+    # logically always on; it is not a token furnace. Set to 0 to disable the
+    # heartbeat entirely, leaving Id purely event-driven.
+    id_heartbeat_seconds: float = 300.0
+
+    # After a heartbeat turn that found nothing, wait longer before the next
+    # one, up to this ceiling. A quiet organism should get quieter, not keep
+    # paying full price for discovering that nothing happened.
+    id_heartbeat_max_seconds: float = 1800.0
+    id_heartbeat_backoff: float = 2.0
+
+    # Id gets one turn at startup so it forms an initial view of the organism
+    # it woke up in. Ego does not: a persistent identity that talks to itself
+    # because its process exists is not the same as one that responds.
+    id_startup_turn: bool = True
+    ego_startup_turn: bool = False
+
+    # How many times in a row the Harness will grant a continuation turn for
+    # a thought that keeps being cut off. Without a bound this is a token
+    # furnace: a turn that always truncates schedules a successor that always
+    # truncates. The chain stops here and the reason is recorded, rather than
+    # the organism quietly burning its context.
+    max_continuations: int = 3
+
+    # Wall clock for one bounded role turn, independent of the tool-turn and
+    # token bounds.
+    turn_wall_seconds: float = 180.0
+
+    # How long a caller waiting on its own queued input will block before
+    # returning "still queued". The work continues; only the waiting stops.
+    submit_wait_seconds: float = 120.0
+
+
+@dataclass(slots=True)
 class RoleConfig:
     """Operational limits for a long-lived role. Deliberately not doctrine.
 
@@ -152,6 +200,7 @@ class Config:
     api_enabled: bool = True
     backend: BackendConfig = field(default_factory=BackendConfig)
     arbiter: ArbiterConfig = field(default_factory=ArbiterConfig)
+    scheduler: SchedulerConfig = field(default_factory=SchedulerConfig)
     sandbox: SandboxConfig = field(default_factory=SandboxConfig)
     filespace: FilespaceConfig = field(default_factory=FilespaceConfig)
     homeostasis: "HomeostasisSettings" = field(default_factory=lambda: HomeostasisSettings())
@@ -315,6 +364,8 @@ def load_config(path: str | os.PathLike[str] | None = None) -> Config:
         _apply(cfg.backend, raw["backend"], "backend")
     if "arbiter" in raw:
         _apply(cfg.arbiter, raw["arbiter"], "arbiter")
+    if "scheduler" in raw:
+        _apply(cfg.scheduler, raw["scheduler"], "scheduler")
     for role in ("ego", "id"):
         _reject_retired_prompt(raw.get(role) or {}, role)
     if "ego" in raw:

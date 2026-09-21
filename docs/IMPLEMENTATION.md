@@ -65,6 +65,12 @@ Read this before trusting anything below it.
 | Ego/Id bounded Harness-mediated tool loop | **Implemented, tested** | roles previously parsed tool calls without executing them; one call per turn, validated and run by the Harness, result fed back, bounded by turns and deadline |
 | Environment provenance: exact bytes reconstructable | **Implemented, tested** | manifest content-addressed before it is handed over; `role.turn_began` records profile, environment digest, blob and trigger |
 | `cfg.<role>.system_prompt` ungoverned doctrine path | **Removed** | the field is gone and a non-empty value is refused at load with migration guidance; the live prompt comes only from the Prompt Library |
+| Persistent roles run bounded turns, one at a time | **Implemented, tested** | `tests/test_persistent_turns.py`; one turn thread per role plus a partial unique index over open turns — previously two callers produced two concurrent turns against one inference session |
+| Durable Harness-owned role mailbox | **Implemented, tested** | queued / claimed / consumed / expired; consumption at commit so a crash mid-turn returns the inputs, at-least-once with preserved identity |
+| Ego event-driven, Id event + heartbeat | **Implemented, tested** | Ego has no autonomous turn; Id gets a startup turn and a backing-off heartbeat that is explicit input rather than a fake user message |
+| Stop reasons and bounded deterministic continuation | **Implemented, tested** | ten distinct reasons; non-terminal stops earn a continuation with `parent_turn` recorded, bounded at `max_continuations` |
+| Turn provenance: profile + environment + trigger bundle | **Implemented, tested** | bundle and environment content-addressed before the turn runs and read back rather than recomputed |
+| Artifact and blackboard wake triggers | **Not implemented** | the trigger kinds exist and nothing emits them; a relevance rule that avoided waking Ego on unrelated board traffic was not worth inventing as a heuristic — see [TURNS §7](TURNS.md#7-ego-event-driven-never-autonomous) |
 | Cognitive blackboard: posts, threads, relations, receipts | **Implemented, tested** | `tests/test_blackboard.py` |
 | Independent replication vs socially propagated agreement | **Implemented, tested** | every read recorded; `board_corroboration` splits the two |
 | Board-naive neuocytes (`board_access="none"`) | **Implemented, tested** | `test_a_naive_worker_posts_without_having_read_the_board` |

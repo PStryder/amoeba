@@ -149,6 +149,13 @@ class Supervisor:
         # describes live processes, and the roles are this supervisor's
         # own children, so it cannot outlive what it describes.
         self.role_prompt_digest: dict[str, str] = {}
+        # Scheduler state for the persistent roles. Deterministic substrate:
+        # it decides when a role gets another bounded turn, never what the
+        # role should conclude.
+        self._role_activity: dict[str, str] = {"ego": "idle", "id": "idle"}
+        self._next_heartbeat: dict[str, float] = {}
+        self._heartbeat_interval: dict[str, float] = {}
+        self._sched_lock = threading.RLock()
         self.homeostasis = ContextHomeostasis(
             HomeostasisConfig(**{k: getattr(cfg.homeostasis, k)
                                  for k in HomeostasisConfig.__slots__}),
@@ -282,6 +289,7 @@ class Supervisor:
         recovery = self.mind.recover()
         self.log.info("recovery: %s", recovery["summary"])
         self._ingest_prompt_library()
+        self._recover_role_turns()
 
         self._server = RpcServer(
             self.cfg.supervisor_host, self.cfg.supervisor_port, token=self.token,
@@ -308,6 +316,10 @@ class Supervisor:
         # a role that died inside that window was not restarted for three
         # minutes, during which the supervisor was blind. Supervision starts
         # first now and brings up whatever is not yet answering.
+
+        # Queued after the roles are spawned, so the first thing Id does is
+        # think about an organism that exists rather than one still starting.
+        self._startup_triggers()
 
         self.cfg.ready_path.write_text(json.dumps({
             "pid": os.getpid(), "port": self.cfg.supervisor_port,
@@ -347,6 +359,159 @@ class Supervisor:
                 "waiting for approval: %s", counts["delta"],
                 [r["namespace"] for r in out["ingested"]
                  if r["outcome"] == "delta"])
+
+    # ------------------------------------------------------------------
+    # Turn scheduling: deterministic substrate, never a cognitive component
+    # ------------------------------------------------------------------
+    def role_activity(self, role: str) -> str:
+        """What a persistent role is doing, for the operator surface.
+
+        Derived from durable state where it can be -- an open turn row is the
+        ground truth for "processing" -- so a stale in-memory flag cannot
+        claim a role is idle while a turn is running.
+        """
+        from . import mailbox
+
+        if self.mind is None:
+            return "unknown"
+        try:
+            if mailbox.open_turn(self.mind.db.conn, role) is not None:
+                return "processing"
+            if mailbox.pending_count(self.mind.db.conn, role):
+                return "queued"
+        except Exception:  # noqa: BLE001
+            return "unknown"
+        with self._sched_lock:
+            if self._role_activity.get(role) == "recovering":
+                return "recovering"
+        if role == "id" and self.cfg.scheduler.id_heartbeat_seconds > 0:
+            return "heartbeat_wait"
+        return "idle"
+
+    def next_heartbeat(self, role: str) -> float | None:
+        """When this role is next due a heartbeat turn, if it gets one."""
+        with self._sched_lock:
+            return self._next_heartbeat.get(role)
+
+    def note_trigger(self, role: str) -> None:
+        """A trigger arrived: reset this role's heartbeat backoff.
+
+        The organism stopped being quiet, so the next quiet period starts from
+        the configured interval rather than from however far the backoff had
+        climbed.
+        """
+        with self._sched_lock:
+            self._heartbeat_interval.pop(role, None)
+
+    def note_turn_finished(self, stop_reason: str | None, *, turn_id: str) -> None:
+        """Record that a turn closed, for the heartbeat cadence."""
+        with self._sched_lock:
+            self._role_activity["id"] = "idle"
+
+    def _schedule_heartbeats(self) -> None:
+        """Give Id a turn when the organism has been quiet.
+
+        Id has continuing responsibility for internal state even when nobody
+        sends it anything, so it is logically always on. It is not a token
+        furnace: a heartbeat that finds nothing backs the interval off toward
+        a ceiling, so a quiet organism gets quieter instead of paying full
+        price to keep discovering that nothing happened. Any real trigger
+        resets it.
+
+        Ego has no heartbeat. A persistent identity that talks to itself
+        because its process exists is not the same as one that responds.
+        """
+        from . import mailbox
+
+        sched = self.cfg.scheduler
+        if sched.id_heartbeat_seconds <= 0 or self.mind is None:
+            return
+        role = "id"
+        now = time.time()
+        with self._sched_lock:
+            due = self._next_heartbeat.get(role)
+            if due is None:
+                self._next_heartbeat[role] = now + sched.id_heartbeat_seconds
+                return
+            if now < due:
+                return
+            interval = self._heartbeat_interval.get(
+                role, sched.id_heartbeat_seconds)
+
+        # Do not stack a heartbeat on top of work that is already waiting:
+        # Id will see everything queued at its next boundary anyway, and a
+        # heartbeat it did not need is noise in its own transcript.
+        try:
+            if (mailbox.pending_count(self.mind.db.conn, role)
+                    or mailbox.open_turn(self.mind.db.conn, role) is not None):
+                with self._sched_lock:
+                    self._next_heartbeat[role] = now + interval
+                return
+            self.methods()["role_enqueue_trigger"](
+                role=role, kind="heartbeat", source="scheduler",
+                summary=("periodic homeostatic review: nothing has woken you, "
+                         "check the organism's internal state"),
+                payload={"reason": "periodic_homeostatic_review",
+                         "interval_seconds": interval})
+        except Exception:  # noqa: BLE001
+            self.log.debug("heartbeat scheduling failed", exc_info=True)
+            return
+        with self._sched_lock:
+            # Back off *after* enqueueing, so a quiet organism's next review is
+            # further away; note_trigger resets this the moment anything real
+            # arrives.
+            grown = min(interval * sched.id_heartbeat_backoff,
+                        sched.id_heartbeat_max_seconds)
+            self._heartbeat_interval[role] = grown
+            self._next_heartbeat[role] = time.time() + grown
+
+    def _startup_triggers(self) -> None:
+        """Id forms an initial view of the organism it woke up in.
+
+        Ego does not get one by default: it wakes because something relevant
+        happened, and starting a process is not that.
+        """
+        sched = self.cfg.scheduler
+        for role, wanted, summary in (
+            ("id", sched.id_startup_turn,
+             "the organism has started; form an initial view of its internal state"),
+            ("ego", sched.ego_startup_turn,
+             "the organism has started"),
+        ):
+            if not wanted:
+                continue
+            try:
+                self.methods()["role_enqueue_trigger"](
+                    role=role, kind="startup", source="supervisor",
+                    summary=summary,
+                    payload={"run_id": self.mind.run_id if self.mind else None})
+            except Exception:  # noqa: BLE001
+                self.log.warning("could not queue %s startup turn", role,
+                                 exc_info=True)
+
+    def _recover_role_turns(self) -> None:
+        """Re-open turns left running by a process that did not survive.
+
+        Without this, a crash mid-turn leaves the role unable to start another
+        -- one open turn per role is a database constraint -- and its triggers
+        claimed by a mind that no longer exists.
+        """
+        from . import mailbox
+
+        if self.mind is None:
+            return
+        try:
+            _, out = self.mind.writer.apply(
+                lambda m: mailbox.recover(m, self.mind), actor="supervisor",
+                bump_version=False)
+        except Exception:  # noqa: BLE001
+            self.log.exception("role turn recovery failed")
+            return
+        recovered = out.get("recovered_turns") or []
+        if recovered:
+            self.log.warning(
+                "recovered %d interrupted role turn(s); %d trigger(s) requeued",
+                len(recovered), sum(len(r["requeued"]) for r in recovered))
 
     def stop(self) -> None:
         self._stop.set()
@@ -583,6 +748,10 @@ class Supervisor:
                 self._supervise_children()
             except Exception:  # noqa: BLE001
                 self.log.exception("supervision pass failed")
+            try:
+                self._schedule_heartbeats()
+            except Exception:  # noqa: BLE001
+                self.log.exception("heartbeat scheduling failed")
             passes += 1
             self._supervision_passes = passes
             self._supervision_last = time.time()
@@ -739,7 +908,7 @@ class Supervisor:
         # up per call. Rebuilding would make every lookup a fresh closure set.
         if self._method_cache is None:
             from . import (ego_api, harness_api, id_api, io_api,
-                           operator_api, prompt_api, supervisor_api)
+                           operator_api, prompt_api, supervisor_api, turn_api)
 
             methods = supervisor_api.build(self)
             methods.update(harness_api.build(self))
@@ -747,6 +916,7 @@ class Supervisor:
             methods.update(ego_api.build(self))
             methods.update(io_api.build(self))
             methods.update(prompt_api.build(self))
+            methods.update(turn_api.build(self))
             methods.update(operator_api.build(self))
             methods["system_pulse"] = self._system_pulse
             self._method_cache = methods

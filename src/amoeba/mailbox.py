@@ -1,0 +1,446 @@
+"""The durable role mailbox: what wakes a persistent role, and when.
+
+Ego and Id are persistent *identities*. Their cognition happens in bounded
+turns. This module owns the part the model does not:
+
+    something happens  ->  trigger queued        (durable, not yet seen)
+    a turn begins      ->  eligible triggers bundled and claimed
+    the turn commits   ->  those triggers consumed
+    the role dies      ->  claimed-but-unfinished triggers become eligible again
+
+Three distinctions this exists to keep:
+
+**Queued is not seen.** A trigger becomes a cognitive input only when the
+Harness puts it in a specific turn's bundle. Submitting something does not mean
+a mind has considered it, and the two states are separately visible so nobody
+has to guess which one a caller is looking at.
+
+**Events wake cognition; they do not interrupt it.** Anything arriving while a
+turn is running stays queued for the next boundary. There is no path that
+injects input into an active inference sequence, because the bundle is frozen
+before generation starts and nothing reopens it.
+
+**One turn at a time, per role.** Enforced by a partial unique index on
+``role_turns``, so a second concurrent turn is a database constraint violation
+rather than a convention. Ego and Id still run concurrently with each other,
+and neuocytes are untouched.
+
+Nothing here is a cognitive component. The Harness decides *when* a role gets
+another bounded turn; the role decides only what to think within one.
+"""
+
+from __future__ import annotations
+
+import json
+import time
+from typing import TYPE_CHECKING, Any, Sequence
+
+from .errors import InvalidInput, NotFound
+from .ids import new_id, sha256_hex
+from .store.events import EventKind
+from .store.writer import Mutation
+
+if TYPE_CHECKING:
+    from .mind import Mind
+
+ROLES = ("ego", "id")
+
+TRIGGER_KINDS = (
+    "user_input",          # external or operator conversational input
+    "work_completed",      # work this role is responsible for finished
+    "work_failed",
+    "work_cancelled",
+    "artifact_event",      # a proposal or promotion on relevant work
+    "board_event",         # a relevant blackboard post
+    "role_message",        # a targeted message from the other role
+    "operator_message",    # the operator talking to this role
+    "continuation",        # the Harness deciding a turn was not finished
+    "heartbeat",           # Id's periodic homeostatic review
+    "startup",             # the organism came up
+)
+
+# Why a bounded turn ended. Not collapsed into "it ended", because these drive
+# different deterministic continuation behaviour.
+STOP_REASONS = (
+    "model_stop",               # the model finished its thought
+    "max_output_tokens",        # truncated by the per-turn output ceiling
+    "token_budget_exhausted",
+    "tool_turn_limit_reached",
+    "deadline_reached",
+    "cancelled",
+    "context_pressure",
+    "backend_error",
+    "role_failure",
+    "no_environment",
+)
+
+# Stop reasons the Harness treats as "this thought was interrupted, not
+# finished". A continuation turn is scheduled for these without the model
+# having to ask, because a truncated thought cannot be relied on to request
+# its own continuation -- the truncation is exactly what stopped it.
+NON_TERMINAL = frozenset({
+    "max_output_tokens", "token_budget_exhausted", "tool_turn_limit_reached",
+    "context_pressure",
+})
+
+TERMINAL = frozenset({"model_stop", "cancelled", "deadline_reached",
+                      "backend_error", "role_failure", "no_environment"})
+
+MAX_BUNDLE = 16
+"""Most triggers admitted to one turn.
+
+Bounded so a burst cannot produce an unboundedly large cognitive input. The
+remainder stay queued in order and are picked up by the next turn, which is
+visible rather than silent: the bundle reports what it left behind.
+"""
+
+MAX_SUMMARY = 400
+MAX_DELIVERIES = 3
+"""After this many failed deliveries a trigger is expired rather than retried
+forever. A trigger that reliably kills the role that reads it would otherwise
+be an undying poison message."""
+
+
+def _canon(obj: Any) -> bytes:
+    return json.dumps(obj, sort_keys=True, separators=(",", ":")).encode("utf-8")
+
+
+# ---------------------------------------------------------------------------
+# queueing
+# ---------------------------------------------------------------------------
+def enqueue(m: Mutation, *, role: str, kind: str, source: str,
+            summary: str, source_ref: str | None = None,
+            payload: dict[str, Any] | None = None,
+            correlation_id: str | None = None,
+            causal_parent: str | None = None,
+            operation_id: str | None = None) -> dict[str, Any]:
+    """Record that something happened which a role may need to think about.
+
+    Deliberately cheap and always durable. The decision about whether this
+    *deserves* a turn is the scheduler's, and the decision about whether it
+    enters cognition is the bundler's; queueing is neither.
+    """
+    if role not in ROLES:
+        raise InvalidInput("unknown role", role=role, allowed=list(ROLES))
+    if kind not in TRIGGER_KINDS:
+        raise InvalidInput("unknown trigger kind", kind=kind,
+                           allowed=list(TRIGGER_KINDS))
+    trigger_id = new_id("trg")
+    digest = None
+    if payload:
+        digest = m.put_json(payload, schema="amoeba.role_trigger_payload/1")
+    m.sql("INSERT INTO role_triggers(trigger_id, target_role, kind, source,"
+          " source_ref, summary, payload_sha256, correlation_id, operation_id,"
+          " causal_parent, status, created_at, state_version)"
+          " VALUES (?,?,?,?,?,?,?,?,?,?,'queued',?,?)",
+          (trigger_id, role, kind, source, source_ref,
+           (summary or "")[:MAX_SUMMARY], digest, correlation_id, operation_id,
+           causal_parent, time.time(), m.prior_version + 1))
+    m.emit(EventKind.ROLE_TRIGGER_QUEUED, {
+        "trigger_id": trigger_id, "role": role, "kind": kind, "source": source,
+        "source_ref": source_ref, "summary": (summary or "")[:200],
+        "payload_sha256": digest, "causal_parent": causal_parent,
+        "note": "queued is not seen; it becomes cognitive input only in a turn"})
+    return {"trigger_id": trigger_id, "role": role, "kind": kind,
+            "status": "queued"}
+
+
+def pending(conn, role: str) -> list[dict[str, Any]]:
+    # Ordered by rowid, which is insertion order, rather than by the clock.
+    # `created_at` ties for anything queued inside the same millisecond, and
+    # the trigger id does not break that tie usefully -- a ULID's suffix is
+    # random, so two messages sent together could be presented to Ego in
+    # either order. Conversational ordering has to be exact, and rowid is the
+    # only thing here that actually is arrival order.
+    return [dict(r) for r in conn.execute(
+        "SELECT * FROM role_triggers WHERE target_role = ? AND status = 'queued'"
+        " ORDER BY rowid ASC", (role,))]
+
+
+def pending_count(conn, role: str) -> int:
+    row = conn.execute(
+        "SELECT COUNT(*) AS n FROM role_triggers"
+        " WHERE target_role = ? AND status = 'queued'", (role,)).fetchone()
+    return int(row["n"])
+
+
+def open_turn(conn, role: str) -> dict[str, Any] | None:
+    row = conn.execute(
+        "SELECT * FROM role_turns WHERE role = ? AND status = 'running'",
+        (role,)).fetchone()
+    return dict(row) if row else None
+
+
+# ---------------------------------------------------------------------------
+# bundling
+# ---------------------------------------------------------------------------
+def render_bundle(triggers: Sequence[dict[str, Any]], *, role: str,
+                  left_behind: int = 0) -> str:
+    """The bundle as the text a role actually reads.
+
+    Causal type is preserved per trigger rather than flattened into anonymous
+    prose: a mind should know *why* it woke, and "a work item you asked for
+    failed" is a different thought from "someone sent you a message". Internal
+    identifiers are included because they are what the role's own effectors
+    take as arguments.
+    """
+    lines = ["<turn_input>",
+             f"role: {role}   triggers: {len(triggers)}"]
+    if left_behind:
+        lines.append(f"({left_behind} further trigger(s) queued for a later turn)")
+    lines.append("")
+    for i, t in enumerate(triggers, start=1):
+        ref = f" ref={t['source_ref']}" if t.get("source_ref") else ""
+        lines.append(f"{i}. [{t['kind']}] from {t['source']}{ref}")
+        if t.get("summary"):
+            lines.append(f"   {t['summary']}")
+    lines.append("</turn_input>")
+    return "\n".join(lines)
+
+
+def claim(m: Mutation, mind: "Mind", *, role: str, incarnation: int | None,
+          profile_ref: str | None, profile_sha256: str | None,
+          environment_sha256: str | None, environment_blob: str | None,
+          model_generation: str = "") -> dict[str, Any] | None:
+    """Open a turn and freeze the exact inputs it will see.
+
+    Everything that makes this turn's cognition explicable is fixed here, in
+    one transaction: the bound profile, the environment manifest, and the
+    trigger bundle. Nothing reopens it. Triggers arriving a microsecond later
+    stay queued, which is the whole point -- events wake cognition, they do not
+    interrupt it.
+
+    Returns ``None`` when there is nothing to think about. That is the normal
+    state of an idle organism, not an error.
+    """
+    if role not in ROLES:
+        raise InvalidInput("unknown role", role=role, allowed=list(ROLES))
+    if open_turn(mind.db.conn, role) is not None:
+        # The unique index would refuse this anyway; refusing here gives a
+        # useful error instead of a constraint violation.
+        raise InvalidInput(
+            f"{role} already has a turn running; a persistent role runs one "
+            "bounded turn at a time", role=role)
+
+    queued = pending(mind.db.conn, role)
+    if not queued:
+        return None
+    admitted = queued[:MAX_BUNDLE]
+    left_behind = len(queued) - len(admitted)
+
+    turn_id = new_id("turn")
+    bundle_id = new_id("bnd")
+    text = render_bundle(admitted, role=role, left_behind=left_behind)
+    members = [{"trigger_id": t["trigger_id"], "kind": t["kind"],
+                "source": t["source"], "source_ref": t["source_ref"],
+                "summary": t["summary"], "payload_sha256": t["payload_sha256"],
+                "operation_id": t["operation_id"],
+                "created_at": t["created_at"]} for t in admitted]
+    body = {"bundle_id": bundle_id, "role": role, "triggers": members,
+            "left_behind": left_behind, "text": text}
+    bundle_blob = m.put_json(body, schema="amoeba.trigger_bundle/1")
+    bundle_sha = sha256_hex(_canon(body))
+
+    parent = next((t["causal_parent"] for t in admitted
+                   if t["kind"] == "continuation" and t["causal_parent"]), None)
+    # The externally visible operation this turn answers, if any. A conclusion
+    # recorded during the turn is tied to it, so `audit_dossier` can resolve
+    # the claim back to the request that caused it.
+    operation = next((t["operation_id"] for t in admitted if t["operation_id"]),
+                     None)
+
+    m.sql("INSERT INTO role_turns(turn_id, role, incarnation, profile_ref,"
+          " profile_sha256, environment_sha256, environment_blob, bundle_id,"
+          " bundle_sha256, bundle_blob, trigger_kinds, trigger_count,"
+          " started_at, status, model_generation, parent_turn, operation_id,"
+          " state_version) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,'running',?,?,?,?)",
+          (turn_id, role, incarnation, profile_ref, profile_sha256,
+           environment_sha256, environment_blob, bundle_id, bundle_sha,
+           bundle_blob, json.dumps([t["kind"] for t in admitted]),
+           len(admitted), time.time(), model_generation, parent, operation,
+           m.prior_version + 1))
+
+    for t in admitted:
+        m.sql("UPDATE role_triggers SET status = 'claimed', bundle_id = ?,"
+              " turn_id = ?, claimed_at = ?, deliveries = deliveries + 1"
+              " WHERE trigger_id = ?",
+              (bundle_id, turn_id, time.time(), t["trigger_id"]))
+
+    m.emit(EventKind.ROLE_TRIGGER_CLAIMED, {
+        "role": role, "turn_id": turn_id, "bundle_id": bundle_id,
+        "trigger_ids": [t["trigger_id"] for t in admitted],
+        "kinds": [t["kind"] for t in admitted],
+        "left_behind": left_behind, "bundle_sha256": bundle_sha,
+        "bundle_blob": bundle_blob,
+        "note": ("frozen for this turn; anything arriving now waits for the "
+                 "next one")})
+    return {"turn_id": turn_id, "bundle_id": bundle_id, "role": role,
+            "text": text, "triggers": members, "left_behind": left_behind,
+            "bundle_sha256": bundle_sha, "bundle_blob": bundle_blob,
+            "parent_turn": parent, "operation_id": operation}
+
+
+# ---------------------------------------------------------------------------
+# closing a turn
+# ---------------------------------------------------------------------------
+def continuation_depth(conn, turn_id: str, *, limit: int = 32) -> int:
+    """How many continuations in a row led to this turn.
+
+    Walks the recorded parent chain rather than trusting a counter carried in
+    a payload, so the depth is a fact about what actually happened. A turn
+    reached by ordinary triggers has depth 0 however long the history before
+    it.
+    """
+    depth = 0
+    current = turn_id
+    seen: set[str] = set()
+    while current and depth < limit:
+        if current in seen:
+            break
+        seen.add(current)
+        row = conn.execute(
+            "SELECT parent_turn FROM role_turns WHERE turn_id = ?",
+            (current,)).fetchone()
+        if row is None or not row["parent_turn"]:
+            break
+        depth += 1
+        current = row["parent_turn"]
+    return depth
+
+
+def complete(m: Mutation, mind: "Mind", *, turn_id: str, stop_reason: str,
+             tool_call_count: int = 0, result: dict[str, Any] | None = None,
+             status: str = "completed",
+             max_continuations: int = 3) -> dict[str, Any]:
+    """Close a turn, consume its triggers, and decide whether to continue.
+
+    Consumption happens here rather than at claim time so a role that dies
+    mid-turn leaves its triggers recoverable. Being handed to a mind that then
+    crashed is not the same as having been thought about.
+    """
+    row = mind.db.conn.execute(
+        "SELECT * FROM role_turns WHERE turn_id = ?", (turn_id,)).fetchone()
+    if row is None:
+        raise NotFound("no such turn", turn_id=turn_id)
+    if row["status"] != "running":
+        raise InvalidInput("that turn is already closed", turn_id=turn_id,
+                           status=row["status"])
+    if stop_reason not in STOP_REASONS:
+        raise InvalidInput("unknown stop reason", stop_reason=stop_reason,
+                           allowed=list(STOP_REASONS))
+
+    result_sha = m.put_json(result, schema="amoeba.role_turn_result/1") if result else None
+    m.sql("UPDATE role_turns SET status = ?, stop_reason = ?, finished_at = ?,"
+          " tool_call_count = ?, result_sha256 = ? WHERE turn_id = ?",
+          (status, stop_reason, time.time(), int(tool_call_count), result_sha,
+           turn_id))
+    m.sql("UPDATE role_triggers SET status = 'consumed', consumed_at = ?"
+          " WHERE turn_id = ? AND status = 'claimed'", (time.time(), turn_id))
+
+    consumed = [r["trigger_id"] for r in mind.db.conn.execute(
+        "SELECT trigger_id FROM role_triggers WHERE turn_id = ?", (turn_id,))]
+    m.emit(EventKind.ROLE_TURN_ENDED, {
+        "turn_id": turn_id, "role": row["role"], "status": status,
+        "stop_reason": stop_reason, "tool_call_count": int(tool_call_count),
+        "trigger_ids": consumed, "bundle_id": row["bundle_id"],
+        "environment_sha256": row["environment_sha256"],
+        "profile_ref": row["profile_ref"], "result_sha256": result_sha})
+    m.emit(EventKind.ROLE_TRIGGER_CONSUMED, {
+        "turn_id": turn_id, "role": row["role"], "trigger_ids": consumed})
+
+    continuation = None
+    depth = continuation_depth(mind.db.conn, turn_id)
+    exhausted = depth >= max(0, int(max_continuations))
+    if status == "completed" and stop_reason in NON_TERMINAL and exhausted:
+        # Stop the chain rather than granting another turn that will almost
+        # certainly end the same way. Recorded, because a thought abandoned
+        # half-finished is something an operator should be able to find.
+        m.emit(EventKind.ROLE_CONTINUATION_SCHEDULED, {
+            "role": row["role"], "previous_turn": turn_id,
+            "stop_reason": stop_reason, "trigger_id": None,
+            "continuation_depth": depth, "granted": False,
+            "note": (f"continuation limit reached after {depth} consecutive "
+                     "continuations; the chain stops here rather than "
+                     "continuing to truncate")})
+    elif status == "completed" and stop_reason in NON_TERMINAL:
+        # The Harness decides this, not the model. A thought cut off by an
+        # output ceiling cannot be expected to ask for its own continuation:
+        # being cut off is what stopped it.
+        continuation = enqueue(
+            m, role=row["role"], kind="continuation", source="harness",
+            source_ref=turn_id, causal_parent=turn_id,
+            summary=(f"your previous turn stopped early ({stop_reason}); "
+                     "continue from where you left off"),
+            payload={"stop_reason": stop_reason, "previous_turn": turn_id})
+        m.emit(EventKind.ROLE_CONTINUATION_SCHEDULED, {
+            "role": row["role"], "previous_turn": turn_id,
+            "stop_reason": stop_reason,
+            "trigger_id": continuation["trigger_id"],
+            "continuation_depth": depth + 1, "granted": True,
+            "note": ("a continuation is a new bounded turn, not an invisible "
+                     "extension of the last one")})
+    return {"turn_id": turn_id, "status": status, "stop_reason": stop_reason,
+            "consumed": consumed, "continuation": continuation,
+            "continuation_depth": depth,
+            "continuation_limit_reached": bool(
+                exhausted and stop_reason in NON_TERMINAL)}
+
+
+def abandon(m: Mutation, mind: "Mind", *, turn_id: str, reason: str
+            ) -> dict[str, Any]:
+    """Close a turn that never finished, and make its triggers eligible again.
+
+    At-least-once, deliberately. A trigger that was claimed by a role which
+    then died has not been thought about, and pretending otherwise would lose
+    the one thing the mailbox exists to preserve. Trigger identity survives, so
+    a re-delivery is detectable rather than looking like a new event.
+    """
+    row = mind.db.conn.execute(
+        "SELECT * FROM role_turns WHERE turn_id = ?", (turn_id,)).fetchone()
+    if row is None:
+        raise NotFound("no such turn", turn_id=turn_id)
+    m.sql("UPDATE role_turns SET status = 'abandoned', stop_reason = ?,"
+          " finished_at = ? WHERE turn_id = ? AND status = 'running'",
+          ("role_failure", time.time(), turn_id))
+
+    requeued, expired = [], []
+    for r in mind.db.conn.execute(
+            "SELECT trigger_id, deliveries FROM role_triggers"
+            " WHERE turn_id = ? AND status = 'claimed'", (turn_id,)):
+        if int(r["deliveries"]) >= MAX_DELIVERIES:
+            m.sql("UPDATE role_triggers SET status = 'expired' WHERE trigger_id = ?",
+                  (r["trigger_id"],))
+            expired.append(r["trigger_id"])
+        else:
+            m.sql("UPDATE role_triggers SET status = 'queued', bundle_id = NULL,"
+                  " turn_id = NULL, claimed_at = NULL WHERE trigger_id = ?",
+                  (r["trigger_id"],))
+            requeued.append(r["trigger_id"])
+
+    m.emit(EventKind.ROLE_TURN_ABANDONED, {
+        "turn_id": turn_id, "role": row["role"], "reason": reason,
+        "requeued": requeued, "expired": expired})
+    if requeued or expired:
+        m.emit(EventKind.ROLE_TRIGGER_RECOVERED, {
+            "turn_id": turn_id, "role": row["role"], "requeued": requeued,
+            "expired": expired,
+            "note": ("claimed but never consumed; delivery is at-least-once "
+                     "and trigger ids are preserved so a replay is visible"
+                     + (f"; {len(expired)} expired after {MAX_DELIVERIES} "
+                        "deliveries" if expired else ""))})
+    return {"turn_id": turn_id, "requeued": requeued, "expired": expired}
+
+
+def recover(m: Mutation, mind: "Mind") -> dict[str, Any]:
+    """Re-open every turn left running by a process that is gone.
+
+    Called during supervisor recovery. Without it, a crash mid-turn would
+    leave the role unable to start another (the unique index forbids a second
+    open turn) and its triggers claimed forever.
+    """
+    out = []
+    for row in mind.db.conn.execute(
+            "SELECT turn_id FROM role_turns WHERE status = 'running'"):
+        out.append(abandon(m, mind, turn_id=row["turn_id"],
+                           reason="process did not survive the turn"))
+    return {"recovered_turns": out}

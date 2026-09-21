@@ -61,6 +61,8 @@ OPERATOR_VERBS = (
     "operator_prompt_cascade_plan", "operator_prompt_cascade",
     "operator_prompt_bootstrap_report",
     "role_environment",
+    # persistent-role scheduling
+    "role_mailbox", "role_turns", "role_turn", "operator_message_role",
     # filespace and security posture
     "file_roots", "file_list", "file_read", "file_versions",
     "sandbox_capabilities", "sandbox_list",
