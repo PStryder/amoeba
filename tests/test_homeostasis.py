@@ -327,3 +327,160 @@ def test_occupancy_counts_shared_once_and_recomputed_in_full(mind):
         (s["n_past"] - s["prefix_len"]) if s["shares_prefix"] else s["n_past"]
         for s in sessions)
     assert used == 500 + 20 + 530
+
+
+def test_eviction_drops_oldest_first_and_only_what_is_needed(homeo):
+    """Demand-driven, so a quiet role loses nothing.
+
+    "Drop everything finished" would make every rejuvenation forget every
+    past conversation. Evicting only as far as the budget requires keeps
+    recent context whenever there is room for it.
+    """
+    tokens = list(range(1000))
+    spans = [{"turn_id": "t1", "lineage": "a", "start": 0, "end": 200},
+             {"turn_id": "t2", "lineage": "b", "start": 200, "end": 400},
+             {"turn_id": "t3", "lineage": "c", "start": 400, "end": 600}]
+
+    plan = homeo.plan_eviction(tokens, spans, target=800)
+    assert plan["evicted_turns"] == ["t1"], "more was dropped than was needed"
+    assert plan["kept_tokens"] == 800 and plan["reached_target"]
+
+    kept = homeo.apply_eviction(tokens, plan)
+    assert kept == list(range(200, 1000)), "the wrong tokens survived"
+
+
+def test_eviction_keeps_every_surviving_token_verbatim(homeo):
+    """Nothing is rewritten. Removal is the only operation."""
+    tokens = list(range(500))
+    spans = [{"turn_id": "t1", "lineage": "a", "start": 100, "end": 200},
+             {"turn_id": "t2", "lineage": "b", "start": 300, "end": 350}]
+    plan = homeo.plan_eviction(tokens, spans, target=0)
+    kept = homeo.apply_eviction(tokens, plan)
+
+    expected = list(range(100)) + list(range(200, 300)) + list(range(350, 500))
+    assert kept == expected
+
+
+def test_an_overlapping_or_impossible_span_is_ignored(homeo):
+    """Offsets come from a role measuring itself, so they are not trusted.
+
+    A role restarted mid-turn can leave a span that no longer describes
+    anything. Acting on it would drop live context, so a span that overlaps
+    one already taken, or runs past the end, is skipped rather than clamped --
+    clamping would invent a boundary nobody recorded.
+    """
+    tokens = list(range(300))
+    spans = [{"turn_id": "t1", "lineage": "a", "start": 0, "end": 100},
+             {"turn_id": "overlap", "lineage": "b", "start": 50, "end": 150},
+             {"turn_id": "past_end", "lineage": "c", "start": 250, "end": 9999},
+             {"turn_id": "backwards", "lineage": "d", "start": 200, "end": 120}]
+    plan = homeo.plan_eviction(tokens, spans, target=0)
+    assert plan["evicted_turns"] == ["t1"]
+    assert homeo.apply_eviction(tokens, plan) == list(range(100, 300))
+
+
+def test_eviction_that_cannot_reach_the_budget_says_so(homeo):
+    """Under-delivering in silence looks like a rejuvenation loop with no cause."""
+    tokens = list(range(1000))
+    spans = [{"turn_id": "t1", "lineage": "a", "start": 0, "end": 50}]
+    plan = homeo.plan_eviction(tokens, spans, target=100)
+    assert plan["reached_target"] is False
+    assert plan["dropped_tokens"] == 50
+
+
+# ---------------------------------------------------------------------------
+# The durable handle, and what the *second* rejuvenation sees
+# ---------------------------------------------------------------------------
+def test_a_rejuvenated_role_keeps_its_identity_and_gains_a_new_handle(homeo, mind):
+    """The record follows the live session; the incarnation does not move.
+
+    A replacement session is not a new incarnation. Identity survives
+    rejuvenation -- profile binding, mailbox and turn history all continue --
+    which is why the Harness hands the session over instead of restarting the
+    role, and why this is not `register_agent`.
+    """
+    before = {a["agent_id"]: a for a in mind.work.live_agents()}["ego"]
+    out = homeo.rejuvenate(role="ego", reason="too big")
+    after = {a["agent_id"]: a for a in mind.work.live_agents()}["ego"]
+
+    assert after["session_handle"] == out["new_session_id"]
+    assert after["session_handle"] != before["session_handle"]
+    assert after["incarnation"] == before["incarnation"], (
+        "rejuvenation bumped the incarnation; a replacement session is not a "
+        "new mind")
+
+
+def test_a_second_rejuvenation_does_not_resurrect_what_the_first_dropped(homeo, mind):
+    """The bug this class of check exists to find.
+
+    `hand_over_session` updated the role's in-memory handle and nothing
+    updated the durable one, so the second rejuvenation checkpointed the
+    *first* session -- closed, gone -- and restored the whole pre-eviction
+    context into a new one. Everything the first pass dropped came back.
+
+    Positional trim had the identical bug; it simply looked like
+    "rejuvenation does not stick" rather than like resurrection.
+    """
+    first = homeo.rejuvenate(role="ego", reason="one")
+    assert first["tokens_after"] < first["tokens_before"]
+
+    second = homeo.rejuvenate(role="ego", reason="two")
+    assert second["old_session_id"] == first["new_session_id"], (
+        "the second rejuvenation worked from a session the first one closed")
+    assert second["tokens_before"] == first["tokens_after"], (
+        f"the second pass saw {second['tokens_before']} tokens where the "
+        f"first left {first['tokens_after']}: dropped context came back")
+
+
+def test_an_eviction_never_reads_spans_measured_in_a_previous_session(homeo, mind):
+    """Coordinates describe the session they were measured in, and only that.
+
+    After an eviction the surviving tokens sit at different offsets, so every
+    span recorded before it is stale. They are not remapped; they are left
+    attached to the handle they were measured under, and that handle is now
+    closed. A later eviction filters on the *current* handle, so the stale
+    coordinates are unreachable rather than merely unlikely to be chosen.
+
+    Without this a second eviction would drop whatever now happens to sit at
+    the old offsets, which is live context.
+    """
+    from amoeba import mailbox
+
+    # Three settled turns in the original session, at known offsets.
+    original = "sess_ego"
+    for i, (start, end) in enumerate(((0, 100), (100, 200), (200, 300))):
+        mind.writer.apply(
+            lambda m, i=i: mailbox.enqueue(
+                m, role="ego", kind="user_input", source="operator",
+                summary=f"q{i}", lineage=f"op-{i}", expects_answer=True),
+            actor="test", bump_version=False)
+        _, turn = mind.writer.apply(
+            lambda m: mailbox.claim(
+                m, mind, role="ego", incarnation=1, profile_ref="ego@1",
+                profile_sha256="p", environment_sha256="e",
+                environment_blob="eb"),
+            actor="ego", bump_version=False)
+        mind.writer.apply(
+            lambda m, t=turn, s=start, e=end: mailbox.complete(
+                m, mind, turn_id=t["turn_id"], stop_reason="model_stop",
+                result={"answer": "done"}, session_handle=original,
+                token_start=s, token_end=e),
+            actor="harness", bump_version=False)
+
+    assert len(mailbox.settled_spans(mind.db.conn, "ego", original)) == 3
+
+    out = homeo.rejuvenate(role="ego", reason="first")
+    new_handle = out["new_session_id"]
+
+    # Every span from before belongs to a session that no longer exists.
+    assert mailbox.settled_spans(mind.db.conn, "ego", new_handle) == [], (
+        "spans measured in the closed session are visible to the new one")
+    assert len(mailbox.settled_spans(mind.db.conn, "ego", original)) == 3, (
+        "the historical record was rewritten; it should stay truthful about "
+        "the session it described")
+
+    # And the next eviction plans against the new session only.
+    plan = homeo._plan_eviction_for(
+        "ego", {"session_id": new_handle}, list(range(500)))
+    assert plan["evicted_turns"] == [], (
+        f"a later eviction reached back into stale coordinates: {plan}")

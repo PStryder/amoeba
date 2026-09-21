@@ -1275,3 +1275,140 @@ def test_ego_surfaces_a_result_to_the_client_that_asked(tmp_path: Path):
                    for r in listed["results"]), listed
     finally:
         stack.stop()
+
+
+# ---------------------------------------------------------------------------
+# Waking: artifacts and board posts reach the role that owns the work
+# ---------------------------------------------------------------------------
+def _ego_triggers(stack, kind=None):
+    out = []
+    for t in stack.call("role_mailbox", role="ego")["ego"]["next_triggers"]:
+        if kind is None or t["kind"] == kind:
+            out.append(t)
+    return out
+
+
+def _work_for(stack, *, origin_actor="ego"):
+    res = stack.call("admit_work", objective="find something out",
+                     work_class="user", origin_actor=origin_actor)
+    assert res["admitted"], res
+    return res["work_id"]
+
+
+def test_an_artifact_proposal_wakes_the_role_that_asked_for_the_work(tmp_path: Path):
+    """The kind existed and nothing emitted it, so Ego never heard.
+
+    A proposal grants nothing and waits for a decision only the requesting
+    role can make. Leaving it unannounced meant a neuocyte could propose
+    something and have it sit there until an operator noticed.
+    """
+    stack = start_stack(tmp_path)
+    try:
+        work_id = _work_for(stack)
+        sbx = stack.call("sandbox_create", work_id=work_id, owner="nc_1")
+        stack.call("sandbox_write", sandbox_id=sbx["sandbox_id"],
+                   path="finding.txt", content="the disk is full")
+        stack.call("artifact_propose", sandbox_id=sbx["sandbox_id"],
+                   path="finding.txt", rationale="worth keeping",
+                   proposed_by="nc_1", work_id=work_id)
+
+        events = _wait_for(lambda: _ego_triggers(stack, "artifact_event") or None,
+                           timeout=30.0)
+        assert events, "the proposal never reached Ego"
+        assert work_id in events[0]["summary"]
+    finally:
+        stack.stop()
+
+
+def test_a_board_post_about_owned_work_wakes_the_owner(tmp_path: Path):
+    """A finding posted against Ego's work is evidence for Ego's thought."""
+    stack = start_stack(tmp_path)
+    try:
+        work_id = _work_for(stack)
+        stack.call("board_post", author="nc_1", author_kind="neuocyte",
+                   post_type="finding", body="the build fails on cold cache",
+                   work_id=work_id)
+
+        events = _wait_for(lambda: _ego_triggers(stack, "board_event") or None,
+                           timeout=30.0)
+        assert events, "the board post never reached Ego"
+        assert "nc_1" in events[0]["summary"]
+    finally:
+        stack.stop()
+
+
+def test_a_board_post_about_nobody_s_work_wakes_nobody(tmp_path: Path):
+    """Ownership is the rule, and it is recorded rather than guessed.
+
+    Work the supervisor or operator originated has no persistent role waiting
+    on it. Waking one would be telling it about somebody else's business --
+    and a relevance rule based on what *looks* interesting is the heuristic
+    the architecture declined to invent.
+    """
+    stack = start_stack(tmp_path)
+    try:
+        work_id = _work_for(stack, origin_actor="operator")
+        stack.call("board_post", author="nc_1", author_kind="neuocyte",
+                   post_type="finding", body="unrelated to any role",
+                   work_id=work_id)
+        stack.call("board_post", author="nc_1", author_kind="neuocyte",
+                   post_type="finding", body="no work id at all")
+
+        # Give the queue time to be wrong.
+        deadline = time.time() + 5.0
+        while time.time() < deadline:
+            assert not _ego_triggers(stack, "board_event"), \
+                "a post about work Ego did not originate woke Ego"
+            time.sleep(0.25)
+    finally:
+        stack.stop()
+
+
+def test_a_role_posting_about_its_own_work_does_not_wake_itself(tmp_path: Path):
+    """Self-notification is not a wake storm, it is a spiral.
+
+    Ego posts, Ego wakes, Ego posts. The suppression is on the author rather
+    than on a rate limit, because the problem is not volume -- it is that the
+    notification carries no information its recipient did not just create.
+    """
+    stack = start_stack(tmp_path)
+    try:
+        work_id = _work_for(stack)
+        stack.call("board_post", author="ego", author_kind="ego",
+                   post_type="finding", body="I looked into this myself",
+                   work_id=work_id)
+
+        deadline = time.time() + 5.0
+        while time.time() < deadline:
+            assert not _ego_triggers(stack, "board_event"), \
+                "Ego woke itself by posting about its own work"
+            time.sleep(0.25)
+    finally:
+        stack.stop()
+
+
+def test_a_wake_trigger_is_evidence_not_a_question(tmp_path: Path):
+    """These carry the work's lineage and expect no answer.
+
+    That is what makes them safe to emit freely: they join the turn already
+    thinking about that work instead of opening a rival interaction, so
+    bundling absorbs a burst rather than a throttle having to.
+    """
+    stack = start_stack(tmp_path)
+    try:
+        work_id = _work_for(stack)
+        for i in range(3):
+            stack.call("board_post", author="nc_1", author_kind="neuocyte",
+                       post_type="finding", body=f"finding {i}",
+                       work_id=work_id)
+
+        events = _wait_for(
+            lambda: (_ego_triggers(stack, "board_event")
+                     if len(_ego_triggers(stack, "board_event")) >= 3 else None),
+            timeout=30.0)
+        assert events, "the posts never reached Ego"
+        for t in events:
+            assert not t.get("expects_answer"), \
+                "a board post was queued as a question Ego owes a reply to"
+    finally:
+        stack.stop()

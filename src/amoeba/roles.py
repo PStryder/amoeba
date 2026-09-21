@@ -321,6 +321,28 @@ class RoleProcess:
                     "reason": f"{type(exc).__name__}: {exc}"[:500],
                     "error": None}
 
+    def _context_length(self) -> int | None:
+        """How many tokens this role's session currently holds.
+
+        `limit=0` asks for the count without the tokens, so this is a small
+        read rather than a copy of the whole context.
+
+        Returns None when it cannot be measured, and that is deliberate: an
+        unknown span is never evicted. Keeping too much costs a rejuvenation
+        that could have been avoided; dropping the wrong span costs the
+        thought that was in it.
+        """
+        if not getattr(self, "session_id", None):
+            return None
+        try:
+            return int(self.inf.call("session_tokens",
+                                     session_id=self.session_id,
+                                     limit=0)["n_past"])
+        except Exception:  # noqa: BLE001
+            self.log.debug("could not measure the context length",
+                           exc_info=True)
+            return None
+
     def _feed_tool_result(self, name: str, res: dict[str, Any]) -> None:
         """Append the outcome to the session so the model can use it.
 
@@ -583,6 +605,11 @@ class RoleProcess:
         turn_id = turn["turn_id"]
         self.current_turn_id = turn_id
         stop_reason, result, tool_calls = "model_stop", None, 0
+        # Where this turn begins in the session. Everything appended from here
+        # until the turn closes is this turn's, because a role runs one turn
+        # at a time -- which is what lets a finished interaction be evicted
+        # later without cutting through the middle of a message.
+        token_start = self._context_length()
         try:
             out = self._turn(
                 turn["text"], trigger=f"turn {turn_id}",
@@ -615,7 +642,10 @@ class RoleProcess:
             try:
                 self.sup.call("role_complete_turn", turn_id=turn_id,
                               stop_reason=stop_reason,
-                              tool_call_count=tool_calls, result=result)
+                              tool_call_count=tool_calls, result=result,
+                              session_handle=self.session_id,
+                              token_start=token_start,
+                              token_end=self._context_length())
             except Exception:  # noqa: BLE001
                 # The turn stays open and recovery will requeue its triggers.
                 # Claiming otherwise would lose the inputs.

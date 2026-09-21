@@ -27,6 +27,7 @@ from .store.events import EventKind
 from .filespace import decode_exact_text
 from .tools import (ToolCallRequest, bounded_tool_result,
                     build_neuocyte_registry)
+from .waking import wake_owner_of_work
 from .store.writer import Mutation
 
 if TYPE_CHECKING:
@@ -78,6 +79,16 @@ def build(sup: "Supervisor") -> dict[str, Any]:  # noqa: C901
             relations=relations, snapshot_id=snapshot_id,
             model_generation=model_generation, supersedes=supersedes)
         post = mind.board.get_post(post_id)
+        # `author=author` suppresses self-notification: a role posting about
+        # its own work does not need to be told that it posted.
+        wake_owner_of_work(
+            sup, mind, work_id, kind="board_event", author=author,
+            summary=(f"{author} posted a {post_type} to the blackboard about "
+                     f"work {work_id}"),
+            payload={"post_id": post_id, "thread_id": post["thread_id"],
+                     "post_type": post_type, "author": author,
+                     "author_kind": author_kind, "title": title,
+                     "confidence": confidence})
         return {"post_id": post_id, "thread_id": post["thread_id"], "seq": post["seq"],
                 "receipt_id": receipt.receipt_id,
                 "state_version": receipt.result_version,
@@ -95,6 +106,10 @@ def build(sup: "Supervisor") -> dict[str, Any]:  # noqa: C901
         return {"posts": posts, "count": len(posts),
                 "cursor": mind.board.latest_seq(),
                 "reads_recorded": record,
+                # Attempts on this same operation that died before posting.
+                # A post can be annotated; silence cannot, so it is reported
+                # separately or it stays invisible.
+                "silent_attempts": mind.board.silent_attempts(work_id),
                 "note": ("this read was recorded against the reader, so any finding "
                          "they publish afterwards is marked as socially informed"
                          if record else
@@ -149,10 +164,25 @@ def build(sup: "Supervisor") -> dict[str, Any]:  # noqa: C901
         """
         post = mind.board.get_post(post_id)
         corr = mind.board.corroboration(post_id)
-        supporting = [{"note": f"board post {post_id} by {post['author']}",
+        # The fate of the attempt that produced the claim. A memory item
+        # outlives the post, so what is not written into its evidence here is
+        # gone: a later reader has the belief, not the board.
+        origin = ""
+        if post.get("attempt_unfinished"):
+            origin = (f" (the attempt that produced it "
+                      f"{post.get('attempt_fate')}; nothing corroborated it "
+                      f"by finishing)")
+        supporting = [{"note": (f"board post {post_id} by {post['author']}"
+                                + origin),
                        "blob_sha256": None}]
+        unfinished = set(corr.get("unfinished_support") or [])
         for pid in corr["independent_support"]:
-            supporting.append({"note": f"independent replication: board post {pid}"})
+            # Reported, never weighted: a supporter whose attempt died is
+            # still listed, and the reader decides what that is worth.
+            mark = (" -- from an attempt that did not finish"
+                    if pid in unfinished else "")
+            supporting.append(
+                {"note": f"independent replication: board post {pid}{mark}"})
         opposing = [{"note": f"challenge on the board: post {pid}"}
                     for pid in corr["challenges"]]
         if corr["socially_informed_support"]:
@@ -171,6 +201,11 @@ def build(sup: "Supervisor") -> dict[str, Any]:  # noqa: C901
                 "post_id": post_id, "memory_id": memory_id, "actor": actor,
                 "independent_support": corr["independent_support_count"],
                 "socially_informed_support": len(corr["socially_informed_support"]),
+                "origin_attempt_fate": post.get("attempt_fate"),
+                "support_from_unfinished_attempts": sorted(unfinished),
+                "note": ("attempt fates are recorded, never weighted; the "
+                         "confidence is untouched and no supporter was "
+                         "excluded"),
             })
 
         mind.writer.apply(body, actor=actor, bump_version=False,
@@ -368,6 +403,16 @@ def build(sup: "Supervisor") -> dict[str, Any]:  # noqa: C901
         receipt, _ = mind.writer.apply(body, actor=proposed_by,
                                        operation_id=operation_id,
                                        mutation_id=f"art-propose:{artifact_id}")
+        # A proposal grants nothing and waits for a decision that only the
+        # requesting role can make, so it is exactly the kind of event Ego
+        # should be woken by -- and until now nothing told it.
+        wake_owner_of_work(
+            sup, mind, work_id, kind="artifact_event", author=proposed_by,
+            summary=(f"{proposed_by} proposes an artifact from work "
+                     f"{work_id}: {path}"),
+            payload={"artifact_id": artifact_id, "path": path,
+                     "rationale": rationale, "sha256": digest,
+                     "bytes": size, "artifact_status": "proposed"})
         return {"artifact_id": artifact_id, "status": "proposed", "bytes": size,
                 "sha256": digest, "receipt_id": receipt.receipt_id,
                 "evidence_preserved": True,
@@ -514,6 +559,15 @@ def build(sup: "Supervisor") -> dict[str, Any]:  # noqa: C901
         receipt, _ = mind.writer.apply(body, actor=decided_by,
                                        operation_id=operation_id,
                                        mutation_id=f"art-promote:{artifact_id}")
+        # The requesting role learns what became of its neuocyte's proposal
+        # even when the operator decided it, because "did that land?" is a
+        # question about its own work.
+        wake_owner_of_work(
+            sup, mind, row["work_id"], kind="artifact_event", author=decided_by,
+            summary=(f"artifact {artifact_id} from work {row['work_id']} was "
+                     f"promoted by {decided_by}"),
+            payload={"artifact_id": artifact_id, "artifact_status": "promoted",
+                     "decided_by": decided_by, "path": row["path"]})
         return {"artifact_id": artifact_id, "status": "promoted",
                 "artifact_path": dest.name, "host_path": str(dest),
                 "root": root, "path": resolved.relpath if resolved else None,
@@ -542,6 +596,23 @@ def build(sup: "Supervisor") -> dict[str, Any]:  # noqa: C901
         receipt, _ = mind.writer.apply(body, actor=decided_by,
                                        operation_id=operation_id,
                                        mutation_id=f"art-reject:{artifact_id}")
+        # A rejection is as much a decision about the role's work as a
+        # promotion is, and it is the one a neuocyte's proposer most needs to
+        # know about: the thing it proposed is not going to exist.
+        rejected = mind.db.conn.execute(
+            "SELECT work_id, path FROM artifacts WHERE artifact_id = ?",
+            (artifact_id,)).fetchone()
+        if rejected is not None:
+            wake_owner_of_work(
+                sup, mind, rejected["work_id"], kind="artifact_event",
+                author=decided_by,
+                summary=(f"artifact {artifact_id} from work "
+                         f"{rejected['work_id']} was rejected by {decided_by}: "
+                         f"{reason}"),
+                payload={"artifact_id": artifact_id,
+                         "artifact_status": "rejected",
+                         "decided_by": decided_by, "reason": reason,
+                         "path": rejected["path"]})
         return {"artifact_id": artifact_id, "status": "rejected",
                 "receipt_id": receipt.receipt_id}
 
@@ -998,7 +1069,7 @@ def build(sup: "Supervisor") -> dict[str, Any]:  # noqa: C901
         """Whether a role's context is healthy enough to keep reasoning in."""
         return sup.homeostasis.assess()
 
-    def context_rejuvenate(*, role: str, reason: str, mode: str = "trim",
+    def context_rejuvenate(*, role: str, reason: str, mode: str = "evict",
                            operation_id: str | None = None) -> dict[str, Any]:
         """Harness-initiated. Ego and Id cannot call this; they request."""
         return sup.homeostasis.rejuvenate(role=role, reason=reason, mode=mode,
@@ -1006,7 +1077,7 @@ def build(sup: "Supervisor") -> dict[str, Any]:  # noqa: C901
                                           operation_id=operation_id)
 
     def request_rejuvenation(*, role: str, reason: str, requested_by: str = "id",
-                             mode: str = "trim", operation_id: str | None = None
+                             mode: str = "evict", operation_id: str | None = None
                              ) -> dict[str, Any]:
         return sup.homeostasis.request_rejuvenation(
             role=role, reason=reason, requested_by=requested_by, mode=mode,

@@ -121,7 +121,9 @@ auto_rejuvenate = true
 
 ## Not implemented
 
-- **Compaction.** Nothing merges or rewrites context; `trim` only drops a span.
+- **Compaction.** Nothing merges or rewrites context. Eviction removes whole
+  finished turns and `trim` drops a positional span; neither rephrases
+  anything, which is the point.
 - **Summarisation.** Refused by design, as above.
 - **Neuocyte-session rejuvenation.** Neuocytes are mortal by design — the answer
   for a neuocyte with a stale context is retirement, not repair.

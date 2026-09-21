@@ -658,31 +658,9 @@ def build(sup: "Supervisor") -> dict[str, Any]:
         was told, and failing the completion because a mailbox write failed
         would lose the result to protect a notification.
         """
-        from . import mailbox
+        from .waking import wake_owner_of_work
 
-        try:
-            row = mind.work.get_work(work_id)
-        except Exception:  # noqa: BLE001
-            return
-        owner = (row or {}).get("origin_actor")
-        if owner not in mailbox.ROLES:
-            return
-        try:
-            sup.methods()["role_enqueue_trigger"](
-                role=owner, kind=kind, source="harness", source_ref=work_id,
-                summary=summary[:mailbox.MAX_SUMMARY],
-                payload={"work_id": work_id,
-                         "objective": (row or {}).get("objective"),
-                         "work_class": (row or {}).get("work_class"),
-                         "status": (row or {}).get("status")},
-                correlation_id=(row or {}).get("operation_id"),
-                # The operation that requested the work *is* its lineage: the
-                # result returns to the thought that asked for it, and to no
-                # other.
-                lineage=(row or {}).get("operation_id"))
-        except Exception:  # noqa: BLE001
-            sup.log.debug("could not queue %s trigger for %s", kind, work_id,
-                          exc_info=True)
+        wake_owner_of_work(sup, mind, work_id, kind=kind, summary=summary)
 
     def complete_work(*, work_id: str, neuocyte_id: str, fencing_token: int,
                       result: Any, pinned_state_ver: int | None = None

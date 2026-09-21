@@ -1021,6 +1021,143 @@ applying otherwise looks exactly like one nobody asked for.
 `test_a_specialisation_reaches_the_work_item`,
 `test_work_with_no_specialisation_binds_the_base_directly`
 
+**I92. A role is woken by what happens to work it originated, and by nothing
+else.** `artifact_event` and `board_event` were declared trigger kinds that
+nothing ever emitted, so a neuocyte proposing an artifact -- a decision only
+the requesting role can make -- or posting a finding left that role asleep.
+"Ego is event-driven" was true of a narrower set of events than the
+architecture claimed. What had been missing was a relevance rule that was not
+a guess, and ownership supplies one: the relationship is recorded on the work
+row rather than inferred from what looks interesting. A role posting about its
+own work does not wake itself, because that notification carries nothing its
+recipient did not just create. The rule lives in one module, because two
+copies of a relevance rule are two rules and the second drifts silently.
+
+These triggers are evidence, not questions: they carry the work's lineage and
+expect no answer, so a burst joins the turn already thinking about that work
+rather than opening rival interactions. Bundling absorbs volume, which is why
+there is no throttle -- a second mechanism for a problem the first already
+solves would eventually disagree with it.
+→ `test_an_artifact_proposal_wakes_the_role_that_asked_for_the_work`,
+`test_a_board_post_about_owned_work_wakes_the_owner`,
+`test_a_board_post_about_nobody_s_work_wakes_nobody`,
+`test_a_role_posting_about_its_own_work_does_not_wake_itself`,
+`test_a_wake_trigger_is_evidence_not_a_question`
+
+**I93. Context is reclaimed by dropping finished work, not by cutting the
+middle out.** Trimming was positional -- keep the head, keep a tail fraction,
+drop whatever lay between -- because nothing recorded what a span of context
+*was*. It could and did cut through the middle of a message. A role runs
+exactly one turn at a time, enforced by a partial unique index and a single
+turn thread, so the tokens appended between the session length when a turn
+started and the length when it ended are that turn's, all of them and nothing
+else. That makes the mapping exact rather than estimated, and it is what lets
+a finished interaction be removed at a boundary the chat format already has.
+
+Eviction is demand-driven and refuses more than it accepts. It drops settled
+interactions oldest-first and only as far as the budget requires, so a quiet
+role loses nothing; a lineage still owed an answer is never evicted however
+old, because losing a thought mid-flight is the failure I80 exists to prevent
+and arriving there through housekeeping is no better; a span that was never
+measured, or was measured in a previous session, is kept, because "I do not
+know what this is" must not resolve to "so remove it". Every surviving token
+is verbatim -- removal is the only operation, and nothing summarises the
+organism's own history. When there is not enough finished work to reach the
+budget, the positional trim still runs and the result says that is what
+happened.
+→ `test_a_lineage_still_owed_an_answer_is_never_evictable`,
+`test_a_turn_with_no_measured_span_is_never_evictable`,
+`test_spans_from_another_session_are_never_evictable`,
+`test_an_overlapping_or_impossible_span_is_ignored`,
+`test_eviction_drops_oldest_first_and_only_what_is_needed`,
+`test_eviction_keeps_every_surviving_token_verbatim`,
+`test_a_settled_interaction_is_evictable`,
+`test_eviction_that_cannot_reach_the_budget_says_so`
+
+**I94. The recorded session handle follows the live one.** Rejuvenation closes
+a role's session and opens a fresh one, and `hand_over_session` tells the role
+so. That updated the handle the role holds in memory and not
+`agents.session_handle`, which is the durable record the Harness itself reads
+to find the session to checkpoint. The first rejuvenation worked anyway. The
+*second* checkpointed the session the first one had closed, and restored the
+whole pre-rejuvenation context into a new one -- everything the first pass
+dropped came back, and the organism went round again. Positional trim had the
+same bug and it merely looked like rejuvenation not sticking.
+
+Recorded on its own rather than through `register_agent`, which increments the
+incarnation: a replacement session is not a new incarnation. Identity survives
+rejuvenation -- the profile binding, the mailbox and the turn history all
+continue -- which is the reason the session is handed over instead of the role
+being restarted.
+
+This is also what makes token coordinates safe to keep forever. A span is
+recorded against the handle it was measured under, and after an eviction the
+surviving tokens sit at different offsets, so every earlier span is stale.
+They are not remapped and they are not deleted: they stay attached to a
+handle that is now closed, and eviction filters on the current one. Stale
+coordinates are therefore unreachable rather than merely unlikely to be
+chosen, and the historical record stays truthful about the session it
+described.
+→ `test_a_second_rejuvenation_does_not_resurrect_what_the_first_dropped`,
+`test_a_rejuvenated_role_keeps_its_identity_and_gains_a_new_handle`,
+`test_an_eviction_never_reads_spans_measured_in_a_previous_session`,
+`test_spans_from_another_session_are_never_evictable`
+
+**I95. What became of an attempt travels with what it said.** A neuocyte's
+window onto other work is almost entirely the blackboard -- no `get_work`, no
+history, no artifact list -- so what the board fails to show, nothing shows. A
+read filtered on `status != 'retracted'` and nothing else, which made a
+finding from a neuocyte that then died indistinguishable from one whose work
+completed, and nothing could correct it afterwards: `fail_work` does not touch
+the board, a dead neuocyte cannot retract its own post, and `board_set_status`
+is in no cognitive scope.
+
+**The fate reported is the attempt's, not the work item's.** A work item can
+fail attempt 1, requeue, and complete on attempt 2; joining the post to
+`work_items.status` renders the fenced attempt's finding as `done`, laundering
+a dead attempt's post through a later attempt's success. The author is
+identified by the fencing token that was live when it posted -- read from the
+work row by the Harness, never supplied by the author, for the same reason the
+token works as a fence. A token behind the current one means the author did
+not survive, whatever became of the work afterwards.
+
+**Facts, never verdicts.** Nothing is retracted, hidden, discounted or
+excluded: a neuocyte can find something true and then die of a deadline, and
+"the author's process crashed" is not "the finding was wrong". The recorded
+outcome travels verbatim rather than collapsed to "failed", because a
+deadline, a fencing, a tool error and an exhausted budget mean different
+things to a reader deciding whether to try again. An attempt that failed and
+*will be retried* reads as still running, since a retry may yet corroborate
+it.
+
+**What a reader was shown is frozen**, alongside the state version, exactly as
+`informed_by` is: a fate changes after the read, so without recording what was
+rendered, a reader influenced by `running` is indistinguishable later from one
+influenced by `fenced`. The fate travels through corroboration and into
+promotion, because a memory item outlives the post and what is missing at
+promotion is missing from the belief.
+
+**Silence is reported too.** An attempt that died before posting leaves
+nothing to annotate and would read as though it never happened, so attempts on
+the same **recorded lineage** -- a shared `operation_id`, never a similarity
+of objective -- that ended without posting are returned as a bounded count
+with their recorded outcomes. Scoping by lineage rather than likeness is what
+keeps the Harness from deciding what counts as "the same ground", and nothing
+is posted in anybody's name.
+→ `test_a_later_attempt_s_success_does_not_launder_a_fenced_attempt_s_post`,
+`test_a_finding_from_failed_work_does_not_look_like_one_that_succeeded`,
+`test_a_finding_from_failed_work_is_still_readable`,
+`test_a_failure_that_will_be_retried_is_not_reported_as_unfinished`,
+`test_the_fate_a_reader_was_shown_is_recorded`,
+`test_corroboration_reports_a_dead_supporter_without_discounting_it`,
+`test_attempts_that_died_before_posting_are_reported`,
+`test_silence_on_another_lineage_is_not_reported`,
+`test_an_attempt_that_posted_is_not_reported_as_silent`,
+`test_work_still_running_is_reported_as_such`,
+`test_cancelled_work_is_reported_like_failed_work`,
+`test_a_post_belonging_to_no_work_reports_no_fate`,
+`test_reading_a_thread_says_the_same_as_reading_a_query`
+
 **I73. A role is never wedged by a turn it did not close.** One open turn per
 role is a database constraint, so a turn left running blocks every future turn
 for that role — the role heartbeats, reports healthy, and never thinks again

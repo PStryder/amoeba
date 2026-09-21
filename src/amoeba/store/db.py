@@ -288,6 +288,13 @@ CREATE TABLE IF NOT EXISTS board_posts (
   author           TEXT NOT NULL,
   author_kind      TEXT NOT NULL,          -- ego | id | neuocyte | operator
   author_incarnation INTEGER,
+  -- Which attempt at the work wrote this. A work item can fail one attempt
+  -- and succeed on the next; a post from the fenced attempt must not be
+  -- laundered through the later success, so the fate that matters is the
+  -- author's lease, identified by the token that was live when it posted.
+  -- Read from the work row by the Harness, never supplied by the author.
+  author_fencing_token INTEGER,
+  author_attempt   INTEGER,
   work_id          TEXT,
   operation_id     TEXT,
   post_type        TEXT NOT NULL,          -- finding|question|hypothesis|challenge|request|answer|note|retraction
@@ -340,7 +347,15 @@ CREATE TABLE IF NOT EXISTS board_reads (
   reader    TEXT NOT NULL,
   work_id   TEXT,
   read_at   REAL NOT NULL,
-  query     TEXT
+  query     TEXT,
+  -- The fate as it was rendered to this reader. A fate changes after the
+  -- read, and `informed_by` is frozen for exactly this reason: what a reader
+  -- was shown stops being answerable once the world moves on. Without this,
+  -- a reader influenced by `attempt: running` is indistinguishable later from
+  -- one influenced by `attempt: fenced`.
+  attempt_fate_at_read TEXT,
+  work_status_at_read  TEXT,
+  state_version_at_read INTEGER
 );
 CREATE INDEX IF NOT EXISTS ix_board_reads_reader ON board_reads(reader, read_at);
 CREATE INDEX IF NOT EXISTS ix_board_reads_post   ON board_reads(post_id);
@@ -642,6 +657,13 @@ CREATE TABLE IF NOT EXISTS role_turns (
   model_generation TEXT,
   tool_call_count  INTEGER NOT NULL DEFAULT 0,
   result_sha256    TEXT,
+  -- Which tokens of the session this turn occupies. Exact, not estimated:
+  -- a role runs one turn at a time, so everything appended between these two
+  -- lengths belongs to this turn. Offsets are meaningless across a
+  -- rejuvenation, hence the handle they were measured in.
+  session_handle   TEXT,
+  token_start      INTEGER,
+  token_end        INTEGER,
   parent_turn      TEXT,                 -- the turn this continues
   lineage          TEXT,                 -- whose interaction this turn serves
   operation_id     TEXT,
@@ -756,6 +778,14 @@ class Database:
         ("role_turns", "lineage", "TEXT"),
         ("work_items", "specialisation", "TEXT"),
         ("work_items", "profile_fallback", "TEXT"),
+        ("role_turns", "session_handle", "TEXT"),
+        ("role_turns", "token_start", "INTEGER"),
+        ("role_turns", "token_end", "INTEGER"),
+        ("board_posts", "author_fencing_token", "INTEGER"),
+        ("board_posts", "author_attempt", "INTEGER"),
+        ("board_reads", "attempt_fate_at_read", "TEXT"),
+        ("board_reads", "work_status_at_read", "TEXT"),
+        ("board_reads", "state_version_at_read", "INTEGER"),
     )
 
     def _migrate_turn_ownership(self) -> None:

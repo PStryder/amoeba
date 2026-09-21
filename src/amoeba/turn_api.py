@@ -98,7 +98,10 @@ def build(sup: "Supervisor") -> dict[str, Any]:  # noqa: C901
 
     def role_complete_turn(*, turn_id: str, stop_reason: str,
                            tool_call_count: int = 0,
-                           result: dict[str, Any] | None = None
+                           result: dict[str, Any] | None = None,
+                           session_handle: str | None = None,
+                           token_start: int | None = None,
+                           token_end: int | None = None
                            ) -> dict[str, Any]:
         """Close a turn, consume its triggers, and continue if the Harness says so.
 
@@ -115,6 +118,8 @@ def build(sup: "Supervisor") -> dict[str, Any]:  # noqa: C901
             return mailbox.complete(
                 m, mind, turn_id=turn_id, stop_reason=stop_reason,
                 tool_call_count=tool_call_count, result=result,
+                session_handle=session_handle, token_start=token_start,
+                token_end=token_end,
                 max_continuations=sup.cfg.scheduler.max_continuations)
 
         receipt, out = mind.writer.apply(body, actor="harness",
@@ -340,6 +345,11 @@ def build(sup: "Supervisor") -> dict[str, Any]:  # noqa: C901
                 "next_triggers": [
                     {"trigger_id": t["trigger_id"], "kind": t["kind"],
                      "source": t["source"], "summary": t["summary"][:120],
+                     # Whether this is a question or evidence, and whose. The
+                     # distinction decides which turn it can enter, so an
+                     # operator looking at a queue needs to see it.
+                     "expects_answer": bool(t["expects_answer"]),
+                     "lineage": t["lineage"], "ambient": bool(t["ambient"]),
                      "created_at": t["created_at"]}
                     for t in queued[:limit]],
                 "current_turn": (

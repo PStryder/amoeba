@@ -109,7 +109,8 @@ class BoardRepo:
         posts = [self._hydrate(r) for r in rows]
         if record and posts:
             self.record_read(reader=reader, post_ids=[p["post_id"] for p in posts],
-                             work_id=work_id, query=query)
+                             work_id=work_id, query=query,
+                             rendered={p["post_id"]: p for p in posts})
         return posts
 
     def get_post(self, post_id: str, *, reader: str | None = None,
@@ -122,10 +123,96 @@ class BoardRepo:
             self.record_read(reader=reader, post_ids=[post_id], work_id=work_id)
         return self._hydrate(row)
 
+    # Recorded facts, not verdicts: a finding from an attempt that died may
+    # be perfectly good, and the reader is the one to decide.
+    # The statuses that mean the attempt may still reach an end. Everything
+    # else terminal is reported as unfinished, and `fenced` is derived from
+    # the token rather than from any status, because a superseded attempt
+    # leaves no mark on the work row at all.
+    WORK_IN_FLIGHT = ("queued", "leased")
+
+    def _work_provenance(self, work_id: str | None,
+                         author_token: int | None = None) -> dict[str, Any]:
+        """What became of the attempt that wrote this post.
+
+        The attempt, not the work item. A work item can fail one attempt and
+        complete on the next, and reporting the item's status would render a
+        fenced attempt's finding as `done` -- laundering a dead attempt's post
+        through a later attempt's success.
+
+        Always present, including as nulls, because a missing key reads as
+        "nothing to see here" and an absent provenance is exactly what made a
+        dead attempt look finished.
+        """
+        out: dict[str, Any] = {
+            "attempt_fate": None, "attempt_unfinished": None,
+            "work_status": None, "work_note": None,
+        }
+        if not work_id:
+            # An operator note or a role's own post belongs to no work item;
+            # there is no fate to report rather than an unknown one.
+            return out
+        row = self.conn.execute(
+            "SELECT status, attempt, fencing_token, failure FROM work_items"
+            " WHERE work_id = ?", (work_id,)).fetchone()
+        if row is None:
+            out["work_note"] = "the work item this was posted against is gone"
+            return out
+
+        status = row["status"]
+        out["work_status"] = status
+        current = row["fencing_token"]
+
+        # Token 0 means the author held no lease -- a role or the operator
+        # posting against a work item rather than an attempt at it. That is
+        # not a fenced attempt; it is not an attempt.
+        if not author_token:
+            out["work_note"] = (
+                "this was not written by an attempt at the work, so there is "
+                f"no attempt fate; the work item is {status!r}")
+            return out
+
+        if current is not None and author_token < current:
+            # A later attempt superseded this author. Whatever became of the
+            # work afterwards was not this attempt's doing, and its finding
+            # was never corroborated by the attempt that made it finishing.
+            out["attempt_fate"] = "fenced"
+            out["attempt_unfinished"] = True
+            out["work_note"] = (
+                f"the attempt that wrote this was superseded (token "
+                f"{author_token} < {current}); the work itself is now "
+                f"{status!r}, which a later attempt achieved, not this one")
+            return out
+
+        if status == "done":
+            out["attempt_fate"] = "completed"
+            out["attempt_unfinished"] = False
+        elif status in self.WORK_IN_FLIGHT:
+            # A failure that requeued lands here: the finding may yet be
+            # corroborated by a retry, and discounting it would be the
+            # original error pointing the other way.
+            out["attempt_fate"] = "running"
+            out["attempt_unfinished"] = False
+            out["work_note"] = out["work_note"] or (
+                "the work that produced this post is still running")
+        else:
+            out["attempt_fate"] = status
+            out["attempt_unfinished"] = True
+            why = (row["failure"] or "").strip()
+            out["work_note"] = (
+                f"the attempt that wrote this {status}"
+                + (f": {why[:200]}" if why else "")
+                + "; the post stands because a finding can be sound even when "
+                  "the attempt that made it did not finish, but nothing has "
+                  "corroborated it")
+        return out
+
     def _hydrate(self, row: Any) -> dict[str, Any]:
         item = dict(row)
         item["informed_by"] = json.loads(item.get("informed_by") or "[]")
         item["board_naive"] = bool(item.get("board_naive", 0))
+        item.update(self._work_provenance(item.get("work_id"),
+                                          item.get("author_fencing_token")))
         item["evidence"] = [
             dict(r) for r in self.conn.execute(
                 "SELECT event_id, event_seq, blob_sha256, memory_id, artifact_id, note"
@@ -143,21 +230,101 @@ class BoardRepo:
         ]
         return item
 
+    #: Most silent attempts reported in one read. A bound, not a judgement --
+    #: the count is exact even when the list is truncated.
+    MAX_SILENT_ATTEMPTS = 10
+
+    def silent_attempts(self, work_id: str | None, *, limit: int | None = None
+                        ) -> dict[str, Any]:
+        """Attempts on the same lineage that ended without posting anything.
+
+        Annotating posts only helps where there is a post. An attempt that
+        died before publishing leaves no trace at all, so a neuocyte can
+        re-run ground its siblings already died on and never know.
+
+        Scoped by `operation_id` -- recorded lineage, the same identifier the
+        turn machinery uses -- and never by resemblance of objective. A
+        similarity judgement would be the Harness deciding what counts as the
+        same ground, which is the neuocyte's thinking to do.
+
+        Facts only: what died and what it recorded on the way out. No advice,
+        no verdict, and nothing posted to the board in anybody's name.
+        """
+        out: dict[str, Any] = {"count": 0, "attempts": [], "truncated": False,
+                               "operation_id": None}
+        if not work_id:
+            return out
+        row = self.conn.execute(
+            "SELECT operation_id FROM work_items WHERE work_id = ?",
+            (work_id,)).fetchone()
+        operation_id = row["operation_id"] if row else None
+        if not operation_id:
+            return out
+        out["operation_id"] = operation_id
+
+        cap = int(limit or self.MAX_SILENT_ATTEMPTS)
+        base = (" FROM work_items w WHERE w.operation_id = ?"
+                "   AND w.work_id != ?"
+                "   AND w.status IN ('failed', 'cancelled')"
+                "   AND NOT EXISTS (SELECT 1 FROM board_posts p"
+                "                   WHERE p.work_id = w.work_id)")
+        total = self.conn.execute(
+            "SELECT COUNT(*)" + base, (operation_id, work_id)).fetchone()[0]
+        rows = self.conn.execute(
+            "SELECT w.work_id, w.status, w.attempt, w.failure, w.objective"
+            + base + " ORDER BY w.updated_at DESC LIMIT ?",
+            (operation_id, work_id, cap)).fetchall()
+
+        out["count"] = int(total)
+        out["truncated"] = int(total) > len(rows)
+        out["attempts"] = [
+            {"work_id": r["work_id"], "status": r["status"],
+             "attempt": r["attempt"],
+             "objective": (r["objective"] or "")[:200],
+             # The recorded reason, verbatim. Deadline, fencing, a tool error
+             # and an exhausted budget mean different things to somebody
+             # judging whether to try again, and collapsing them to "failed"
+             # throws that away.
+             "recorded_outcome": (r["failure"] or "")[:300] or None}
+            for r in rows]
+        if out["count"]:
+            out["note"] = (
+                f"{out['count']} attempt(s) on this same operation ended "
+                "without posting anything. Recorded so they are not invisible; "
+                "what that means for your own attempt is yours to judge")
+        return out
+
     def record_read(self, *, reader: str, post_ids: Sequence[str],
-                    work_id: str | None = None, query: str | None = None) -> int:
+                    work_id: str | None = None, query: str | None = None,
+                    rendered: dict[str, dict[str, Any]] | None = None) -> int:
         """Append read receipts. Cheap, frequent, and not version-bumping.
 
         Reads are evidence about influence, not state changes, so they do not
         take the writer's transaction path. They are still durable.
+
+        `rendered` is the provenance as this reader was shown it. A fate
+        changes after the read -- an attempt that was running when it was read
+        can be fenced an hour later -- so recording only the post id would
+        leave "what was this reader actually influenced by" unanswerable, in
+        exactly the way `informed_by` exists to prevent.
         """
         if not post_ids:
             return 0
         now = time.time()
+        shown = rendered or {}
+        version = self.conn.execute(
+            "SELECT version FROM state_version WHERE id = 1").fetchone()
+        version = int(version["version"]) if version else None
         with self.writer.tx_lock:
             self.conn.executemany(
-                "INSERT INTO board_reads(post_id, reader, work_id, read_at, query)"
-                " VALUES (?,?,?,?,?)",
-                [(pid, reader, work_id, now, query) for pid in post_ids],
+                "INSERT INTO board_reads(post_id, reader, work_id, read_at, query,"
+                " attempt_fate_at_read, work_status_at_read, state_version_at_read)"
+                " VALUES (?,?,?,?,?,?,?,?)",
+                [(pid, reader, work_id, now, query,
+                  (shown.get(pid) or {}).get("attempt_fate"),
+                  (shown.get(pid) or {}).get("work_status"),
+                  version)
+                 for pid in post_ids],
             )
             self.conn.commit()
         return len(post_ids)
@@ -246,13 +413,25 @@ class BoardRepo:
                     raise NotFound("post to supersede does not exist", post_id=supersedes)
                 m.sql("UPDATE board_posts SET status = 'superseded' WHERE post_id = ?",
                       (supersedes,))
+            # Which attempt is writing this, taken from the work row rather
+            # than from the author. Nothing to forge, for the same reason the
+            # fencing token works as a fence.
+            attempt_token = attempt_no = None
+            if work_id:
+                wrow = m.sql("SELECT fencing_token, attempt FROM work_items"
+                             " WHERE work_id = ?", (work_id,)).fetchone()
+                if wrow is not None:
+                    attempt_token = wrow["fencing_token"]
+                    attempt_no = wrow["attempt"]
             m.sql(
                 "INSERT INTO board_posts(post_id, seq, thread_id, author, author_kind,"
-                " author_incarnation, work_id, operation_id, post_type, title, body,"
+                " author_incarnation, author_fencing_token, author_attempt,"
+                " work_id, operation_id, post_type, title, body,"
                 " confidence, snapshot_id, model_generation, status, supersedes,"
                 " informed_by, read_count_before, board_naive, created_at, state_version)"
-                " VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
-                (post_id, seq, thread, author, author_kind, author_incarnation, work_id,
+                " VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
+                (post_id, seq, thread, author, author_kind, author_incarnation,
+                 attempt_token, attempt_no, work_id,
                  operation_id, post_type, title, body, confidence, snapshot_id,
                  model_generation, "open", supersedes, json.dumps(informed_by),
                  len(informed_by), 1 if not informed_by else 0, now, m.prior_version + 1),
@@ -393,7 +572,29 @@ class BoardRepo:
         for s in supporters:
             verdict = self.independence(post_id, s["from_post"])["verdict"]
             (independent if verdict == "independent" else informed).append(s["from_post"])
+
+        # Reported, never weighted. A supporter whose attempt was fenced is
+        # not a second mind agreeing; it is a dead attempt's post still
+        # sitting there. Whether that agreement counts is a judgement, and
+        # judgements belong to the reader -- so no count is adjusted here and
+        # no supporter is dropped.
+        def _fate(pid: str) -> dict[str, Any]:
+            row = self.conn.execute(
+                "SELECT work_id, author_fencing_token FROM board_posts"
+                " WHERE post_id = ?", (pid,)).fetchone()
+            prov = self._work_provenance(
+                row["work_id"] if row else None,
+                row["author_fencing_token"] if row else None)
+            return {"post_id": pid, "attempt_fate": prov["attempt_fate"],
+                    "attempt_unfinished": prov["attempt_unfinished"],
+                    "work_status": prov["work_status"]}
+
+        support_provenance = [_fate(pid) for pid in independent + informed]
+        unfinished_support = [f["post_id"] for f in support_provenance
+                              if f["attempt_unfinished"]]
         return {
+            "support_provenance": support_provenance,
+            "unfinished_support": unfinished_support,
             "post_id": post_id,
             "author": post["author"],
             "supporting_posts": [s["from_post"] for s in supporters],

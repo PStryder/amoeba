@@ -470,6 +470,39 @@ def claim(m: Mutation, mind: "Mind", *, role: str, incarnation: int | None,
 # ---------------------------------------------------------------------------
 # closing a turn
 # ---------------------------------------------------------------------------
+
+def settled_spans(conn, role: str, session_handle: str | None
+                  ) -> list[dict[str, Any]]:
+    """Closed turns, in this session, whose interaction owes nothing.
+
+    "Settled" is a property of the *lineage*, not of the turn. A turn can be
+    closed while the thought it belongs to continues in the next one, so
+    asking only whether this turn finished would evict half of a live
+    interaction.
+
+    A turn with no lineage -- a heartbeat, a startup review -- is settled once
+    it is closed, unless some request with no lineage is still unanswered.
+    """
+    if not session_handle:
+        return []
+    owed = {r["lineage"] for r in conn.execute(
+        "SELECT DISTINCT lineage FROM role_triggers"
+        " WHERE target_role = ? AND expects_answer = 1"
+        "   AND answer_status IS NULL", (role,))}
+    out = []
+    for row in conn.execute(
+            "SELECT turn_id, lineage, token_start, token_end FROM role_turns"
+            " WHERE role = ? AND session_handle = ? AND status != 'running'"
+            "   AND token_start IS NOT NULL AND token_end IS NOT NULL"
+            "   AND token_end > token_start"
+            " ORDER BY token_start ASC", (role, session_handle)):
+        if row["lineage"] in owed:
+            continue
+        out.append({"turn_id": row["turn_id"], "lineage": row["lineage"],
+                    "start": int(row["token_start"]),
+                    "end": int(row["token_end"])})
+    return out
+
 def continuation_depth(conn, turn_id: str, *, limit: int = 32) -> int:
     """How many continuations in a row led to this turn.
 
@@ -543,6 +576,8 @@ def awaiting_answer(conn, turn_id: str) -> list[dict[str, Any]]:
 def complete(m: Mutation, mind: "Mind", *, turn_id: str, stop_reason: str,
              tool_call_count: int = 0, result: dict[str, Any] | None = None,
              status: str = "completed",
+             session_handle: str | None = None,
+             token_start: int | None = None, token_end: int | None = None,
              max_continuations: int = 3) -> dict[str, Any]:
     """Close a turn, consume its triggers, and decide whether to continue.
 
@@ -562,10 +597,17 @@ def complete(m: Mutation, mind: "Mind", *, turn_id: str, stop_reason: str,
                            allowed=list(STOP_REASONS))
 
     result_sha = m.put_json(result, schema="amoeba.role_turn_result/1") if result else None
+    # COALESCE so a caller that does not measure its context leaves the span
+    # unknown rather than writing NULL over something already recorded. An
+    # unknown span is simply never evictable, which is the safe direction.
     m.sql("UPDATE role_turns SET status = ?, stop_reason = ?, finished_at = ?,"
-          " tool_call_count = ?, result_sha256 = ? WHERE turn_id = ?",
+          " tool_call_count = ?, result_sha256 = ?,"
+          " session_handle = COALESCE(?, session_handle),"
+          " token_start = COALESCE(?, token_start),"
+          " token_end = COALESCE(?, token_end)"
+          " WHERE turn_id = ?",
           (status, stop_reason, time.time(), int(tool_call_count), result_sha,
-           turn_id))
+           session_handle, token_start, token_end, turn_id))
     m.sql("UPDATE role_triggers SET status = 'consumed', consumed_at = ?"
           " WHERE turn_id = ? AND status = 'claimed'", (time.time(), turn_id))
 

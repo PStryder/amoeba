@@ -1487,3 +1487,76 @@ def test_a_request_with_no_attachments_says_nothing_about_them(mind):
     assert "no files here" in turn["text"]
     assert "ego_read_attachment" not in turn["text"]
     assert "file(s)" not in turn["text"]
+
+
+# ===========================================================================
+# Context eviction: finished interactions leave, live ones stay
+# ===========================================================================
+def _span_turn(mind, *, lineage, answer, session="sess_a", start=0, end=100,
+               kind="user_input", expects_answer=True):
+    """A closed turn occupying a known token span."""
+    mind.writer.apply(
+        lambda m: mailbox.enqueue(m, role="ego", kind=kind, source="operator",
+                                  summary="something", lineage=lineage,
+                                  expects_answer=expects_answer),
+        actor="test", bump_version=False)
+    turn = _claim(mind, "ego")
+    _complete(mind, turn["turn_id"], stop_reason="model_stop",
+              result={"answer": answer} if answer else None,
+              session_handle=session, token_start=start, token_end=end)
+    return turn
+
+
+def test_a_settled_interaction_is_evictable(mind):
+    """Finished work is what eviction is for."""
+    turn = _span_turn(mind, lineage="op-1", answer="done", start=10, end=60)
+    spans = mailbox.settled_spans(mind.db.conn, "ego", "sess_a")
+    assert [s["turn_id"] for s in spans] == [turn["turn_id"]]
+    assert spans[0]["start"] == 10 and spans[0]["end"] == 60
+
+
+def test_a_lineage_still_owed_an_answer_is_never_evictable(mind):
+    """Dropping a live thought is the failure I80 exists to prevent.
+
+    Arriving at it by way of housekeeping rather than by way of bundling
+    would be no better: the request is still owed a reply, and the turn
+    holding it would be gone.
+    """
+    # Terminal stop with no answer records "unanswerable", so leave this one
+    # unanswered by closing the turn non-terminally instead.
+    mind.writer.apply(
+        lambda m: mailbox.enqueue(m, role="ego", kind="user_input",
+                                  source="operator", summary="a question",
+                                  lineage="op-live", expects_answer=True),
+        actor="test", bump_version=False)
+    turn = _claim(mind, "ego")
+    _complete(mind, turn["turn_id"], stop_reason="max_output_tokens",
+              session_handle="sess_a", token_start=0, token_end=50)
+
+    spans = mailbox.settled_spans(mind.db.conn, "ego", "sess_a")
+    assert spans == [], "a turn holding an unanswered request was evictable"
+
+
+def test_a_turn_with_no_measured_span_is_never_evictable(mind):
+    """"I do not know what this is" must not resolve to "so remove it".
+
+    A role that could not measure its context, or a turn taken before the
+    columns existed, leaves the offsets NULL. Those turns are kept forever,
+    which costs a rejuvenation at worst.
+    """
+    _span_turn(mind, lineage="op-2", answer="done", start=None, end=None)
+    assert mailbox.settled_spans(mind.db.conn, "ego", "sess_a") == []
+
+
+def test_spans_from_another_session_are_never_evictable(mind):
+    """Offsets mean nothing across a rejuvenation; the new session starts at 0.
+
+    Acting on a previous session's offsets would drop whatever now happens to
+    sit at those positions, which is live context.
+    """
+    _span_turn(mind, lineage="op-3", answer="done", session="sess_old",
+               start=0, end=80)
+    assert mailbox.settled_spans(mind.db.conn, "ego", "sess_new") == []
+    assert len(mailbox.settled_spans(mind.db.conn, "ego", "sess_old")) == 1
+
+

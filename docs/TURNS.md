@@ -447,8 +447,10 @@ submit_wait_seconds = 120.0     # how long a caller blocks, not how long work ta
 
 ## 19. Residual limits
 
-* **Artifact and blackboard triggers are not emitted.** The kinds exist; the
-  relevance rule does not yet. See §7.
+* **Board and artifact waking is by ownership only.** A role is woken by what
+  happens to work it originated. A post that merely *mentions* its work, or
+  concerns a neighbouring topic, wakes nobody -- that would need a similarity
+  judgement, which is the heuristic this deliberately does not make. See I92.
 * **Polling, not pushing.** A role asks for a turn every `poll_seconds`, so
   there is up to half a second of latency between queueing and cognition. A
   push would need a second channel into the role process; the poll is one

@@ -394,6 +394,37 @@ class WorkRepo:
     # ------------------------------------------------------------------
     # agents
     # ------------------------------------------------------------------
+    def set_session_handle(self, *, agent_id: str, session_handle: str,
+                           reason: str = "") -> Receipt:
+        """Record the inference session an existing agent now holds.
+
+        Deliberately not `register_agent`. That increments the incarnation,
+        and a replacement session is not a new incarnation: identity survives
+        rejuvenation -- the profile binding, the mailbox and the turn history
+        all continue -- which is exactly why the Harness hands the session
+        over instead of restarting the role.
+
+        Without this the durable record keeps pointing at a closed session,
+        and the next thing to read it -- `checkpoint`, on the following
+        rejuvenation -- works from a context that no longer exists.
+        """
+
+        def body(m: Mutation) -> None:
+            cur = m.sql("UPDATE agents SET session_handle = ?"
+                        " WHERE agent_id = ? AND status = 'alive'",
+                        (session_handle, agent_id))
+            if cur.rowcount == 0:
+                raise NotFound("no live agent by that id", agent_id=agent_id)
+            m.emit(EventKind.SESSION_REBORN, {
+                "agent_id": agent_id, "session_id": session_handle,
+                "reason": reason[:200],
+                "note": ("the durable handle now matches the live session; "
+                         "identity and incarnation are unchanged")})
+
+        receipt, _ = self.writer.apply(body, actor="supervisor",
+                                       bump_version=False)
+        return receipt
+
     def register_agent(
         self, *, agent_id: str, role: str, pid: int | None = None,
         session_handle: str | None = None, snapshot_id: str | None = None,

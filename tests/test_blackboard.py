@@ -293,3 +293,329 @@ def test_read_and_post_in_the_same_tick_still_counts_as_informed(mind):
     assert a in pb["informed_by"], "a same-tick read must not be lost"
     assert pb["board_naive"] is False
     assert mind.board.independence(a, b)["verdict"] == "socially_informed"
+
+
+# ---------------------------------------------------------------------------
+# A post carries what became of the work that produced it
+# ---------------------------------------------------------------------------
+def _posted_against(mind, *, work_id, body="the cache is cold on boot"):
+    post_id, _ = mind.board.post(author="nc_1", author_kind="neuocyte",
+                                 post_type="finding", body=body,
+                                 work_id=work_id)
+    return post_id
+
+
+def _admit(mind, *, objective="look into the cache"):
+    work_id, _ = mind.work.admit(objective=objective, work_class="user",
+                                 origin_actor="ego")
+    return work_id
+
+
+def test_a_finding_from_failed_work_is_still_readable(mind):
+    """It is not retracted and not hidden.
+
+    A neuocyte can discover something true and then die for reasons that have
+    nothing to do with the finding -- a deadline, a fencing token, a tool
+    error. Dropping those posts would throw away real evidence, and "the
+    author's process crashed" is not "the finding was wrong".
+    """
+    work_id = _admit(mind)
+    post_id = _posted_against(mind, work_id=work_id)
+    lease = mind.work.lease(neuocyte_id="nc_1", work_id=work_id)
+    mind.work.fail(work_id=work_id, neuocyte_id="nc_1",
+                   fencing_token=lease["fencing_token"], failure="died",
+                   requeue=False)
+
+    posts = mind.board.read(reader="nc_2", record=False)
+    assert [p["post_id"] for p in posts] == [post_id], "the finding vanished"
+
+
+def test_a_finding_from_failed_work_does_not_look_like_one_that_succeeded(mind):
+    """The defect: indistinguishable from a completed attempt's finding.
+
+    A neuocyte's window onto other work is almost entirely this board -- no
+    `get_work`, no history, no provenance. So if the board does not say the
+    work failed, nothing does, and corroboration accumulates around a dead end
+    while every independence check still reads clean.
+    """
+    failed_work = _admit(mind)
+    lease = mind.work.lease(neuocyte_id="nc_1", work_id=failed_work)
+    failed_post = _posted_against(mind, work_id=failed_work, body="from a failure")
+    mind.work.fail(work_id=failed_work, neuocyte_id="nc_1",
+                   fencing_token=lease["fencing_token"], failure="died",
+                   requeue=False)
+
+    good_work = _admit(mind, objective="something else")
+    lease2 = mind.work.lease(neuocyte_id="nc_2", work_id=good_work)
+    good_post = _posted_against(mind, work_id=good_work, body="from a success")
+    mind.work.complete(work_id=good_work, neuocyte_id="nc_2",
+                       fencing_token=lease2["fencing_token"], result={"ok": True})
+
+    by_id = {p["post_id"]: p for p in mind.board.read(reader="nc_3", record=False)}
+    bad, good = by_id[failed_post], by_id[good_post]
+
+    assert bad["attempt_fate"] == "failed" and bad["attempt_unfinished"] is True
+    assert "failed" in (bad["work_note"] or "")
+    assert good["attempt_fate"] == "completed" and good["attempt_unfinished"] is False
+    assert good["work_note"] is None, "a completed attempt needs no annotation"
+
+
+def test_a_post_belonging_to_no_work_reports_no_fate(mind):
+    """An operator note has no work item, which is not the same as unknown.
+
+    The fields are present as nulls rather than absent, because a missing key
+    reads as "nothing to see here" -- and an absent provenance is exactly what
+    made a failed attempt look finished.
+    """
+    post_id, _ = mind.board.post(author="operator", author_kind="operator",
+                                 post_type="note", body="a standing note")
+    post = {p["post_id"]: p for p in mind.board.read(reader="nc_1", record=False)}[post_id]
+    assert "attempt_fate" in post and post["attempt_fate"] is None
+    assert post["work_status"] is None
+    assert post["attempt_unfinished"] is None
+    assert post["work_note"] is None
+
+
+def test_work_still_running_is_reported_as_such(mind):
+    """In flight is not the same as finished, and not the same as failed."""
+    work_id = _admit(mind)
+    mind.work.lease(neuocyte_id="nc_1", work_id=work_id)
+    post_id = _posted_against(mind, work_id=work_id)
+
+    post = {p["post_id"]: p for p in mind.board.read(reader="nc_2", record=False)}[post_id]
+    assert post["work_status"] == "leased"
+    assert post["attempt_fate"] == "running"
+    assert post["attempt_unfinished"] is False, (
+        "work that is still running was reported as unfinished; a reader "
+        "would discount a finding that may yet be corroborated")
+    assert "still running" in (post["work_note"] or "")
+
+
+def test_cancelled_work_is_reported_like_failed_work(mind):
+    """Cancelled is unfinished for the same reason failed is.
+
+    Nothing corroborated the finding by the work reaching its end, and that is
+    the fact a reader needs -- why it stopped is a separate question.
+    """
+    work_id = _admit(mind)
+    mind.work.lease(neuocyte_id="nc_1", work_id=work_id)
+    post_id = _posted_against(mind, work_id=work_id)
+    mind.work.cancel(work_id=work_id, reason="superseded", actor="ego")
+
+    post = {p["post_id"]: p for p in mind.board.read(reader="nc_2", record=False)}[post_id]
+    assert post["work_status"] == "cancelled"
+    assert post["attempt_fate"] == "cancelled"
+    assert post["attempt_unfinished"] is True
+
+
+def test_reading_a_thread_says_the_same_as_reading_a_query(mind):
+    """One post, one answer, whichever route reached it.
+
+    Two read paths deciding separately what a post says is two answers, and
+    the disagreement would surface as a neuocyte trusting a finding its
+    sibling discounted.
+    """
+    work_id = _admit(mind)
+    post_id = _posted_against(mind, work_id=work_id)
+    lease = mind.work.lease(neuocyte_id="nc_1", work_id=work_id)
+    mind.work.fail(work_id=work_id, neuocyte_id="nc_1",
+                   fencing_token=lease["fencing_token"], failure="died",
+                   requeue=False)
+
+    via_read = {p["post_id"]: p for p in mind.board.read(reader="x", record=False)}[post_id]
+    via_get = mind.board.get_post(post_id)
+    via_thread = {p["post_id"]: p
+                  for p in mind.board.thread(via_read["thread_id"])}[post_id]
+
+    for other in (via_get, via_thread):
+        assert other["attempt_fate"] == via_read["attempt_fate"]
+        assert other["attempt_unfinished"] == via_read["attempt_unfinished"]
+
+
+def test_a_failure_that_will_be_retried_is_not_reported_as_unfinished(mind):
+    """A requeued attempt is still in flight, and the distinction matters.
+
+    `fail` requeues for another attempt rather than ending the work, so the
+    finding may yet be corroborated by a retry that succeeds. Reporting it as
+    unfinished would have a reader discount evidence that is still live --
+    which is the same error as the original defect, pointing the other way.
+    """
+    work_id = _admit(mind)
+    lease = mind.work.lease(neuocyte_id="nc_1", work_id=work_id)
+    post_id = _posted_against(mind, work_id=work_id)
+    mind.work.fail(work_id=work_id, neuocyte_id="nc_1",
+                   fencing_token=lease["fencing_token"], failure="first try")
+
+    post = {p["post_id"]: p for p in mind.board.read(reader="nc_2", record=False)}[post_id]
+    assert post["work_status"] == "queued", "the retry was not queued"
+    assert post["attempt_fate"] == "running"
+    assert post["attempt_unfinished"] is False
+    assert "still running" in (post["work_note"] or "")
+
+
+def test_a_later_attempt_s_success_does_not_launder_a_fenced_attempt_s_post(mind):
+    """The case a join on `work_items.status` passes while the guarantee is absent.
+
+    A work item can fail attempt 1, requeue, and complete on attempt 2. The
+    post written by the fenced attempt 1 must not render as `done`: that
+    attempt's finding was never corroborated by the attempt that made it
+    finishing, and the success belongs to somebody else.
+
+    This is the whole reason the fate reported is the *attempt's* and not the
+    work item's, and it is why the token -- which the system already maintains
+    to stop a superseded neuocyte committing -- is what identifies the author.
+    """
+    work_id = _admit(mind)
+    lease1 = mind.work.lease(neuocyte_id="nc_1", work_id=work_id)
+    doomed = _posted_against(mind, work_id=work_id, body="from attempt 1")
+    mind.work.fail(work_id=work_id, neuocyte_id="nc_1",
+                   fencing_token=lease1["fencing_token"], failure="died")
+
+    lease2 = mind.work.lease(neuocyte_id="nc_2", work_id=work_id)
+    assert lease2["fencing_token"] > lease1["fencing_token"]
+    survivor = _posted_against(mind, work_id=work_id, body="from attempt 2")
+    mind.work.complete(work_id=work_id, neuocyte_id="nc_2",
+                       fencing_token=lease2["fencing_token"], result={"ok": True})
+
+    by_id = {p["post_id"]: p for p in mind.board.read(reader="nc_3", record=False)}
+    dead, alive = by_id[doomed], by_id[survivor]
+
+    assert dead["attempt_fate"] == "fenced", (
+        "a fenced attempt's post was laundered through a later success: "
+        f"{dead['attempt_fate']!r}")
+    assert dead["attempt_unfinished"] is True
+    assert "superseded" in (dead["work_note"] or "")
+    # The work item's own status is still reported, because "this attempt was
+    # fenced but the work later succeeded" is more use than either half alone.
+    assert dead["work_status"] == "done"
+
+    assert alive["attempt_fate"] == "completed"
+    assert alive["attempt_unfinished"] is False
+
+
+def test_the_fate_a_reader_was_shown_is_recorded(mind):
+    """A fate changes after the read, so the read log must freeze what it showed.
+
+    `informed_by` is snapshotted for the same reason: "what had this author
+    seen by then" stops being answerable once the world moves on. A reader
+    influenced by `attempt: running` must stay distinguishable from one
+    influenced by `attempt: fenced`, and only the read log can say which.
+    """
+    work_id = _admit(mind)
+    lease = mind.work.lease(neuocyte_id="nc_1", work_id=work_id)
+    post_id = _posted_against(mind, work_id=work_id)
+
+    # Read it while the attempt is alive.
+    mind.board.read(reader="early_reader")
+
+    mind.work.fail(work_id=work_id, neuocyte_id="nc_1",
+                   fencing_token=lease["fencing_token"], failure="died",
+                   requeue=False)
+    mind.board.read(reader="late_reader")
+
+    rows = {r["reader"]: r for r in mind.db.conn.execute(
+        "SELECT reader, attempt_fate_at_read, work_status_at_read,"
+        " state_version_at_read FROM board_reads WHERE post_id = ?", (post_id,))}
+
+    assert rows["early_reader"]["attempt_fate_at_read"] == "running", (
+        "the early reader's view was not recorded as it was shown")
+    assert rows["late_reader"]["attempt_fate_at_read"] == "failed"
+    assert rows["early_reader"]["state_version_at_read"] is not None
+
+
+def test_corroboration_reports_a_dead_supporter_without_discounting_it(mind):
+    """Reported, never weighted.
+
+    A supporter whose attempt was fenced is not a second mind agreeing. But
+    whether that agreement counts is a judgement, so the count is untouched
+    and the supporter is not dropped -- only the fact travels.
+    """
+    claim_work = _admit(mind)
+    mind.work.lease(neuocyte_id="nc_1", work_id=claim_work)
+    claim = _posted_against(mind, work_id=claim_work, body="the claim")
+
+    sup_work = _admit(mind, objective="replicate it")
+    lease = mind.work.lease(neuocyte_id="nc_2", work_id=sup_work)
+    support = _posted_against(mind, work_id=sup_work, body="I saw it too")
+    mind.board.relate(from_post=support, to_post=claim, relation="supports",
+                      actor="nc_2")
+    mind.work.fail(work_id=sup_work, neuocyte_id="nc_2",
+                   fencing_token=lease["fencing_token"], failure="died",
+                   requeue=False)
+
+    corr = mind.board.corroboration(claim)
+    assert support in (corr["independent_support"] + corr["socially_informed_support"]), (
+        "the supporter was dropped; that is a verdict, not a fact")
+    assert support in corr["unfinished_support"]
+    fates = {f["post_id"]: f for f in corr["support_provenance"]}
+    assert fates[support]["attempt_fate"] == "failed"
+    assert fates[support]["attempt_unfinished"] is True
+
+
+def test_attempts_that_died_before_posting_are_reported(mind):
+    """The other half of the asymmetry: silence cannot be annotated.
+
+    An attempt that failed before publishing leaves nothing to mark, so
+    without this a neuocyte re-runs ground its siblings already died on and
+    has no way to know. Scoped by recorded lineage -- the shared
+    `operation_id` -- never by resemblance of objective, because deciding what
+    counts as "the same ground" is the neuocyte's thinking to do.
+    """
+    op = "op-shared"
+    dead, _ = mind.work.admit(objective="try the cold path", work_class="user",
+                              origin_actor="ego", operation_id=op)
+    lease = mind.work.lease(neuocyte_id="nc_1", work_id=dead)
+    mind.work.fail(work_id=dead, neuocyte_id="nc_1",
+                   fencing_token=lease["fencing_token"],
+                   failure="deadline_reached after 60s", requeue=False)
+
+    mine, _ = mind.work.admit(objective="try the cold path again",
+                              work_class="user", origin_actor="ego",
+                              operation_id=op)
+
+    out = mind.board.silent_attempts(mine)
+    assert out["count"] == 1, out
+    only = out["attempts"][0]
+    assert only["work_id"] == dead and only["status"] == "failed"
+    assert "deadline_reached" in (only["recorded_outcome"] or ""), (
+        "the recorded reason was collapsed to 'failed'")
+
+
+def test_an_attempt_that_posted_is_not_reported_as_silent(mind):
+    """It left a trace, and that trace is annotated instead.
+
+    Counting it here as well would report the same death twice, in two
+    different vocabularies.
+    """
+    op = "op-two"
+    spoke, _ = mind.work.admit(objective="noisy", work_class="user",
+                               origin_actor="ego", operation_id=op)
+    lease = mind.work.lease(neuocyte_id="nc_1", work_id=spoke)
+    mind.board.post(author="nc_1", author_kind="neuocyte", post_type="finding",
+                    body="I got this far", work_id=spoke)
+    mind.work.fail(work_id=spoke, neuocyte_id="nc_1",
+                   fencing_token=lease["fencing_token"], failure="died",
+                   requeue=False)
+
+    mine, _ = mind.work.admit(objective="again", work_class="user",
+                              origin_actor="ego", operation_id=op)
+    assert mind.board.silent_attempts(mine)["count"] == 0
+
+
+def test_silence_on_another_lineage_is_not_reported(mind):
+    """Lineage, not likeness.
+
+    Two work items with near-identical objectives on different operations are
+    different ground. Reporting across them would be the Harness judging
+    topical similarity, which is exactly the heuristic it declines to make.
+    """
+    stranger, _ = mind.work.admit(objective="try the cold path", work_class="user",
+                                  origin_actor="ego", operation_id="op-a")
+    lease = mind.work.lease(neuocyte_id="nc_1", work_id=stranger)
+    mind.work.fail(work_id=stranger, neuocyte_id="nc_1",
+                   fencing_token=lease["fencing_token"], failure="died",
+                   requeue=False)
+
+    mine, _ = mind.work.admit(objective="try the cold path", work_class="user",
+                              origin_actor="ego", operation_id="op-b")
+    assert mind.board.silent_attempts(mine)["count"] == 0

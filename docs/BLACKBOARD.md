@@ -112,15 +112,65 @@ attaches the corroboration analysis to it:
 
 ---
 
-## MCP surface
+## The board is not an external surface
 
-Three verbs, because an external frontier model is a cognitive peer:
+**No board verb is reachable over MCP or the HTTP API.** An external client
+holds `external_io` — eight `io_*` verbs, listed in `scopes.EXTERNAL_IO` —
+and the blackboard is not among them. There is no `board_read` from outside,
+no `board_post`, no `board_corroboration`.
 
-- `board_read` — read the swarm's working discussion. **Your reads are recorded
-  too**, so anything you post afterwards that agrees is marked socially
-  informed.
-- `board_post` — contribute as a peer. Posting changes no belief.
-- `board_corroboration` — ask how much of an agreement is real.
+An earlier design did expose three of them, on the reasoning that an external
+frontier model is a cognitive peer. That is gone, along with the other
+nineteen verbs the demotion removed, and this section used to still describe
+it: a reader would have concluded an outside model can write to the swarm's
+working surface. It cannot.
 
-Promotion is *not* exposed over MCP: turning discussion into belief is a
-Harness act.
+The board is an *internal* surface. Ego, Id and neuocytes reach it through
+their own scopes; the operator reads it through the control plane. External
+input arrives as input — `io_submit` — and whatever the organism then chooses
+to post is its own act, made on its own authority. See
+[INTERFACES](INTERFACES.md) and invariant I48.
+
+
+## What became of the attempt behind a post
+
+Every post read from the board carries the fate of the **attempt** that wrote
+it: `attempt_fate`, `attempt_unfinished`, the work item's `work_status` as
+context, and a `work_note` when there is something to say.
+
+The attempt, not the work item. A work item can fail attempt 1, requeue, and
+complete on attempt 2 -- joining the post to `work_items.status` would render
+the fenced attempt's finding as `done`, laundering a dead attempt's post
+through somebody else's success. The author is identified by the fencing token
+that was live when it posted, read from the work row by the Harness and never
+supplied by the author.
+
+A post from a dead attempt is **not** retracted and not hidden. A finding can
+be sound even when the attempt that produced it did not finish, and "the
+author's process crashed" is not "the finding was wrong". What it may not be
+is invisible: a neuocyte has no `get_work` and no history, so without this a
+dead attempt's finding read exactly like a completed one and corroboration
+could accumulate around a dead end while every independence check still read
+clean.
+
+The recorded outcome travels verbatim rather than collapsed to "failed",
+because a deadline, a fencing, a tool error and an exhausted budget mean
+different things to a reader. Work that failed and was requeued reports as
+still running, since a retry may yet corroborate the finding.
+
+What a reader was shown is frozen in the read log alongside the state version,
+for the same reason `informed_by` is frozen: a fate changes after the read.
+The fate travels through `board_corroboration` -- reported against each
+supporter, never weighted -- and into promotion, because a memory item
+outlives the post and what is missing at promotion is missing from the belief.
+
+### Attempts that said nothing
+
+An attempt that died before posting leaves nothing to annotate. `board_read`
+therefore also returns `silent_attempts`: a bounded count, with recorded
+outcomes, of attempts on the same **recorded lineage** (a shared
+`operation_id`) that ended without publishing. Lineage, never resemblance of
+objective -- deciding what counts as "the same ground" is the reader's
+thinking to do, and nothing is posted in anybody's name.
+
+See invariant I95.

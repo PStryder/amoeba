@@ -57,7 +57,7 @@ from .store.events import EventKind
 from .store.writer import Mutation
 
 PRESSURE_LEVELS = ("nominal", "elevated", "high", "critical")
-RECONSTITUTION_MODES = ("exact", "trim", "summarise")
+RECONSTITUTION_MODES = ("exact", "evict", "trim", "summarise")
 
 
 @dataclass(slots=True)
@@ -191,7 +191,7 @@ class ContextHomeostasis:
         return True, "admitted"
 
     def request_rejuvenation(self, *, role: str, reason: str, requested_by: str = "id",
-                             mode: str = "trim", operation_id: str | None = None
+                             mode: str = "evict", operation_id: str | None = None
                              ) -> dict[str, Any]:
         """Id's entry point. A request, not a command.
 
@@ -214,7 +214,7 @@ class ContextHomeostasis:
         return self.rejuvenate(role=role, reason=reason, mode=mode,
                                requested_by=requested_by, operation_id=operation_id)
 
-    def rejuvenate(self, *, role: str, reason: str, mode: str = "trim",
+    def rejuvenate(self, *, role: str, reason: str, mode: str = "evict",
                    requested_by: str = "supervisor", operation_id: str | None = None
                    ) -> dict[str, Any]:
         """Checkpoint, retire, reborn. Performed by the Harness, receipted."""
@@ -232,11 +232,16 @@ class ContextHomeostasis:
 
         checkpoint = self.checkpoint(role=role, operation_id=operation_id)
         tokens: list[int] = checkpoint["tokens"]
-        plan = self.plan_trim(tokens) if mode == "trim" else {
-            "mode": "exact", "keep_head": len(tokens), "keep_tail": 0,
-            "dropped_tokens": 0, "kept_tokens": len(tokens),
-            "dropped_span": None,
-        }
+        if mode == "evict":
+            plan = self._plan_eviction_for(role, checkpoint, tokens)
+        elif mode == "trim":
+            plan = self.plan_trim(tokens)
+        else:
+            plan = {
+                "mode": "exact", "keep_head": len(tokens), "keep_tail": 0,
+                "dropped_tokens": 0, "kept_tokens": len(tokens),
+                "dropped_span": None,
+            }
 
         old_session = checkpoint["session_id"]
         inf.call("close_session", session_id=old_session)
@@ -246,10 +251,26 @@ class ContextHomeostasis:
         }, actor="supervisor", operation_id=operation_id)
 
         new = inf.call("open_session", role=role)
-        keep = self.apply_trim(tokens, plan)
+        keep = (self.apply_eviction(tokens, plan) if plan["mode"] == "evict"
+                else self.apply_trim(tokens, plan))
         if keep:
             inf.call("restore_prefix", session_id=new["session_id"], tokens=keep,
                      snapshot_id=checkpoint.get("snapshot_id"))
+
+        # Durable, and before anything else can read the old handle. The
+        # role was told in memory by `hand_over_session`; this is the copy the
+        # Harness itself reads on the next rejuvenation, and leaving it stale
+        # made that rejuvenation checkpoint a session that no longer exists.
+        try:
+            self.mind.work.set_session_handle(
+                agent_id=role, session_handle=new["session_id"],
+                reason=f"rejuvenated: {reason}"[:200])
+        except Exception:  # noqa: BLE001
+            self.log.exception(
+                "could not record %s's new session handle %s; the next "
+                "rejuvenation would work from a closed session", role,
+                new["session_id"])
+            raise
 
         after = self.measure()
         self._history.append(time.time())
@@ -267,12 +288,23 @@ class ContextHomeostasis:
             "tokens_before": len(tokens),
             "tokens_after": len(keep),
             "dropped_tokens": plan["dropped_tokens"],
-            "dropped_span": plan["dropped_span"],
+            # Trim removes one range; eviction removes several. Both are
+            # reported, and the singular field stays populated for trim so a
+            # caller reading it does not silently start seeing None.
+            "dropped_span": plan.get("dropped_span"),
+            "dropped_spans": plan.get("dropped_spans") or [],
+            "evicted_turns": plan.get("evicted_turns") or [],
+            "fell_back_to_trim": bool(plan.get("fell_back_to_trim")),
             "occupancy_before": round(before.occupancy, 4),
             "occupancy_after": round(after.occupancy, 4),
             "pressure_before": before.pressure,
             "pressure_after": after.pressure,
             "reconstitution": (
+                "whole finished interactions were removed at turn boundaries; "
+                "every surviving token is verbatim, the evicted turns are "
+                "not summarised, and they remain reconstructible from the "
+                "checkpoint blob"
+                if mode == "evict" else
                 "verbatim head and tail of the recorded token prefix; the dropped "
                 "span is not summarised and remains reconstructible from the "
                 "checkpoint blob"
@@ -291,6 +323,110 @@ class ContextHomeostasis:
         return result
 
     # ------------------------------------------------------------------
+    def _plan_eviction_for(self, role: str, checkpoint: dict[str, Any],
+                           tokens: Sequence[int]) -> dict[str, Any]:
+        """Evict finished interactions; fall back to trim for any shortfall.
+
+        A database upgraded in place has no recorded spans for turns taken
+        before the upgrade, so the first rejuvenation after one finds nothing
+        to evict and trims instead. That is a real path, not a theoretical
+        one, and it is why `trim` is kept rather than replaced.
+        """
+        from . import mailbox
+
+        spans = mailbox.settled_spans(self.mind.db.conn, role,
+                                      checkpoint.get("session_id"))
+        plan = self.plan_eviction(tokens, spans)
+        if plan["reached_target"] or not tokens:
+            return plan
+
+        # Not enough finished work to free what is needed. Trim the remainder
+        # rather than leave the context oversized, and say so: an eviction
+        # that quietly under-delivered would look like a rejuvenation loop
+        # with no cause.
+        kept = self.apply_eviction(tokens, plan)
+        trim = self.plan_trim(kept)
+        plan = {
+            **plan,
+            "mode": "evict",
+            "fell_back_to_trim": True,
+            "trim_after_eviction": trim,
+            "dropped_tokens": len(tokens) - len(self.apply_trim(kept, trim)),
+            "kept_tokens": len(self.apply_trim(kept, trim)),
+            "note": ("finished interactions were evicted first; there were "
+                     "not enough of them to reach the budget, so the "
+                     "remainder was trimmed positionally"),
+        }
+        return plan
+
+    def plan_eviction(self, tokens: Sequence[int], spans: Sequence[dict],
+                      *, target: int | None = None) -> dict[str, Any]:
+        """Drop finished interactions, oldest first, until the budget is met.
+
+        The budget is the one positional trim would have produced, so the two
+        are directly comparable: same size, different cuts. Eviction removes
+        whole turns at boundaries the chat format already has; trim removes
+        whatever sits between two offsets.
+
+        Overlapping or out-of-range spans are ignored rather than trusted. The
+        offsets come from a role measuring its own session, and a role that
+        was restarted mid-turn can leave a span that no longer describes
+        anything -- acting on it would drop live context.
+        """
+        n = len(tokens)
+        if target is None:
+            head = min(self.cfg.keep_head_tokens, n)
+            target = head + int(n * self.cfg.keep_tail_fraction)
+        target = max(0, int(target))
+
+        drop: list[dict] = []
+        kept = n
+        last_end = 0
+        for span in spans:
+            if kept <= target:
+                break
+            start, end = int(span["start"]), int(span["end"])
+            if start < last_end or end > n or start < 0 or end <= start:
+                continue
+            drop.append({"turn_id": span.get("turn_id"),
+                         "lineage": span.get("lineage"),
+                         "start": start, "end": end})
+            kept -= end - start
+            last_end = end
+
+        dropped_tokens = sum(d["end"] - d["start"] for d in drop)
+        return {
+            "mode": "evict",
+            "target_tokens": target,
+            "dropped_tokens": dropped_tokens,
+            "kept_tokens": n - dropped_tokens,
+            "dropped_spans": drop,
+            "evicted_turns": [d["turn_id"] for d in drop],
+            "reached_target": (n - dropped_tokens) <= target,
+            "note": ("whole finished turns were removed; every surviving token "
+                     "is verbatim and every surviving turn is complete"),
+        }
+
+    @classmethod
+    def apply_eviction(cls, tokens: Sequence[int], plan: dict[str, Any]
+                       ) -> list[int]:
+        """Keep everything outside the dropped spans, in order."""
+        drop = plan.get("dropped_spans") or []
+        keep: list[int] = list(tokens)
+        if drop:
+            keep = []
+            cursor = 0
+            for span in sorted(drop, key=lambda d: d["start"]):
+                keep.extend(tokens[cursor:span["start"]])
+                cursor = max(cursor, span["end"])
+            keep.extend(tokens[cursor:])
+        # A plan that could not reach the budget by eviction alone carries the
+        # positional trim it needed on top.
+        after = plan.get("trim_after_eviction")
+        if after:
+            keep = cls.apply_trim(keep, after)
+        return keep
+
     def plan_trim(self, tokens: Sequence[int]) -> dict[str, Any]:
         """Decide what to keep. Deterministic and inspectable before it runs."""
         n = len(tokens)

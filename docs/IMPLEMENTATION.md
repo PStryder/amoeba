@@ -30,8 +30,8 @@ Read this before trusting anything below it.
 | Maintained memory separate from raw history | **Implemented, tested** | `test_contradictory_history_does_not_become_belief` |
 | Leased work queue, at-least-once, idempotent commits | **Implemented, tested** | `test_duplicate_commit_is_idempotent` |
 | Ego/Id/neuocyte/supervisor/inference as separate processes | **Implemented, tested** | `test_role_restarts_independently` |
-| MCP facade: 10 cognitive verbs, typed in/out schemas, stdio | **Implemented, tested** | `test_real_mcp_client_calls_both_halves` |
-| MCP cancellation (explicit + on client abort) | **Implemented, tested** | `tests/test_cancellation.py` |
+| MCP facade: typed in/out schemas, stdio | **Implemented, tested** | `test_a_real_mcp_client_gets_the_io_surface_only`. The surface is `scopes.EXTERNAL_IO` — see the demotion row below; it is not a second list maintained here |
+| Cancellation (control plane only) | **Implemented, tested** | `tests/test_cancellation.py`. An external client has no cancellation verb and disconnecting cancels nothing — `test_an_mcp_client_has_no_cancellation_verb`, `test_disconnecting_does_not_cancel_anything`, invariant I48. An earlier row claimed cancel-on-client-abort, which described a surface that no longer exists |
 | MCP resources / prompts / sampling / streaming | **Not implemented** | tools-only surface — see [MCP contract](MCP_CONTRACT.md#what-is-not-implemented) |
 | Id audits an Ego conclusion through the record | **Implemented, tested** | `test_id_audits_ego_conclusion_without_asking_ego` |
 | One real local model, one resident weight set | **Implemented, tested** | `test_single_resident_weight_set` |
@@ -70,13 +70,13 @@ Read this before trusting anything below it.
 | Ego event-driven, Id event + heartbeat | **Implemented, tested** | Ego has no autonomous turn; Id gets a startup turn and a backing-off heartbeat that is explicit input rather than a fake user message |
 | Stop reasons and bounded deterministic continuation | **Implemented, tested** | ten distinct reasons; non-terminal stops earn a continuation with `parent_turn` recorded, bounded at `max_continuations` |
 | Turn provenance: profile + environment + trigger bundle | **Implemented, tested** | bundle and environment content-addressed before the turn runs and read back rather than recomputed |
-| Artifact and blackboard wake triggers | **Not implemented** | the trigger kinds exist and nothing emits them; a relevance rule that avoided waking Ego on unrelated board traffic was not worth inventing as a heuristic — see [TURNS §7](TURNS.md#7-ego-event-driven-never-autonomous) |
+| Artifact and blackboard wake triggers | **Implemented, tested** | ownership, not similarity: a role is woken by what happens to work it originated, and never by its own posts. The heuristic the architecture declined to invent turned out not to be needed — see I92 |
 | Role turns render the full request, not a preview | **Implemented, tested** | the body is read from the content store with a stated budget; truncation names the digest holding the rest |
 | Audit verdicts parsed as whole words | **Implemented, tested** | `unsupported` was read as `supported`, inverting an adverse audit and suppressing the disagreement it should have opened |
 | Role-targeting effectors callable through the tool loop | **Implemented, tested** | `role` names the asker, so a target parameter is `target_role` |
 | An interaction is complete only when answered | **Implemented, tested** | the async worker waits across continuation turns and fails truthfully rather than reporting an empty answer |
-| One answer per *request* rather than per turn | **Implemented** | the answer is written onto the request by trigger id; a turn admits at most one answer-bearing request, and a continued thought answers the request that started it — see [TURNS §16](TURNS.md) and invariants I80–I83 |
-| Interaction lineage scoping evidence | **Implemented** | assigned by the producer, enforced at bundling, and *not* a confidentiality boundary — see [ARCHITECTURE](ARCHITECTURE.md), "One Amoeba is one cognitive trust domain" |
+| One answer per *request* rather than per turn | **Implemented, tested** | the answer is written onto the request by trigger id; a turn admits at most one answer-bearing request, and a continued thought answers the request that started it — see [TURNS §16](TURNS.md) and invariants I80–I83 |
+| Interaction lineage scoping evidence | **Implemented, tested** | assigned by the producer, enforced at bundling, and *not* a confidentiality boundary — see [ARCHITECTURE](ARCHITECTURE.md), "One Amoeba is one cognitive trust domain" |
 | Specialist neuocyte profiles dispatched | **Implemented, tested** | Ego asks for a leaf (`research`), the library governs whether `ego.neuocyte.research` is approved, and an unavailable one falls back to the base *and says so on the work item* — see I91 |
 | Batched inference on the live path | **Implemented, tested** | one dispatcher groups requests that were already waiting; never waits for company, so the idle path is unchanged. A backend that cannot batch is served serially — see I90. The deterministic backend batches as a *loop* and says so: no timing from it describes batching |
 | External attachments and surfaced results wired end to end | **Implemented, tested** | the manifest is named in the bundle and read through `ego_read_attachment`; `ego_surface_result` is the production caller `surface_result` never had. Both are scoped to the turn's interaction, so Ego chooses what crosses the boundary and never whose — see I89 |
@@ -89,16 +89,16 @@ Read this before trusting anything below it.
 | Sandboxed compute (OS-enforced AppContainer) | **Implemented, tested** | 29 boundary tests; network + host FS blocked |
 | Artifact promotion by Harness decision | **Implemented, tested** | proposal -> re-hash -> receipt |
 | Context homeostasis: measure, retire, checkpoint, rebirth | **Implemented, tested** | `tests/test_homeostasis.py` |
-| Context trim (verbatim head+tail) | **Implemented, tested** | dropped span recorded, reconstructible from checkpoint |
+| Context trim, positional (verbatim head+tail) | **Implemented, tested** | the fallback when there is not enough settled work to evict; dropped span recorded and reconstructible from the checkpoint |
 | Context summarisation | **Refused by design** | a different behaviour from reconstitution; raises `capability_unsupported` |
-| Context compaction | **Not implemented** | `trim` drops a span; nothing merges or rewrites |
+| Context compaction | **Not implemented** | eviction removes whole finished turns; nothing merges or rewrites, and summarisation stays refused by design |
 | Continuous batching (several sequences, one fused kernel) | **Implemented, measured** | 13x aggregate at 64 sessions; knee at n≈32 |
 | Unified-KV occupancy tax (idle sessions slow others) | **Measured, unmitigated** | 1.94x slowdown at 77% pool, fully reversible |
 | **Independent overlapping GPU execution** | **NOT attempted, NOT claimed** | engine serialises by design; Nsight Systems absent, Nsight Compute serialises kernels |
 | Cross-process GPU weight sharing | **Not attempted** | design commits to one GPU owner |
 | Remote MCP transport | **Not implemented** | localhost is not a remote deployment |
 | Streaming output over MCP | **Not implemented** | |
-| Context trimming / eviction | **Not implemented** | a long-running Ego will eventually overflow `n_ctx` |
+| Context eviction, by finished interaction | **Implemented, tested** | preferred over positional trim: rejuvenation drops settled interactions at turn boundaries, oldest-first and only as far as the budget needs; a lineage still owed an answer is never dropped — see I93, I94 |
 | Model quality for genuine Ego synthesis / Id audit | **Unevaluated** | plumbing is proven; cognition is not |
 
 The deterministic backend (`config.test.toml`) is **not** a model. Every result
