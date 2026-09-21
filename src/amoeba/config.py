@@ -49,8 +49,36 @@ class BackendConfig:
 class ArbiterConfig:
     max_neuocytes: int = 4
     max_outstanding_work: int = 64
+    # Fallback ceiling for a session created without a policy. Deliberately
+    # small: an unbudgeted session is a bug, and granting it the pool would
+    # hide that bug behind good behaviour.
     max_prompt_tokens: int = 6144
     max_completion_tokens: int = 512
+
+    # What a disposable worker may grow, by work class rather than by role,
+    # because that is what a neuocyte has. A specialist profile may override
+    # these through the Prompt Library later; the basis travels with the
+    # number so nothing has to infer it at the point of use.
+    #
+    # An Ego-derived worker forks Ego's prefix, so its allowance is written
+    # against its own growth past what it inherited. It keeps that allowance
+    # when the fork fails and the prefix is recomputed -- the worker is doing
+    # the same job, and a performance fallback must not change what it is
+    # allowed to think. The recomputed prefix is still charged in full
+    # physically, which is a separate question answered from backend state.
+    ego_neuocyte_budget_tokens: int = 6144
+    ego_neuocyte_budget_basis: str = "private_growth"
+
+    # A maintenance worker starts cold and inherits nothing, so its whole
+    # context is its own and a total ceiling says what it means.
+    id_neuocyte_budget_tokens: int = 4096
+    id_neuocyte_budget_basis: str = "total"
+
+    # Held back when admitting new work, as a margin for the decode that has
+    # not happened yet. NOT unavailable KV: running sessions may grow into it
+    # freely. It exists because a prompt that fits the pool exactly has left
+    # nowhere for its own answer to go.
+    kv_admission_reserve_fraction: float = 0.15
     neuocyte_wall_seconds: float = 180.0
     neuocyte_token_budget: int = 2048
     neuocyte_max_age_seconds: float = 900.0
@@ -186,6 +214,18 @@ class RoleConfig:
     migration guidance rather than ignored.
     """
 
+    # The role's logical ceiling, enforced. This used to be display-only --
+    # it reached the dashboard and the pulse and never the control loop,
+    # while one global scalar on the Arbiter did the enforcing. A number that
+    # is shown but not read is worse than no number, because a reader has no
+    # way to tell which of the two governs.
+    #
+    # A logical ceiling inside the shared pool, not a reservation: nothing is
+    # partitioned, and the physical pool stays shared.
+    # Conservative by default and sized per deployment. `RoleConfig` is
+    # shared by Ego and Id, so a generous default here would hand each of them
+    # the whole of the default pool; the real numbers live in config.toml
+    # beside the `n_ctx` they have to fit inside.
     max_context_tokens: int = 6144
     max_turns_resident: int = 40
 

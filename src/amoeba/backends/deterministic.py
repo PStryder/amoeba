@@ -112,7 +112,9 @@ class DeterministicBackend:
 
     # -- sessions -------------------------------------------------------
     def open_session(self, *, role: str, session_id: str | None = None,
-                     seq_id: int | None = None) -> SessionState:
+                     seq_id: int | None = None,
+                     context_budget_tokens: int | None = None,
+                     budget_basis: str = "total") -> SessionState:
         with self._lock:
             if seq_id is None:
                 if not self._free_seq:
@@ -125,6 +127,8 @@ class DeterministicBackend:
                 raise ResourceExhausted("sequence slot already in use", seq_id=seq_id)
             sess = SessionState(
                 session_id=session_id or new_id("sess"), role=role, seq_id=seq_id,
+                context_budget_tokens=context_budget_tokens,
+                budget_basis=budget_basis,
                 created_at=time.time(), last_used=time.time(),
             )
             self._sessions[sess.session_id] = sess
@@ -152,6 +156,11 @@ class DeterministicBackend:
         return [{"session_id": s.session_id, "role": s.role, "seq_id": s.seq_id,
                  "n_past": s.n_past, "prefix_len": s.prefix_len,
                  "shares_prefix": s.shares_prefix,
+                 "private_tokens": s.private_tokens,
+                 "charged_tokens": s.charged_tokens,
+                 "budgeted_tokens": s.budgeted_tokens,
+                 "context_budget_tokens": s.context_budget_tokens,
+                 "budget_basis": s.budget_basis,
                  "snapshot_id": s.snapshot_id} for s in self._sessions.values()]
 
     def request_cancel(self, session_id: str) -> bool:
@@ -175,13 +184,18 @@ class DeterministicBackend:
     # -- fork -----------------------------------------------------------
     def fork_prefix(self, *, src_session_id: str, prefix_len: int, role: str,
                     session_id: str | None = None,
-                    snapshot_id: str | None = None) -> SessionState:
+                    snapshot_id: str | None = None,
+                    context_budget_tokens: int | None = None,
+                    budget_basis: str = "private_growth") -> SessionState:
         with self._lock:
             src = self.get_session(src_session_id)
             if prefix_len <= 0 or prefix_len > src.n_past:
                 raise InvalidInput("prefix_len must be a valid prefix",
                                    prefix_len=prefix_len, source_n_past=src.n_past)
-            dst = self.open_session(role=role, session_id=session_id)
+            dst = self.open_session(
+                role=role, session_id=session_id,
+                context_budget_tokens=context_budget_tokens,
+                budget_basis=budget_basis)
             # A copy of the token list, so a neuocyte mutating its own list can
             # never be mistaken for it mutating the source.
             dst.tokens = list(src.tokens[:prefix_len])

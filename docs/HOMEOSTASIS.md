@@ -119,6 +119,70 @@ max_rejuvenations_per_hour = 12
 auto_rejuvenate = true
 ```
 
+## Budgets: what a session may think, and what it costs
+
+Two questions, kept apart because they have different answers.
+
+**Cognitive allowance** is policy. A session is given `context_budget_tokens`
+and a `budget_basis` when it is created, and they never move afterwards:
+
+| actor | allowance | basis |
+|---|---|---|
+| Ego | 16384 | total |
+| Id | 8192 | total |
+| `ego.neuocyte` | 6144 | private growth |
+| `id.neuocyte` | 4096 | total |
+
+A role inherits nothing, so *total* is what its allowance means. An
+Ego-derived worker forks Ego's prefix, so its allowance is written against
+what it adds past what it inherited -- judging its total would refuse it on
+its first generate, before it had thought anything. A maintenance worker
+starts cold and owns everything it holds.
+
+These are logical ceilings **inside** the shared pool, not reservations of it.
+Nothing is partitioned; the physical KV pool stays shared, and a role at its
+ceiling has not taken anything from anyone.
+
+**Physical cost** is measurement, derived from what the backend actually did:
+a shared prefix is counted once and a recomputed one is charged in full.
+
+The two come apart on the fork fallback. If forking fails and the prefix is
+recomputed, the worker's allowance is unchanged -- it is the same worker doing
+the same job, and a performance fallback must not decide what it may think --
+while its physical cost rises by the whole recomputed prefix. One flag could
+not have said both.
+
+## Pressure is measured against the allowance
+
+`role_context_high` is a fraction of the session's own ceiling, so the
+proactive threshold and the hard refusal are in the same units:
+
+| | hard | proactive at 0.75 |
+|---|---|---|
+| Ego | 16384 | 12288 |
+| Id | 8192 | 6144 |
+
+It used to be a fraction of the whole KV pool while the hard refusal was one
+global 6144, so the proactive threshold sat six times higher than the wall and
+rejuvenation could only ever happen by collision -- the role discovered the
+limit by hitting it and losing a turn.
+
+## Admission
+
+Starting new work consults the pool. Measured for sessions that exist;
+estimated from the work class's budget for one that does not, which is stated
+as an estimate because it cannot account for a prefix that worker may have to
+recompute.
+
+`kv_admission_reserve_fraction` (0.15) is held back from *new* work only. It
+is not unavailable KV -- running sessions grow into it freely. It exists
+because a prompt that fits the pool exactly has left nowhere for its own
+answer to go.
+
+When the pool cannot be measured, admission does not guess. The queue is
+durable, and refusing on an absent number would stall work for a reason that
+has nothing to do with resources. See invariants I96, I97 and I98.
+
 ## Not implemented
 
 - **Compaction.** Nothing merges or rewrites context. Eviction removes whole

@@ -52,6 +52,11 @@ class ResourceSnapshot:
     inference_sessions: int = 0
     max_inference_sessions: int = 0
     vram_free_bytes: int = 0
+    # Measured KV occupancy of the shared pool. Shared prefixes are counted
+    # once and recomputed ones charged in full, which is what makes this a
+    # measurement rather than a sum of allowances.
+    kv_tokens_used: int = 0
+    kv_pool_capacity: int = 0
 
 
 class Arbiter:
@@ -74,6 +79,10 @@ class Arbiter:
         cfg = self.cfg
         if work_class not in ("user", "maintenance"):
             return AdmissionDecision(False, "unknown work class", work_class)
+
+        kv = self.kv_admission(work_class=work_class, snapshot=snapshot)
+        if not kv["admit"]:
+            return AdmissionDecision(False, kv["reason"], work_class, detail=kv)
 
         if snapshot.outstanding_work >= cfg.max_outstanding_work:
             return AdmissionDecision(
@@ -198,13 +207,78 @@ class Arbiter:
     # ------------------------------------------------------------------
     # hard caps applied to an individual inference request
     # ------------------------------------------------------------------
+    def kv_admission(self, *, work_class: WorkClass,
+                     snapshot: ResourceSnapshot) -> dict[str, Any]:
+        """Would starting this work overcommit the shared KV pool?
+
+        Measured for what exists, estimated for what does not. The estimate is
+        the work class's own budget, which bounds the private growth of the
+        worker that would be started; it does not account for a prefix that
+        worker might have to recompute, so it understates that case and the
+        reserve is what absorbs it. Saying so here rather than implying a
+        measurement nobody took.
+
+        Returns a decision rather than raising, because admission refusing is
+        an ordinary answer and the caller records it either way.
+        """
+        capacity = int(snapshot.kv_pool_capacity or 0)
+        if capacity <= 0:
+            # No measurement available -- the inference service may be down or
+            # still starting. Admission is not the place to guess: the queue
+            # is durable and the work will be admitted when the pool can be
+            # seen. Conservative in the only direction that is safe.
+            return {"admit": True, "reason": "kv pool not measurable",
+                    "measured": False}
+
+        want = (self.cfg.ego_neuocyte_budget_tokens if work_class == "user"
+                else self.cfg.id_neuocyte_budget_tokens)
+        reserve = int(capacity * max(0.0, self.cfg.kv_admission_reserve_fraction))
+        usable = max(0, capacity - reserve)
+        used = int(snapshot.kv_tokens_used or 0)
+        if used + want > usable:
+            return {
+                "admit": False,
+                "reason": "the shared KV pool has no room for another worker",
+                "measured": True, "kv_used": used, "kv_capacity": capacity,
+                "kv_reserve": reserve, "kv_usable": usable,
+                "estimated_demand": want,
+                "note": ("demand is this work class's budget, an estimate; a "
+                         "prefix this worker has to recompute is not in it, "
+                         "which is part of what the reserve absorbs"),
+            }
+        return {"admit": True, "reason": "kv pool has room", "measured": True,
+                "kv_used": used, "kv_usable": usable, "estimated_demand": want}
+
     def clamp_inference(self, *, prompt_tokens: int, max_tokens: int | None,
-                        deadline: float | None) -> dict[str, Any]:
+                        deadline: float | None,
+                        budget_tokens: int | None = None,
+                        budget_basis: str = "total") -> dict[str, Any]:
+        """Bound one generation against the *calling session's* allowance.
+
+        `prompt_tokens` is whichever measure that session's budget is written
+        against -- total for a role or a cold worker, private growth for one
+        that inherited a prefix. The caller resolves which, because only the
+        session knows whether it inherited anything.
+
+        `budget_tokens` of None means this session was created without a
+        policy, and the global ceiling applies. Unbudgeted must not mean
+        unlimited: a session nobody assigned a budget is a bug, and silently
+        granting it the whole pool would hide that bug behind good behaviour.
+
+        The refusal wording matters. `roles.CONTEXT_PRESSURE_MARKERS` matches
+        "context budget" and "exceeds the configured context" to tell a full
+        context from a broken one across an RPC boundary where the exception
+        type does not survive, so rewording this sends a healthy organism at a
+        known limit into the crash path instead of into rejuvenation.
+        """
         cfg = self.cfg
-        if prompt_tokens > cfg.max_prompt_tokens:
+        ceiling = int(budget_tokens) if budget_tokens else cfg.max_prompt_tokens
+        if prompt_tokens > ceiling:
             raise ResourceExhausted(
                 "prompt exceeds the configured context budget",
-                prompt_tokens=prompt_tokens, max_prompt_tokens=cfg.max_prompt_tokens,
+                prompt_tokens=prompt_tokens, max_prompt_tokens=ceiling,
+                budget_basis=budget_basis,
+                budget_source=("session" if budget_tokens else "global default"),
             )
         capped = min(max_tokens or cfg.max_completion_tokens, cfg.max_completion_tokens)
         wall_cap = time.time() + cfg.neuocyte_wall_seconds

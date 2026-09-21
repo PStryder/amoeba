@@ -615,12 +615,24 @@ class Supervisor:
         qs = self.mind.work.queue_stats()
         active = [w for w in self.neuocytes.values() if w["proc"].poll() is None]
         inf_sessions, max_sessions, vram = 0, 0, 0
+        kv_used, kv_capacity = 0, 0
         try:
             health = self.client("inference").call("health")
             inf_sessions = health.get("active_sessions", 0)
             max_sessions = health.get("max_sessions", 0)
             vram = health.get("vram_free_bytes", 0)
         except Exception:  # noqa: BLE001
+            pass
+        try:
+            # Measured, not inferred from the health summary: this is the
+            # figure admission refuses on, and it counts a shared prefix once
+            # and a recomputed one in full.
+            report = self.client("inference").call("context_report")
+            kv_used = int(report.get("pool_tokens_used") or 0)
+            kv_capacity = int(report.get("pool_capacity") or 0)
+        except Exception:  # noqa: BLE001
+            # Left at zero, which `kv_admission` reads as "not measurable"
+            # and declines to guess about.
             pass
         return ResourceSnapshot(
             active_neuocytes=len(active),
@@ -636,6 +648,8 @@ class Supervisor:
             inference_sessions=inf_sessions,
             max_inference_sessions=max_sessions,
             vram_free_bytes=vram,
+            kv_tokens_used=kv_used,
+            kv_pool_capacity=kv_capacity,
         )
 
     def scheduler_loop(self) -> None:

@@ -89,6 +89,9 @@ Read this before trusting anything below it.
 | Sandboxed compute (OS-enforced AppContainer) | **Implemented, tested** | 29 boundary tests; network + host FS blocked |
 | Artifact promotion by Harness decision | **Implemented, tested** | proposal -> re-hash -> receipt |
 | Context homeostasis: measure, retire, checkpoint, rebirth | **Implemented, tested** | `tests/test_homeostasis.py` |
+| Per-actor context budgets | **Implemented, tested** | a session carries `context_budget_tokens` and `budget_basis` from creation; Ego 16384, Id 8192, `ego.neuocyte` 6144 private-growth, `id.neuocyte` 4096 total — see I96, I97 |
+| Physical KV admission | **Implemented, tested** | measured occupancy for live sessions, work-class budget as a conservative estimate for prospective ones, with a 15% reserve held back from new work for decode — see I98 |
+| Proactive rejuvenation before the hard ceiling | **Implemented, tested** | `role_context_high` measures the role against its own budget, so Ego is a candidate at 12288 of 16384 rather than after being refused — see I96 |
 | Context trim, positional (verbatim head+tail) | **Implemented, tested** | the fallback when there is not enough settled work to evict; dropped span recorded and reconstructible from the checkpoint |
 | Context summarisation | **Refused by design** | a different behaviour from reconstitution; raises `capability_unsupported` |
 | Context compaction | **Not implemented** | eviction removes whole finished turns; nothing merges or rewrites, and summarisation stays refused by design |

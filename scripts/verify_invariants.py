@@ -1415,6 +1415,38 @@ MUTATIONS: list[Mutation] = [
               ('        unfinished_support = [f["post_id"] for f in support_provenance\n                              if f["attempt_unfinished"]]',
                '        unfinished_support = []  # MUTANT: a dead supporter looks alive')],
     ),
+    Mutation(
+        "I96", "A session carries its own allowance, and carries it unchanged",
+        "src/amoeba/arbiter.py",
+        "        ceiling = int(budget_tokens) if budget_tokens else cfg.max_prompt_tokens",
+        "        ceiling = cfg.max_prompt_tokens  # MUTANT: one global ceiling for everyone",
+        ["test_ids_ceiling_is_independent_of_egos",
+         "test_a_role_session_is_bounded_by_its_own_ceiling_not_a_global_one"],
+        layer="Arbiter.clamp_inference (whose ceiling bounds a generation)",
+        note="The mutant is the old design, not an absent one: a single global scalar passes anything that does not compare two actors against each other, which is why the defending tests give Ego and Id the same occupancy and require different answers.",
+    ),
+    Mutation(
+        "I97", "What a session may think and what it costs are different questions",
+        "src/amoeba/backends/llama_engine.py",
+        '        return (self.private_tokens if self.budget_basis == "private_growth"\n                else self.n_past)',
+        "        return self.n_past  # MUTANT: the basis is ignored",
+        ["test_a_forked_worker_is_not_charged_for_the_prefix_it_inherited",
+         "test_a_shared_prefix_is_charged_once_but_a_recomputed_one_in_full",
+         "test_the_service_judges_a_forked_worker_on_its_growth_not_its_total"],
+        layer="SessionState.budgeted_tokens (which tokens an allowance counts)",
+        note="Defended in two places and both come out: the basis that decides what counts against the allowance, and the charge that decides what the pool is told. Collapsing the charge alone makes a recomputed prefix free; collapsing the basis alone refuses a forked worker on its first generate.",
+        also=[("        return self.private_tokens if self.shares_prefix else self.n_past",
+               "        return self.private_tokens  # MUTANT: a recomputed prefix is free")],
+    ),
+    Mutation(
+        "I98", "Admission spends a pool it has measured",
+        "src/amoeba/arbiter.py",
+        '        kv = self.kv_admission(work_class=work_class, snapshot=snapshot)',
+        '        kv = {"admit": True}  # MUTANT: admit without looking at the pool',
+        ["test_admission_refuses_when_the_pool_has_no_room"],
+        layer="Arbiter.admit (consulting the KV pool before starting work)",
+        note="This check did not exist before the pass that added it; the mutant restores the previous behaviour, in which admission read no token figure at all and overcommit was prevented only by the configured numbers happening to be small.",
+    ),
 ]
 
 

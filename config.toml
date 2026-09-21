@@ -61,8 +61,11 @@ maintenance_reserved_slots = 1
 max_maintenance_depth    = 2
 max_maintenance_per_hour = 20
 
+# Logical ceilings inside the shared 49152-token pool, not reservations.
+# These are the numbers the Arbiter enforces and homeostasis measures against,
+# and the ones the dashboard shows. There is no second, display-only value.
 [ego]
-max_context_tokens = 6144
+max_context_tokens = 16384
 
 [id]
-max_context_tokens = 6144
+max_context_tokens = 8192

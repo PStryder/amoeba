@@ -167,9 +167,26 @@ class InferenceService:
                 # snapshot_id would under-report occupancy for exactly the
                 # sessions restored after an inference restart.
                 private = n - int(s.get("prefix_len", 0) or 0)
-                used += private if s.get("shares_prefix") else n
-                sessions.append({**s, "private_tokens": private,
-                                 "budget_tokens": capacity})
+                charged = private if s.get("shares_prefix") else n
+                used += charged
+                # The session's own ceiling, not the pool's. Reporting the
+                # pool here made `role_context_high` measure every role
+                # against 49152, so the proactive threshold sat far above the
+                # hard refusal and rejuvenation could only happen by
+                # collision. A session with no policy falls back to the pool,
+                # which is visible rather than silent.
+                sessions.append({
+                    **s,
+                    "private_tokens": private,
+                    "charged_tokens": charged,
+                    "budget_tokens": int(s.get("context_budget_tokens") or capacity),
+                    "budget_basis": s.get("budget_basis", "total"),
+                    "budgeted_tokens": int(
+                        s.get("budgeted_tokens",
+                              private if s.get("budget_basis") == "private_growth"
+                              else n)),
+                    "pool_capacity": capacity,
+                })
         except Exception as exc:  # noqa: BLE001
             return {"pool_tokens_used": 0, "pool_capacity": capacity,
                     "sessions": [], "detail": f"backend error: {exc!r}"}
@@ -213,9 +230,16 @@ class InferenceService:
         except Exception:  # noqa: BLE001
             return 0
 
-    def open_session(self, *, role: str, session_id: str | None = None) -> dict[str, Any]:
-        sess = self.backend.open_session(role=role, session_id=session_id)
+    def open_session(self, *, role: str, session_id: str | None = None,
+                     context_budget_tokens: int | None = None,
+                     budget_basis: str = "total") -> dict[str, Any]:
+        sess = self.backend.open_session(
+            role=role, session_id=session_id,
+            context_budget_tokens=context_budget_tokens,
+            budget_basis=budget_basis)
         return {"session_id": sess.session_id, "role": sess.role, "seq_id": sess.seq_id,
+                "context_budget_tokens": sess.context_budget_tokens,
+                "budget_basis": sess.budget_basis,
                 "model_generation": self.backend.model_generation}
 
     def close_session(self, *, session_id: str, keep_prefix: bool = False) -> dict[str, Any]:
@@ -251,8 +275,15 @@ class InferenceService:
         of queueing behind each other's locks.
         """
         sess = self.backend.get_session(session_id)
+        # Whichever measure this session's allowance is written against. A
+        # role is judged on everything it holds; a worker that inherited a
+        # prefix is judged on what it has added to it, because the prefix was
+        # not its doing and the allowance was written for its own growth.
         clamp = self.arbiter.clamp_inference(
-            prompt_tokens=sess.n_past, max_tokens=max_tokens, deadline=deadline
+            prompt_tokens=sess.budgeted_tokens, max_tokens=max_tokens,
+            deadline=deadline,
+            budget_tokens=sess.context_budget_tokens,
+            budget_basis=sess.budget_basis,
         )
         req: dict[str, Any] = {
             "session_id": session_id, "clamp": clamp, "temperature": temperature,
@@ -408,15 +439,20 @@ class InferenceService:
         }
 
     def fork_prefix(self, *, src_session_id: str, prefix_len: int, role: str,
-                    session_id: str | None = None, snapshot_id: str | None = None
-                    ) -> dict[str, Any]:
+                    session_id: str | None = None, snapshot_id: str | None = None,
+                    context_budget_tokens: int | None = None,
+                    budget_basis: str = "private_growth") -> dict[str, Any]:
         sess = self.backend.fork_prefix(
             src_session_id=src_session_id, prefix_len=prefix_len, role=role,
             session_id=session_id, snapshot_id=snapshot_id,
+            context_budget_tokens=context_budget_tokens,
+            budget_basis=budget_basis,
         )
         self._stats["forks"] += 1
         return {"session_id": sess.session_id, "seq_id": sess.seq_id,
                 "prefix_len": sess.prefix_len, "snapshot_id": sess.snapshot_id,
+                "context_budget_tokens": sess.context_budget_tokens,
+                "budget_basis": sess.budget_basis,
                 "kv_mode": self.backend.capabilities().get("kv_mode")}
 
     def restore_prefix(self, *, session_id: str, tokens: Sequence[int],

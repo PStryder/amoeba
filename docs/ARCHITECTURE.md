@@ -1158,6 +1158,62 @@ is posted in anybody's name.
 `test_a_post_belonging_to_no_work_reports_no_fate`,
 `test_reading_a_thread_says_the_same_as_reading_a_query`
 
+**I96. A session carries its own allowance, and carries it unchanged.** One
+global scalar on the Arbiter did all the enforcing, while `max_context_tokens`
+looked like a role's ceiling and reached only the dashboard -- two
+configuration concepts, one of which governed reality, and no way for a reader
+to tell which. The ceiling is now the session's own, declared where the policy
+is known: a role from its configuration, a worker from its work class. Nothing
+downstream infers a budget from circumstance, and in particular nothing infers
+it from whether a fork succeeded, because that would make a worker's
+capability a function of a performance optimisation. A session created without
+a policy falls back to the global default rather than becoming unlimited --
+unbudgeted is a bug, and granting it the pool would hide the bug behind good
+behaviour. A rejuvenated role keeps the ceiling it had, or it would silently
+fall back the first time it was reborn.
+→ `test_a_role_session_is_bounded_by_its_own_ceiling_not_a_global_one`,
+`test_ids_ceiling_is_independent_of_egos`,
+`test_an_unbudgeted_session_falls_back_rather_than_becoming_unlimited`,
+`test_the_budget_a_role_reports_is_the_budget_it_is_held_to`
+
+**I97. What a session may think and what it costs are different questions.**
+`budget_basis` decides which tokens count against the allowance; the physical
+charge is derived separately from backend state. The case that forces them
+apart is the fork fallback: an Ego-derived worker forks a large prefix and is
+allowed its own growth past it, and when forking fails and the prefix is
+recomputed its *cognitive* allowance is unchanged -- it is the same worker
+doing the same job -- while the recomputed prefix now occupies its own cells
+and is charged in full. Answering both with one flag would have to either
+demote the worker for an optimisation it did not control, or pretend
+recomputed KV were free. Judging a forked worker's *total* against a
+private-growth allowance is the specific failure this prevents: it would be
+refused on its first generate, before thinking anything at all.
+→ `test_a_forked_worker_is_not_charged_for_the_prefix_it_inherited`,
+`test_a_shared_prefix_is_charged_once_but_a_recomputed_one_in_full`,
+`test_a_cold_worker_is_judged_on_everything_it_holds`,
+`test_the_service_judges_a_forked_worker_on_its_growth_not_its_total`
+
+**I98. Admission spends a pool it has measured.** `Arbiter.admit` weighed
+queue depth, maintenance depth and slot reservations and read no token or
+memory figure at all -- `vram_free_bytes` and the session counts were
+collected, displayed, and never consulted. Aggregate overcommit was prevented
+only by the numbers happening to be small, which stopped being true the moment
+the role ceilings were sized properly. Admission now measures what exists,
+with shared prefixes counted once and recomputed ones charged in full, and
+estimates what does not from the work class's own budget -- stated as an
+estimate rather than dressed up as measurement, because it cannot know about a
+prefix the prospective worker may have to recompute. A reserve is held back
+from *new* work only: running sessions grow into it freely, and it exists
+because a prompt that fits the pool exactly has left nowhere for its own
+answer to go. When the pool cannot be measured admission does not guess; the
+queue is durable, and refusing on an absent number would stall work for a
+reason that is not about resources.
+→ `test_admission_refuses_when_the_pool_has_no_room`,
+`test_the_reserve_is_held_back_from_new_work_only`,
+`test_admission_does_not_guess_when_the_pool_cannot_be_measured`,
+`test_maintenance_demand_is_estimated_from_its_own_budget`,
+`test_the_shipped_policy_fits_the_pool_it_shares`
+
 **I73. A role is never wedged by a turn it did not close.** One open turn per
 role is a database constraint, so a turn left running blocks every future turn
 for that role — the role heartbeats, reports healthy, and never thinks again

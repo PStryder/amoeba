@@ -20,14 +20,25 @@ from typing import Any
 
 import pytest
 
-from amoeba.backends.llama_engine import GenerationResult
+from amoeba.backends.llama_engine import GenerationResult, SessionState
 from amoeba.config import Config
 from amoeba.errors import BackendUnavailable, CapabilityUnsupported
 from amoeba.inference_service import InferenceService
 
 
-class _Session:
-    n_past = 10
+def _session(session_id: str = "s") -> SessionState:
+    """A real session, not a stand-in.
+
+    The first version of this was a two-line class with an `n_past` attribute,
+    which was all the service needed then. When the service began asking a
+    session for its budget and basis, the stand-in silently lacked them and
+    four batching tests failed on an AttributeError that had nothing to do
+    with batching. A fake that reimplements the thing under test agrees with
+    itself; the real object agrees with the system.
+    """
+    return SessionState(session_id=session_id, role="ego", seq_id=0,
+                        tokens=list(range(10)),
+                        context_budget_tokens=16384, budget_basis="total")
 
 
 class _FakeBackend:
@@ -45,8 +56,8 @@ class _FakeBackend:
         self.entered = threading.Semaphore(0)
         self.fail_sessions: set[str] = set()
 
-    def get_session(self, session_id: str) -> _Session:
-        return _Session()
+    def get_session(self, session_id: str) -> SessionState:
+        return _session(session_id)
 
     def _result(self, session_id: str) -> GenerationResult:
         return GenerationResult(

@@ -77,6 +77,20 @@ class SessionState:
     # exactly the fallback used after an inference restart, when pressure is
     # most likely to matter.
     shares_prefix: bool = False
+    # How much cognition this session may grow, and which tokens count. Set
+    # once at creation and never moved afterwards: an allowance that changed
+    # because a fork succeeded or failed would make a worker's capability a
+    # function of a performance optimisation.
+    #
+    #   "total"          -- every token in the session counts (a role, or a
+    #                       cold worker that inherited nothing)
+    #   "private_growth" -- only what this session added past its inherited
+    #                       prefix counts, whether or not that prefix ended up
+    #                       physically shared
+    #
+    # None means unbudgeted, and the caller's global ceiling applies.
+    context_budget_tokens: int | None = None
+    budget_basis: str = "total"
     snapshot_id: str | None = None
     ref_id: str | None = None
     created_at: float = 0.0
@@ -91,6 +105,34 @@ class SessionState:
     # session. Sampling from it would silently mix sessions, so each session
     # keeps its own copy taken immediately after its own decode.
     logits: Any = None
+
+    @property
+    def private_tokens(self) -> int:
+        """Tokens this session added past whatever it inherited.
+
+        The cognitive measure. Independent of `shares_prefix`, because the
+        growth a worker is responsible for is the same whether its prefix was
+        forked or recomputed.
+        """
+        return max(0, self.n_past - self.prefix_len)
+
+    @property
+    def charged_tokens(self) -> int:
+        """Tokens this session actually costs the physical KV pool.
+
+        The measurement, not the policy. A shared prefix is owned by the
+        session that created it and counted once; a recomputed prefix occupies
+        its own cells and is charged in full -- and recomputation is exactly
+        the fallback taken when forking fails, which is when pressure is most
+        likely to matter.
+        """
+        return self.private_tokens if self.shares_prefix else self.n_past
+
+    @property
+    def budgeted_tokens(self) -> int:
+        """Whichever measure this session's allowance is written against."""
+        return (self.private_tokens if self.budget_basis == "private_growth"
+                else self.n_past)
 
     @property
     def n_past(self) -> int:
@@ -413,7 +455,9 @@ class LlamaEngine:
     # sessions
     # ------------------------------------------------------------------
     def open_session(self, *, role: str, session_id: str | None = None,
-                     seq_id: int | None = None) -> SessionState:
+                     seq_id: int | None = None,
+                     context_budget_tokens: int | None = None,
+                     budget_basis: str = "total") -> SessionState:
         self._require()
         with self._lock:
             if seq_id is None:
@@ -432,6 +476,8 @@ class LlamaEngine:
             sess = SessionState(
                 session_id=session_id or new_id("sess"),
                 role=role, seq_id=seq_id,
+                context_budget_tokens=context_budget_tokens,
+                budget_basis=budget_basis,
                 created_at=time.time(), last_used=time.time(),
             )
             self._sessions[sess.session_id] = sess
@@ -494,6 +540,11 @@ class LlamaEngine:
                 "session_id": s.session_id, "role": s.role, "seq_id": s.seq_id,
                 "n_past": s.n_past, "prefix_len": s.prefix_len,
                 "shares_prefix": s.shares_prefix,
+                "private_tokens": s.private_tokens,
+                "charged_tokens": s.charged_tokens,
+                "budgeted_tokens": s.budgeted_tokens,
+                "context_budget_tokens": s.context_budget_tokens,
+                "budget_basis": s.budget_basis,
                 "snapshot_id": s.snapshot_id, "tokens_generated": s.tokens_generated,
             }
             for s in self._sessions.values()
@@ -515,6 +566,8 @@ class LlamaEngine:
     def fork_prefix(
         self, *, src_session_id: str, prefix_len: int, role: str,
         session_id: str | None = None, snapshot_id: str | None = None,
+        context_budget_tokens: int | None = None,
+        budget_basis: str = "private_growth",
     ) -> SessionState:
         """Give a new session a frozen copy-or-share of a prefix of another.
 
@@ -547,7 +600,9 @@ class LlamaEngine:
                     "process and a full seq_cp physically copies the prefix",
                     kv_unified=False, n_kv_streams=self.n_seq_max,
                 )
-            dst = self.open_session(role=role, session_id=session_id)
+            dst = self.open_session(role=role, session_id=session_id,
+                                    context_budget_tokens=context_budget_tokens,
+                                    budget_basis=budget_basis)
             # p1 is exclusive: copy positions [0, prefix_len).
             self.ffi.lib.llama_memory_seq_cp(self.mem, src.seq_id, dst.seq_id, 0, prefix_len)
             dst.tokens = list(src.tokens[:prefix_len])

@@ -555,6 +555,8 @@ class Neuocyte:
                     "fork_prefix", src_session_id=handle,
                     prefix_len=snapshot["token_count"], role="neuocyte",
                     snapshot_id=snapshot["snapshot_id"],
+                    context_budget_tokens=self.cfg.arbiter.ego_neuocyte_budget_tokens,
+                    budget_basis=self.cfg.arbiter.ego_neuocyte_budget_basis,
                 )
                 self.session_id = sess["session_id"]
                 return {"method": "forked_shared_prefix", "kv_mode": sess["kv_mode"],
@@ -563,7 +565,15 @@ class Neuocyte:
             except Exception as exc:  # noqa: BLE001
                 self.log.warning("fork failed (%s); falling back to recomputation", exc)
 
-        sess = self.inf.call("open_session", role="neuocyte")
+        # The fork failed and the prefix will be recomputed. The allowance is
+        # unchanged -- this is the same worker doing the same job, and a
+        # performance fallback must not decide what it may think. The
+        # recomputed prefix is charged in full physically, which is a
+        # different question answered from backend state.
+        sess = self.inf.call(
+            "open_session", role="neuocyte",
+            context_budget_tokens=self.cfg.arbiter.ego_neuocyte_budget_tokens,
+            budget_basis=self.cfg.arbiter.ego_neuocyte_budget_basis)
         self.session_id = sess["session_id"]
         tokens = self.sup.call("snapshot_tokens", snapshot_id=snapshot["snapshot_id"])
         t0 = time.perf_counter()
@@ -585,7 +595,12 @@ class Neuocyte:
         """Id maintenance neuocytes get references to state, never a snapshot of
         Id's private context."""
         state = self.sup.call("maintenance_context", objective=item["objective"])
-        sess = self.inf.call("open_session", role="neuocyte")
+        # Cold start: this worker inherits nothing, so its whole context is
+        # its own and a total ceiling says what it means.
+        sess = self.inf.call(
+            "open_session", role="neuocyte",
+            context_budget_tokens=self.cfg.arbiter.id_neuocyte_budget_tokens,
+            budget_basis=self.cfg.arbiter.id_neuocyte_budget_basis)
         self.session_id = sess["session_id"]
         prompt = self._profile_block() + MAINTENANCE_INSTRUCTION.format(
             objective=item["objective"],

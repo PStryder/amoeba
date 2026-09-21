@@ -151,11 +151,21 @@ class ContextHomeostasis:
             for s in report.sessions:
                 role = s.get("role", "")
                 budget = max(1, int(s.get("budget_tokens") or report.pool_capacity))
-                frac = s.get("n_past", 0) / budget
+                # Measured the way this session's allowance is written. A role
+                # is judged on everything it holds; a worker that inherited a
+                # prefix is judged on what it added, because comparing its
+                # total against an allowance written for its growth is how a
+                # forked worker gets declared over budget the moment it is
+                # born.
+                held = int(s.get("budgeted_tokens", s.get("n_past", 0)) or 0)
+                frac = held / budget
                 if frac >= self.cfg.role_context_high or report.pressure in ("high", "critical"):
                     recommendations.append({
                         "session_id": s.get("session_id"), "role": role,
-                        "n_past": s.get("n_past"), "context_fraction": round(frac, 3),
+                        "n_past": s.get("n_past"),
+                        "budgeted_tokens": held, "budget_tokens": budget,
+                        "budget_basis": s.get("budget_basis", "total"),
+                        "context_fraction": round(frac, 3),
                         "action": "rejuvenate" if role in ("ego", "id") else "retire",
                         "why": ("role context is large" if frac >= self.cfg.role_context_high
                                 else f"pool pressure is {report.pressure}"),
@@ -250,7 +260,14 @@ class ContextHomeostasis:
             "n_past": len(tokens),
         }, actor="supervisor", operation_id=operation_id)
 
-        new = inf.call("open_session", role=role)
+        # The same identity continuing, so the same ceiling. Without this a
+        # reborn role would quietly fall back to the global default, and the
+        # symptom would be a role that worked until the first time it was
+        # rejuvenated.
+        role_cfg = getattr(self.mind.cfg, role, None)
+        budget = int(getattr(role_cfg, "max_context_tokens", 0) or 0) or None
+        new = inf.call("open_session", role=role,
+                       context_budget_tokens=budget, budget_basis="total")
         keep = (self.apply_eviction(tokens, plan) if plan["mode"] == "evict"
                 else self.apply_trim(tokens, plan))
         if keep:

@@ -152,7 +152,13 @@ class RoleProcess:
         self.inf.connect(retries=60, delay=0.5)
         self.capabilities = self.inf.call("capabilities")
         self.model_generation = self.capabilities.get("model_generation", "")
-        sess = self.inf.call("open_session", role=self.role)
+        # The role's configured ceiling, declared here because this is where
+        # it is known. A role is judged on everything it holds -- it inherits
+        # nothing, so total is what its allowance means.
+        sess = self.inf.call(
+            "open_session", role=self.role,
+            context_budget_tokens=self._context_budget(),
+            budget_basis="total")
         self.session_id = sess["session_id"]
         # Bind the profile *before* registering, because the digest reported
         # at registration has to be the digest of the text this incarnation is
@@ -320,6 +326,19 @@ class RoleProcess:
             return {"accepted": False, "result": None,
                     "reason": f"{type(exc).__name__}: {exc}"[:500],
                     "error": None}
+
+    def _context_budget(self) -> int:
+        """This role's logical ceiling, from its own configuration.
+
+        Used at session creation and again at rejuvenation, so a reborn role
+        keeps the allowance it had. It is a ceiling inside the shared pool,
+        not a reservation of it.
+        """
+        # The same field `context_stats` reports, deliberately: the number
+        # shown and the number enforced must be one number, or a reader has
+        # no way to tell which governs.
+        return int(getattr(self.role_cfg, "max_context_tokens", 0)
+                   or self.cfg.arbiter.max_prompt_tokens)
 
     def _context_length(self) -> int | None:
         """How many tokens this role's session currently holds.
