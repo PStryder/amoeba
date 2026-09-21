@@ -17,7 +17,26 @@ model_path   = "F:/hexylab/amoeba-models/Qwen3-4B-Instruct-2507-Q5_K_M.gguf"
 n_gpu_layers = -1
 # n_ctx is the TOTAL shared KV pool. kv_unified is forced on: it is the only
 # mode in which an Ego prefix can be physically shared with neuocytes.
-n_ctx        = 16384
+#
+# Sized against the card rather than guessed. Qwen3-4B is 36 layers with 8 KV
+# heads and 128-wide keys and values, so at f16 one token costs
+# 36 * 8 * (128+128) * 2 = 144 KiB of KV. The 4:1 GQA ratio is doing the work
+# here; full MHA would be 576 KiB.
+#
+#   49152 tokens * 144 KiB = 6.75 GiB KV
+#   + 2.69 GiB weights (Q5_K_M, all 36 layers resident, n_gpu_layers = -1)
+#   + ~0.5 GiB compute buffers
+#   = ~10 GiB of the 4080's 16, leaving ~3 GiB of headroom for the desktop
+#     and for the graph to work in.
+#
+# 16384 was the previous value and it overcommitted: Ego and Id at the 6144
+# prompt cap plus three maintenance neuocytes at the same cap want 30720
+# tokens, and maintenance workers start from nothing rather than forking
+# Ego's prefix, so they are charged in full. This removes that squeeze.
+#
+# It does NOT give any single role more context to think in. That is capped by
+# `arbiter.max_prompt_tokens` below, which is a separate decision.
+n_ctx        = 49152
 n_seq_max    = 8
 n_batch      = 1024
 n_ubatch     = 512
