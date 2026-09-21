@@ -26,6 +26,7 @@ from .sandbox import SandboxLimits
 from .store.events import EventKind
 from .filespace import decode_exact_text
 from .tools import (ToolCallRequest, bounded_tool_result,
+                    redact_arguments as _redact,
                     build_neuocyte_registry)
 from .waking import wake_owner_of_work
 from .store.writer import Mutation
@@ -40,19 +41,6 @@ MAX_PROMOTED_BYTES = 16 * 1024 * 1024
 # Tool arguments are model-generated and can carry a whole file. The event
 # log keeps the shape and a digest, not the payload; the payload lives in
 # the sandbox, which is where it belongs.
-MAX_LOGGED_ARG_CHARS = 500
-
-
-def _redact(arguments: dict) -> dict:
-    out = {}
-    for k, v in arguments.items():
-        if isinstance(v, str) and len(v) > MAX_LOGGED_ARG_CHARS:
-            out[k] = {"truncated": True, "chars": len(v),
-                      "sha256": sha256_hex(v.encode("utf-8", "replace")),
-                      "head": v[:MAX_LOGGED_ARG_CHARS]}
-        else:
-            out[k] = v
-    return out
 
 
 def build(sup: "Supervisor") -> dict[str, Any]:  # noqa: C901

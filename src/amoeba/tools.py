@@ -19,6 +19,7 @@ from dataclasses import dataclass, field
 from typing import Any, Callable
 
 from .errors import InvalidInput
+from .ids import sha256_hex
 
 
 MAX_TOOL_RESULT_CHARS = 2000
@@ -458,3 +459,28 @@ def build_neuocyte_registry(sup: Any, *, work_id: str, neuocyte_id: str,
         timeout_seconds=30.0, mutates_state=True,
     ))
     return reg
+
+
+#: How much of a string argument reaches the record before it is
+#: replaced by its digest. Unchanged from where this policy used to
+#: live; moving it must not move the behaviour.
+MAX_LOGGED_ARG_CHARS = 500
+
+
+def redact_arguments(arguments: dict) -> dict:
+    """Bound what an argument contributes to the record.
+
+    One redaction policy, in the module every caller already
+    imports. It was private to `harness_api` while the role tool
+    path needed the same rule -- and a second copy of a redaction
+    policy is a second answer to "what may be written down".
+    """
+    out = {}
+    for k, v in arguments.items():
+        if isinstance(v, str) and len(v) > MAX_LOGGED_ARG_CHARS:
+            out[k] = {"truncated": True, "chars": len(v),
+                      "sha256": sha256_hex(v.encode("utf-8", "replace")),
+                      "head": v[:MAX_LOGGED_ARG_CHARS]}
+        else:
+            out[k] = v
+    return out

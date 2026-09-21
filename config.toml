@@ -52,7 +52,6 @@ max_prompt_tokens        = 6144
 max_completion_tokens    = 512
 neuocyte_wall_seconds      = 180.0
 neuocyte_token_budget      = 512
-neuocyte_max_age_seconds   = 900.0
 lease_seconds            = 90.0
 user_weight              = 0.7
 maintenance_weight       = 0.3

@@ -1560,3 +1560,55 @@ def test_spans_from_another_session_are_never_evictable(mind):
     assert len(mailbox.settled_spans(mind.db.conn, "ego", "sess_old")) == 1
 
 
+
+
+def test_a_role_tool_invocation_is_on_the_record(mind):
+    """A neuocyte's tool calls emit three events; a role's emitted none.
+
+    The effects were always recorded by the verbs themselves, so nothing was
+    lost about what changed. What was missing was the reaching: "what did Ego
+    try this turn, and what did the Harness refuse" was answerable for a
+    disposable fenced worker and not for the persistent mind that governs it.
+
+    Refusals matter more than executions here. A role repeatedly reaching for
+    something it is not offered is a fact about the organism, and it used to
+    be visible only in whatever the model said afterwards.
+    """
+    from amoeba import turn_api
+    from amoeba.store.events import read_events
+
+    class _Sup:
+        def __init__(self) -> None:
+            self.mind = mind
+            self.cfg = mind.cfg
+            self.log = __import__("logging").getLogger("test")
+
+        def methods(self):
+            return {"ego_request_work": lambda **kw: {"admitted": []}}
+
+        def note_trigger(self, role): return None
+
+        def next_heartbeat(self, role): return None
+
+    verbs = turn_api.build(_Sup())
+    _queue(mind, "ego", summary="a request")
+    turn = _claim(mind, "ego")
+
+    verbs["role_tool_invoke"](turn_id=turn["turn_id"], name="ego_request_work",
+                              arguments={"objective": "look into it"})
+    verbs["role_tool_invoke"](turn_id=turn["turn_id"], name="system_pulse",
+                              arguments={})
+
+    recorded = [e for e in read_events(mind.db.conn)
+                if e.kind == "role.tool_invoked"]
+    assert len(recorded) == 2, f"role invocations were not recorded: {recorded}"
+
+    import json
+    bodies = [json.loads(e.payload_inline) if e.payload_inline
+              else mind.blobs.get_json(e.payload_sha256) for e in recorded]
+    by_tool = {b["tool"]: b for b in bodies}
+    assert by_tool["ego_request_work"]["accepted"] is True
+    assert by_tool["ego_request_work"]["role"] == "ego"
+    # The refusal is the one worth having.
+    assert by_tool["system_pulse"]["accepted"] is False
+    assert "not a capability offered" in by_tool["system_pulse"]["reason"]

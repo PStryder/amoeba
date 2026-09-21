@@ -30,7 +30,8 @@ from typing import TYPE_CHECKING, Any
 from . import mailbox
 from .errors import InvalidInput, NotFound
 from .scopes import model_facing_verbs
-from .tools import bounded_tool_result
+from .tools import bounded_tool_result, redact_arguments as _redact
+from .store.events import EventKind
 from .store.writer import Mutation
 
 if TYPE_CHECKING:
@@ -197,26 +198,54 @@ def build(sup: "Supervisor") -> dict[str, Any]:  # noqa: C901
         capability boundary is unchanged: this narrows what a role may do, and
         widens nothing.
         """
+        def _recorded(outcome: dict[str, Any], *, role_name: str | None = None
+                      ) -> dict[str, Any]:
+            """Put this invocation on the record, then return it unchanged.
+
+            Refusals matter as much as executions, and arguably more: a role
+            repeatedly reaching for something it is not offered is a fact
+            about the organism, and it was previously visible only in whatever
+            the model happened to say afterwards.
+
+            Best effort. A capability call is not failed because its record
+            could not be written -- that would lose the act to protect the
+            note about it -- but the failure is logged rather than swallowed.
+            """
+            try:
+                mind.writer.apply(
+                    lambda m: m.emit(EventKind.ROLE_TOOL_INVOKED, {
+                        "turn_id": turn_id, "role": role_name,
+                        "tool": name, "accepted": bool(outcome.get("accepted")),
+                        "reason": outcome.get("reason"),
+                        "arguments": _redact(arguments or {}),
+                    }),
+                    actor=role_name or "harness", bump_version=False)
+            except Exception:  # noqa: BLE001
+                sup.log.debug("could not record the role tool invocation",
+                              exc_info=True)
+            return outcome
+
         row = mind.db.conn.execute(
             "SELECT role, status, operation_id FROM role_turns"
             " WHERE turn_id = ?", (turn_id,)).fetchone()
         if row is None:
-            return {"accepted": False, "result": None,
-                    "reason": "no such turn"}
+            return _recorded({"accepted": False, "result": None,
+                              "reason": "no such turn"})
         if row["status"] != "running":
-            return {"accepted": False, "result": None,
-                    "reason": (f"turn {turn_id} is {row['status']}; the "
-                               "organism has moved on and this turn can no "
-                               "longer act")}
+            return _recorded({"accepted": False, "result": None,
+                              "reason": (f"turn {turn_id} is {row['status']}; the "
+                                         "organism has moved on and this turn can no "
+                                         "longer act")}, role_name=row["role"])
         role = row["role"]
         if name not in model_facing_verbs(role):
-            return {"accepted": False, "result": None,
-                    "reason": (f"{name!r} is not a capability offered to "
-                               f"{role}")}
+            return _recorded({"accepted": False, "result": None,
+                              "reason": (f"{name!r} is not a capability offered to "
+                                         f"{role}")}, role_name=role)
         handler = sup.methods().get(name)
         if handler is None:
-            return {"accepted": False, "result": None,
-                    "reason": f"{name!r} is not a dispatchable verb"}
+            return _recorded({"accepted": False, "result": None,
+                              "reason": f"{name!r} is not a dispatchable verb"},
+                             role_name=role)
         args = dict(arguments or {})
         # What a role does during a turn is accountable to the operation that
         # caused the turn. The role cannot supply this -- `operation_id` is
@@ -247,8 +276,9 @@ def build(sup: "Supervisor") -> dict[str, Any]:  # noqa: C901
         except Exception as exc:  # noqa: BLE001
             # Reported back as a failed call rather than killing the turn: the
             # model may well be able to proceed without it.
-            return {"accepted": False, "result": None,
-                    "reason": f"{type(exc).__name__}: {exc}"[:500]}
+            return _recorded({"accepted": False, "result": None,
+                              "reason": f"{type(exc).__name__}: {exc}"[:500]},
+                             role_name=role)
         # Bounded here rather than in the role process: this is the side
         # that can store what does not fit, and a digest named by a notice has
         # to be a digest something actually holds.
@@ -262,11 +292,11 @@ def build(sup: "Supervisor") -> dict[str, Any]:  # noqa: C901
             return digest
 
         bounded = bounded_tool_result(result, store=_store)
-        return {"accepted": True, "result": result, "reason": None,
+        return _recorded({"accepted": True, "result": result, "reason": None,
                 "result_text": bounded["text"],
                 "result_truncated": bounded["truncated"],
                 "result_chars": bounded["chars"],
-                "result_sha256": bounded["sha256"]}
+                          "result_sha256": bounded["sha256"]}, role_name=role)
 
     # ==================================================================
     # Queueing: the Harness noticing that something happened

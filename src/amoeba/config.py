@@ -41,8 +41,6 @@ class BackendConfig:
     flash_attn: bool = True
     type_k: str = "f16"
     type_v: str = "f16"
-    seed: int = 1234
-    warn_if_fake: bool = True
 
 
 @dataclass(slots=True)
@@ -79,9 +77,12 @@ class ArbiterConfig:
     # freely. It exists because a prompt that fits the pool exactly has left
     # nowhere for its own answer to go.
     kv_admission_reserve_fraction: float = 0.15
+    # The only bound on a worker's life. There was a second setting,
+    # `neuocyte_max_age_seconds`, which nothing read and which said 900
+    # while this said 180 -- two numbers for one fact, and the one an
+    # operator could see was the wrong one.
     neuocyte_wall_seconds: float = 180.0
     neuocyte_token_budget: int = 2048
-    neuocyte_max_age_seconds: float = 900.0
     lease_seconds: float = 90.0
     # Tool turns per neuocyte. One of three independent bounds on the tool
     # loop, alongside the token budget and the wall-clock deadline; a model
@@ -241,7 +242,6 @@ class RoleConfig:
     # the whole of the default pool; the real numbers live in config.toml
     # beside the `n_ctx` they have to fit inside.
     max_context_tokens: int = 6144
-    max_turns_resident: int = 40
 
 
 @dataclass(slots=True)
