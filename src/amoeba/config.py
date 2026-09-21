@@ -83,6 +83,50 @@ class SandboxConfig:
 
 
 @dataclass(slots=True)
+class BatchingConfig:
+    """Grouping concurrent generations into one decode step.
+
+    Deliberately has no wait: an aggregator that pauses for company charges
+    every request that pause even when nothing else is running. Batches here
+    form only from requests that were already waiting, so the idle path is
+    exactly as fast as it was before.
+    """
+
+    enabled: bool = True
+
+    # Most sessions decoded together. A ceiling rather than a target: the
+    # engine holds one KV cache and a batch that is too wide starts evicting.
+    max_batch: int = 8
+
+
+@dataclass(slots=True)
+class RetentionConfig:
+    """How long the operational working set is kept.
+
+    Not how long the organism remembers: the event log, the receipts and every
+    evidentiary table are outside this policy entirely. This governs
+    `role_triggers` and `role_turns`, which are an index into the record
+    rather than the record.
+
+    The default is deliberately long. Pruning buys very little here -- the
+    growth is tens of megabytes a year -- and the cost of a window that is too
+    short is an operator investigating an incident and finding the turns gone.
+    """
+
+    enabled: bool = True
+
+    # Consumed triggers and closed turns older than this are forgotten.
+    # Ninety days: long enough that any investigation worth doing has already
+    # happened, short enough that the working views stay small.
+    working_set_seconds: float = 90.0 * 24 * 3600.0
+
+    # How often the Harness looks. Rarely: this is housekeeping, and a sweep
+    # that finds nothing should be cheap and infrequent rather than cheap and
+    # constant.
+    sweep_seconds: float = 6.0 * 3600.0
+
+
+@dataclass(slots=True)
 class SchedulerConfig:
     """When a persistent role gets another bounded turn.
 
@@ -201,6 +245,8 @@ class Config:
     backend: BackendConfig = field(default_factory=BackendConfig)
     arbiter: ArbiterConfig = field(default_factory=ArbiterConfig)
     scheduler: SchedulerConfig = field(default_factory=SchedulerConfig)
+    retention: "RetentionConfig" = field(default_factory=lambda: RetentionConfig())
+    batching: "BatchingConfig" = field(default_factory=lambda: BatchingConfig())
     sandbox: SandboxConfig = field(default_factory=SandboxConfig)
     filespace: FilespaceConfig = field(default_factory=FilespaceConfig)
     homeostasis: "HomeostasisSettings" = field(default_factory=lambda: HomeostasisSettings())

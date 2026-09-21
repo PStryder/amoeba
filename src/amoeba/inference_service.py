@@ -17,6 +17,7 @@ import argparse
 import json
 import os
 import signal
+import queue
 import threading
 import time
 from pathlib import Path
@@ -24,7 +25,7 @@ from typing import Any, Sequence
 
 from .arbiter import Arbiter
 from .config import Config, load_config
-from .errors import BackendUnavailable, MindError
+from .errors import BackendUnavailable, CapabilityUnsupported, MindError
 from .logging_setup import get_logger, setup_logging
 from .rpc import RpcServer, read_or_create_token
 
@@ -43,6 +44,12 @@ class InferenceService:
         self._stats = {"generate_calls": 0, "tokens_generated": 0, "errors": 0,
                        "batched_calls": 0, "forks": 0, "recomputes": 0}
         self._stop = threading.Event()
+        # One dispatcher thread owns the backend; callers wait on their own
+        # event. FIFO, so a batch is a prefix of the queue and there is no
+        # ordering anybody can influence.
+        self._pending: "queue.Queue[dict[str, Any]]" = queue.Queue()
+        self._batch_lock = threading.Lock()
+        self._dispatcher: threading.Thread | None = None
 
     def _bump_incarnation(self) -> int:
         n = 0
@@ -236,26 +243,131 @@ class InferenceService:
                  top_p: float = 0.95, top_k: int = 40, seed: int = 1234,
                  stop_strings: Sequence[str] = (), deadline: float | None = None
                  ) -> dict[str, Any]:
+        """One generation, possibly decoded alongside others.
+
+        The caller's thread waits here exactly as it did when this called the
+        backend directly. What changed is that a single dispatcher owns the
+        backend, so several waiting requests can share one decode step instead
+        of queueing behind each other's locks.
+        """
         sess = self.backend.get_session(session_id)
         clamp = self.arbiter.clamp_inference(
             prompt_tokens=sess.n_past, max_tokens=max_tokens, deadline=deadline
         )
-        t0 = time.perf_counter()
+        req: dict[str, Any] = {
+            "session_id": session_id, "clamp": clamp, "temperature": temperature,
+            "top_p": top_p, "top_k": top_k, "seed": seed,
+            "stop_strings": list(stop_strings), "done": threading.Event(),
+            "queued": time.perf_counter(), "result": None, "error": None,
+        }
+        req["started"] = req["queued"]
+        self._ensure_dispatcher()
+        self._pending.put(req)
+        req["done"].wait()
+        if req["error"] is not None:
+            raise req["error"]
+        return req["result"]
+
+
+    # ==================================================================
+    # Grouping concurrent generations
+    # ==================================================================
+    def _ensure_dispatcher(self) -> None:
+        """Start the one thread that talks to the backend, on first use."""
+        if getattr(self, "_dispatcher", None) is not None:
+            return
+        with self._batch_lock:
+            if getattr(self, "_dispatcher", None) is not None:
+                return
+            self._dispatcher = threading.Thread(
+                target=self._dispatch_loop, name="inference-batcher",
+                daemon=True)
+            self._dispatcher.start()
+
+    def _dispatch_loop(self) -> None:
+        """Take the first waiting request, then everything else already there.
+
+        Never waits for company. The block below is on the *first* request
+        only; once it has one, it drains whatever else is queued and goes. So
+        a batch forms exactly when there was contention and never manufactures
+        any.
+        """
+        while not self._stop.is_set():
+            try:
+                first = self._pending.get(timeout=0.25)
+            except queue.Empty:
+                continue
+            group = [first]
+            limit = max(1, int(self.cfg.batching.max_batch))
+            while len(group) < limit:
+                try:
+                    group.append(self._pending.get_nowait())
+                except queue.Empty:
+                    break
+            self._run_group(group)
+
+    def _run_group(self, group: list[dict[str, Any]]) -> None:
+        if len(group) > 1 and self.cfg.batching.enabled:
+            try:
+                self._run_batched(group)
+                return
+            except CapabilityUnsupported:
+                # A backend that cannot batch is not an error; it is a backend
+                # that cannot batch. Everything still runs, one at a time.
+                pass
+            except MindError:
+                # One caller's failure must not become eight. Re-run the group
+                # serially so the error lands on the request that caused it.
+                self.log.debug("batched generate failed; running the group "
+                               "one at a time", exc_info=True)
+        for req in group:
+            self._run_one(req)
+
+    def _run_batched(self, group: list[dict[str, Any]]) -> None:
+        requests = [{"session_id": r["session_id"],
+                     "max_tokens": r["clamp"]["max_tokens"],
+                     "stop_strings": list(r["stop_strings"])}
+                    for r in group]
+        head = group[0]
+        results = self.backend.generate_batched(
+            requests, temperature=head["temperature"], seed=head["seed"],
+            deadline=head["clamp"]["deadline"])
+        self._stats["batched_calls"] += 1
+        for req in group:
+            res = results.get(req["session_id"])
+            if res is None:
+                self._run_one(req)
+                continue
+            req["result"] = self._finish(req, res, batch_size=len(group))
+            req["done"].set()
+
+    def _run_one(self, req: dict[str, Any]) -> None:
         try:
             res = self.backend.generate(
-                session_id, max_tokens=clamp["max_tokens"], temperature=temperature,
-                top_p=top_p, top_k=top_k, seed=seed, stop_strings=list(stop_strings),
-                deadline=clamp["deadline"],
-            )
-        except MindError:
+                req["session_id"], max_tokens=req["clamp"]["max_tokens"],
+                temperature=req["temperature"], top_p=req["top_p"],
+                top_k=req["top_k"], seed=req["seed"],
+                stop_strings=list(req["stop_strings"]),
+                deadline=req["clamp"]["deadline"])
+        except MindError as exc:
             self._stats["errors"] += 1
-            raise
+            req["error"] = exc
+            req["done"].set()
+            return
+        req["result"] = self._finish(req, res, batch_size=1)
+        req["done"].set()
+
+    def _finish(self, req: dict[str, Any], res: Any, *, batch_size: int
+                ) -> dict[str, Any]:
         self._stats["generate_calls"] += 1
         self._stats["tokens_generated"] += res.completion_tokens
         out = res.to_dict()
-        out["queue_delay_seconds"] = 0.0
-        out["service_seconds"] = time.perf_counter() - t0
-        out["budget_clamped"] = clamp["clamped"]
+        # Measured, not assumed: how long this request sat behind others is
+        # exactly what a caller needs to tell contention from slow inference.
+        out["queue_delay_seconds"] = req["started"] - req["queued"]
+        out["service_seconds"] = time.perf_counter() - req["started"]
+        out["budget_clamped"] = req["clamp"]["clamped"]
+        out["batch_size"] = batch_size
         out["model_generation"] = self.backend.model_generation
         out["is_simulated"] = bool(getattr(self.backend, "is_simulated", False))
         return out

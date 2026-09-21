@@ -842,31 +842,99 @@ def test_input_arriving_during_an_ego_turn_is_queued_not_injected(tmp_path: Path
         stack.stop()
 
 
-def test_inputs_arriving_together_are_bundled_into_one_turn(tmp_path: Path):
-    """A burst before a boundary becomes one bundle, not one turn each.
+def _hold_a_turn_open(stack) -> dict:
+    """Claim Ego's turn before Ego does, so the next boundary is ours to pick.
 
-    The counterpart to the test above. Ego waking once for four things that
-    happened while it was busy is the point of bundling; waking four times
-    would be the thrash it exists to avoid.
+    Ego polls, so a burst queued "while it is busy" is a transient state a
+    sampler can easily miss. Holding a turn open makes the boundary
+    deterministic: everything queued now is still queued when the turn closes.
+    """
+    for _ in range(40):
+        stack.call("operator_message_role", role="ego", message="wake up")
+        try:
+            claimed = stack.call("role_claim_turn", role="ego", incarnation=1,
+                                 profile_ref="ego@1")
+        except Exception:  # noqa: BLE001
+            claimed = {"turn": None}
+        if claimed.get("turn"):
+            return claimed["turn"]
+        _wait_for(lambda: stack.call("role_mailbox",
+                                     role="ego")["ego"]["queued"] == 0,
+                  timeout=30.0)
+    raise AssertionError("could not hold a turn open for Ego")
+
+
+def test_a_burst_of_requests_is_not_bundled_into_one_turn(tmp_path: Path):
+    """I81, against the live stack: two questions never share one turn.
+
+    This test used to assert the opposite, and was correct to, while an answer
+    belonged to the turn that produced it. It is the evil twin now: three
+    questions in one turn share its single answer, so two of the three callers
+    receive a reply to somebody else's question.
+
+    Bundling did not go away -- see the notices test below. It stopped
+    applying to triggers that are owed a reply.
     """
     stack = start_stack(tmp_path)
     try:
+        held = _hold_a_turn_open(stack)
         submitted = [
-            stack.call("ego_converse", message=f"message {i}",
+            stack.call("ego_converse", message=f"question {i}",
                        wait=False)["result"]["trigger_id"]
             for i in range(3)]
+        stack.call("role_complete_turn", turn_id=held["turn_id"],
+                   stop_reason="model_stop")
 
-        def all_consumed():
+        def each_in_its_own_turn():
+            placed = {}
             for t in stack.call("role_turns", role="ego")["turns"]:
                 d = stack.call("role_turn", turn_id=t["turn_id"])
+                for x in d["triggers"]:
+                    if x["trigger_id"] in submitted:
+                        placed[x["trigger_id"]] = t["turn_id"]
+            return placed if len(placed) == len(submitted) else None
+
+        placed = _wait_for(each_in_its_own_turn, timeout=180.0)
+        assert placed, "the queued questions were never all given turns"
+        assert len(set(placed.values())) == len(submitted), (
+            "two requests shared a turn, so they would share its answer: "
+            f"{placed}")
+    finally:
+        stack.stop()
+
+
+def test_a_burst_of_notices_is_still_bundled_into_one_turn(tmp_path: Path):
+    """Bundling is alive; it applies to what is not owed a reply.
+
+    Ego waking once for three things that happened while it was busy is the
+    point of bundling, and waking three times is the thrash it exists to
+    avoid. An operator notice is owed no reply, so nothing is shared by
+    bundling it -- which is the distinction the whole tier turns on.
+    """
+    stack = start_stack(tmp_path)
+    try:
+        held = _hold_a_turn_open(stack)
+        for i in range(3):
+            stack.call("operator_message_role", role="ego",
+                       message=f"notice {i}")
+        queued = {t["trigger_id"] for t
+                  in stack.call("role_mailbox", role="ego")["ego"]["next_triggers"]}
+        assert len(queued) >= 3, "the notices were not queued behind the turn"
+        stack.call("role_complete_turn", turn_id=held["turn_id"],
+                   stop_reason="model_stop")
+
+        def bundled():
+            for t in stack.call("role_turns", role="ego")["turns"]:
+                if t["turn_id"] == held["turn_id"]:
+                    continue
+                d = stack.call("role_turn", turn_id=t["turn_id"])
                 got = {x["trigger_id"] for x in d["triggers"]}
-                if set(submitted) <= got:
+                if len(queued & got) >= 3:
                     return t
             return None
 
-        turn = _wait_for(all_consumed, timeout=90.0)
-        assert turn, "the burst was never bundled into a single turn"
-        assert turn["trigger_count"] >= 3
+        turn = _wait_for(bundled, timeout=90.0)
+        assert turn, "three notices were not bundled into one turn"
     finally:
         stack.stop()
 
@@ -1095,5 +1163,115 @@ def test_an_answered_interaction_carries_its_answer(tmp_path: Path):
                          client_id=client)
         result = (out.get("output") or {}).get("result") or {}
         assert (result.get("answer") or "").strip(), out.get("output")
+    finally:
+        stack.stop()
+
+
+# ---------------------------------------------------------------------------
+# The external loop: attachments in, results out, neither crossing clients
+# ---------------------------------------------------------------------------
+def _submit_with_attachment(stack, *, client, text, filename, body):
+    import base64
+
+    ing = stack.call("io_attach_input", filename=filename,
+                     content_base64=base64.b64encode(body.encode()).decode(),
+                     client_id=client, media_type="text/plain")
+    sub = stack.call("io_submit", text=text, client_id=client,
+                     input_ids=[ing["input_id"]])
+    return ing["input_id"], sub["interaction_id"]
+
+
+def _turn_answering(stack, needle: str):
+    """The Ego turn whose bundle contains this text."""
+    def found():
+        for t in stack.call("role_turns", role="ego")["turns"]:
+            d = stack.call("role_turn", turn_id=t["turn_id"])
+            # The rendered bundle lives in the stored blob, not on the row:
+            # `role_turn` resolves it under "bundle".
+            text = ((d.get("bundle") or {}).get("text")) or ""
+            if needle in text:
+                d["bundle_text"] = text
+                return d
+        return None
+    return _wait_for(found, timeout=120.0)
+
+
+def test_an_attachment_reaches_the_turn_and_can_be_read(tmp_path: Path):
+    """The whole point: a client sends a file and the organism can read it.
+
+    Both halves of this existed and nothing joined them -- the bytes were
+    stored with exact provenance and then dropped when the worker called
+    Ego with the text alone.
+    """
+    stack = start_stack(tmp_path)
+    try:
+        input_id, _ixn = _submit_with_attachment(
+            stack, client="alice", text="what does the log say?",
+            filename="server.log", body="ERROR: disk full at 03:14")
+
+        turn = _turn_answering(stack, "what does the log say?")
+        assert turn, "the request never reached a turn"
+        assert "server.log" in turn["bundle_text"], "the attachment was not announced"
+
+        read = stack.call("ego_read_attachment", input_id=input_id,
+                          turn_id=turn["turn_id"])
+        assert read["filename"] == "server.log"
+        assert "disk full" in read["text"], "the contents did not come back"
+    finally:
+        stack.stop()
+
+
+def test_ego_cannot_read_an_attachment_from_another_request(tmp_path: Path):
+    """The isolation claim, over the dispatcher rather than over a table.
+
+    Ego never names an interaction -- there is no parameter for it -- so the
+    only way to reach another client's file would be for the Harness to
+    resolve the wrong one. This asks for exactly that and requires a refusal.
+    """
+    stack = start_stack(tmp_path)
+    try:
+        _mine, _ = _submit_with_attachment(
+            stack, client="alice", text="my own question",
+            filename="mine.txt", body="alice's private notes")
+        theirs, _ = _submit_with_attachment(
+            stack, client="bob", text="a different question",
+            filename="theirs.txt", body="bob's private notes")
+
+        turn = _turn_answering(stack, "my own question")
+        assert turn, "the first request never reached a turn"
+
+        with pytest.raises(Exception) as exc:
+            stack.call("ego_read_attachment", input_id=theirs,
+                       turn_id=turn["turn_id"])
+        assert "no attachment by that id" in str(exc.value)
+    finally:
+        stack.stop()
+
+
+def test_ego_surfaces_a_result_to_the_client_that_asked(tmp_path: Path):
+    """`surface_result` finally has a caller, and it cannot pick the recipient.
+
+    Knowing a digest has never been authority to fetch it from outside. This
+    is the deliberate act that makes one specific thing reachable -- by the
+    interaction that asked, resolved from the turn.
+    """
+    stack = start_stack(tmp_path)
+    try:
+        input_id, interaction_id = _submit_with_attachment(
+            stack, client="alice", text="please surface something",
+            filename="in.txt", body="the input")
+        turn = _turn_answering(stack, "please surface something")
+        assert turn, "the request never reached a turn"
+
+        read = stack.call("ego_read_attachment", input_id=input_id,
+                          turn_id=turn["turn_id"])
+        out = stack.call("ego_surface_result", sha256=read["sha256"],
+                         turn_id=turn["turn_id"], filename="answer.txt")
+        assert out["sha256"] == read["sha256"]
+
+        listed = stack.call("io_output", interaction_id=interaction_id,
+                            client_id="alice")
+        assert any(r["sha256"] == read["sha256"]
+                   for r in listed["results"]), listed
     finally:
         stack.stop()

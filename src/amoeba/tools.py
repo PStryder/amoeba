@@ -20,6 +20,48 @@ from typing import Any, Callable
 
 from .errors import InvalidInput
 
+
+MAX_TOOL_RESULT_CHARS = 2000
+"""How much of a tool result is shown to the model.
+
+A bound, not a policy about what matters: the first N characters of a JSON
+document are whatever the serializer happened to emit first. What makes the
+bound safe is that exceeding it is *stated*, so a model reasoning from eight
+of twenty work items knows there are twelve more rather than concluding the
+list is complete.
+"""
+
+
+def bounded_tool_result(payload: Any, *, budget: int = MAX_TOOL_RESULT_CHARS,
+                        store: Callable[[str], str] | None = None
+                        ) -> dict[str, Any]:
+    """Serialize a tool result and, when it does not fit, say so.
+
+    `store` is given the full text and returns a digest for it. It is optional
+    only so this stays testable without a blob store; in the Harness it is
+    always supplied, because a truncation notice naming a digest that was
+    never stored would be worse than no notice at all.
+
+    The notice is phrased as an instruction because the model has a real
+    remedy available. It cannot read the stored copy -- no capability for that
+    exists on either cognitive path, deliberately -- but nearly every sense
+    takes a filter or a limit, so the useful thing to tell it is to ask again
+    more narrowly.
+    """
+    text = json.dumps(payload, default=str)
+    if len(text) <= budget:
+        return {"text": text, "truncated": False,
+                "chars": len(text), "sha256": None}
+    digest = store(text) if store is not None else None
+    where = (f" The whole result is stored as sha256 {digest}."
+             if digest else "")
+    notice = (f"\n\n[truncated: showing the first {budget} of {len(text)} "
+              f"characters.{where} Narrow the call -- a tighter filter, fewer "
+              f"items, a smaller range -- if you need the rest. Do not treat "
+              f"what is shown as the complete result.]")
+    return {"text": text[:budget] + notice, "truncated": True,
+            "chars": len(text), "sha256": digest}
+
 # A tool call is requested by emitting exactly this block.
 TOOL_CALL_RE = re.compile(
     r"<tool_call>\s*(?P<body>\{.*?\})\s*</tool_call>", re.DOTALL

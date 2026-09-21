@@ -67,6 +67,9 @@ AUTHORITY_ARGUMENTS = frozenset({
     # Identity and authority are facts about the authenticated connection, not
     # parameters. A model that could set these would be choosing who it is.
     "actor", "caller", "role", "scope", "client_id", "origin_actor",
+    # Which turn is asking is a fact about the claim the Harness granted. A
+    # model that could name a turn could name somebody else's.
+    "turn_id",
     "from_role", "requested_by", "agent_id", "neuocyte_id", "operation_id",
     "mutation_id", "fencing_token", "_allow_root",
 })
@@ -319,8 +322,19 @@ class RoleProcess:
                     "error": None}
 
     def _feed_tool_result(self, name: str, res: dict[str, Any]) -> None:
+        """Append the outcome to the session so the model can use it.
+
+        The bounding is the Harness's, not this process's. It used to cut the
+        serialized result at 2000 characters and say nothing, so a model that
+        asked for twenty things and was shown eight had no way to know the
+        other twelve existed.
+        """
         if res.get("accepted"):
-            body = json.dumps(res.get("result"), default=str)[:2000]
+            body = res.get("result_text")
+            if body is None:
+                # A caller that predates the bounded contract. Say that the
+                # size is unknown rather than silently cutting again.
+                body = json.dumps(res.get("result"), default=str)
         else:
             body = f"refused: {res.get('reason')}"
         rendered = self.inf.call(
@@ -723,17 +737,26 @@ class EgoProcess(RoleProcess):
         so the record carries Ego's outward cognition rather than every
         housekeeping wake. Id audits conclusions against evidence, and a
         conclusion nobody claimed is noise in that audit.
+
+        Which requests those are is the Harness's finding, walked from the
+        durable record. Inferring it from the kinds in this turn's own bundle
+        missed every continuation -- and a continuation is where a long
+        thought actually produces its answer.
         """
         text = strip_tool_calls(out.get("text", "")).strip()
-        answered = [t for t in turn.get("triggers", [])
-                    if t["kind"] in ("user_input", "operator_message")]
+        # Whether this turn owes an answer is the Harness's finding, not a
+        # guess from trigger kinds. A thought continued across turns produces
+        # its answer in the *last* one, whose bundle holds a continuation
+        # trigger and no request at all -- so kind-sniffing recorded no
+        # conclusion for exactly the turns that concluded something.
+        answered = list(turn.get("answering") or [])
         conclusion_id = None
         if text and answered:
             try:
                 res = self.sup.call(
                     "record_conclusion", claim=text[:2000], produced_by="ego",
                     evidence=[{"note": f"turn {turn['turn_id']}"}]
-                    + [{"note": f"trigger {t['trigger_id']}"} for t in answered],
+                    + [{"note": f"trigger {tid}"} for tid in answered],
                     model_identity=out.get("model_generation"),
                     # The operation that asked. Without it a conclusion cannot
                     # be resolved back to the request that produced it, and
@@ -743,7 +766,7 @@ class EgoProcess(RoleProcess):
             except Exception:  # noqa: BLE001
                 self.log.debug("could not record conclusion", exc_info=True)
         return {"answer": text[:4000], "conclusion_id": conclusion_id,
-                "answered_triggers": [t["trigger_id"] for t in answered],
+                "answered_triggers": list(answered),
                 "tool_calls": out.get("tool_calls", []),
                 "tool_requests": [{"name": c.get("tool"),
                                    "accepted": c.get("accepted")}

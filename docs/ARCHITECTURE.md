@@ -774,7 +774,7 @@ is not consumption either.
 `test_queued_is_not_seen`, `test_trigger_order_is_deterministic_and_bundled`,
 `test_a_burst_larger_than_the_bundle_leaves_the_rest_queued`,
 `test_the_bundle_preserves_every_member_identity`,
-`test_inputs_arriving_together_are_bundled_into_one_turn`
+`test_a_burst_of_notices_is_still_bundled_into_one_turn`
 
 **I66. Turn-end reasons are first class.** `model_stop`, `max_output_tokens`,
 `token_budget_exhausted`, `tool_turn_limit_reached`, `deadline_reached`,
@@ -846,40 +846,180 @@ the answer across however many continuation turns the thought needs, and fails
 truthfully if it never arrives rather than reporting silence as a result.
 → `test_an_unanswered_interaction_is_not_reported_complete`
 
-**I76. A role reads the request, not a preview of it.** The trigger summary
-is a bounded label for operator listings; the body is what was actually said.
-Rendering only the summary meant Ego answered questions it was never fully
-asked — and a request's constraints sit at its end far more often than in its
-first 400 characters. The body is rendered from the content store with a
-stated budget, and when that budget truncates, the rendering says so and names
-the digest holding the rest.
-→ `test_a_turn_shows_the_request_not_a_preview`,
-`test_an_oversized_body_says_that_it_was_truncated`,
-`test_a_trigger_with_no_payload_still_renders`
+**I80. An answer belongs to the request that asked for it.** A turn is a unit
+of work, not a unit of accountability. Marking the *turn* answered let one
+reply discharge every request that happened to share it, so the answer is
+written onto the request, by trigger id, and a caller waits for its own. A
+thought that takes four continuation turns answers the request that started
+it, because the answer walks the continuation chain back to the question.
+→ `test_each_request_gets_its_own_answer`,
+`test_a_continued_thought_answers_the_request_that_started_it`,
+`test_a_requeued_request_is_owed_its_answer_again`
 
-**I77. An adverse audit is never recorded as a favourable one.** Verdicts are
-matched as whole words. Substring matching read `unsupported` as `supported` —
-the word contains it — so an adverse audit became a favourable durable verdict
-*and* suppressed the disagreement it should have opened, because that branch
-tests for `unsupported`. An answer naming more than one verdict is treated as
-unstated rather than resolved by ordering: a model echoing the menu back has
-not reached a judgement.
-→ `test_an_adverse_audit_is_not_recorded_as_a_favourable_one`
+**I81. No result from one interaction satisfies another merely because their
+triggers shared a turn.** A turn may consume many triggers; an interaction
+becomes complete only when a terminal result explicitly addressed to it has
+been durably produced. Two answer-bearing requests therefore never occupy one
+turn, and a turn continuing an unanswered thought admits no further request at
+all -- otherwise the newcomer is satisfied by the older thought's reply
+through the back door of the continuation chain.
+→ `test_two_requests_never_share_one_turn`,
+`test_a_continuation_does_not_adopt_a_new_request`,
+`test_a_burst_of_requests_is_not_bundled_into_one_turn`
 
-**I78. An effector whose target is a role stays callable.** `role` means "who
-is asking" everywhere here, so the tool loop strips it — which made two Id
-effectors permanently uncallable, because for them `role` named the *target*.
-The collision was the defect; the parameter is `target_role`, and the
-authority strip is unchanged.
-→ `test_id_can_actually_call_the_effectors_that_name_a_target`
+**I82. Reply routing and information ownership are different questions.**
+`expects_answer` says who is owed a reply. It says nothing about whose
+information a trigger carries -- so a work result belonging to one
+interaction could ride into another's turn, informing a stranger's answer
+while both rules above stayed satisfied. Supporting evidence is scoped to the
+turn's lineage, and only an explicitly ambient trigger is seen by every
+lineage. Unowned is not ambient: "unrelated" must not become the default
+merely because nothing is owed a reply. What a continuation *is* given is its
+own evidence, because withholding that would make the rule about keeping a
+turn uninformed rather than about who is owed a reply.
+→ `test_evidence_from_another_interaction_does_not_ride_along`,
+`test_unowned_evidence_does_not_default_to_everyone`,
+`test_unowned_evidence_is_admitted_by_a_turn_that_owns_nothing`,
+`test_an_ambient_trigger_is_seen_by_any_lineage`,
+`test_a_continuation_still_receives_its_supporting_evidence`,
+`test_every_trigger_producer_declares_ownership`
 
-**I79. "Complete" means answered.** External input is queued and answered at a
-turn boundary. An interaction whose wait elapsed used to be marked complete
-with an empty answer — telling the client, permanently, that nothing was the
-organism's reply. The worker is asynchronous by construction, so it waits for
-the answer across however many continuation turns the thought needs, and fails
-truthfully if it never arrives rather than reporting silence as a result.
-→ `test_an_unanswered_interaction_is_not_reported_complete`
+**I83. A thought that ends without an answer says so.** A request whose turn
+stopped for any reason that is not an answer -- a tool budget, a context
+ceiling, an exhausted continuation chain, a crash -- is recorded as
+unanswerable rather than left forever pending or quietly marked done. The
+waiter is released with the reason. Silence reported as a result is the
+failure mode this whole tier exists to remove.
+→ `test_a_thought_that_ends_without_an_answer_says_so`,
+`test_an_exhausted_continuation_chain_releases_its_waiter`,
+`test_an_event_expects_no_answer`
+
+**I84. An existing database gains the columns a release adds.** The schema is
+applied with `CREATE TABLE IF NOT EXISTS`, which does nothing to a table that
+already exists -- so a release that adds a column ships an organism that
+starts, heartbeats, and fails on its first mailbox read. The migration
+inspects the live table rather than trusting a version number, runs before the
+schema script because the new indexes name the new columns, and defaults an
+old request to "owed nothing" rather than inventing an answer for it.
+→ `test_a_database_from_the_previous_release_gains_the_ownership_columns`,
+`test_the_upgrade_does_not_invent_answers_for_old_requests`
+
+**I85. Work delegated during a turn is accountable to that turn.** Scoping
+evidence by lineage only helps if evidence carries the right one. A role's
+tool call cannot supply its own operation -- `operation_id` is stripped from
+model-supplied arguments along with every other authority argument -- so the
+Harness supplies it from the turn, and a continuation keeps the operation it
+continues. Without either link, work delegated inside a thought comes back
+tagged with nothing and is held out of the very continuation that asked for
+it, which would have made lineage look like a bug rather than a boundary.
+→ `test_a_turns_operation_reaches_what_the_role_does`,
+`test_a_continuation_keeps_the_operation_it_continues`,
+`test_a_delegated_result_returns_to_the_thought_that_asked`,
+`test_the_harness_does_not_override_an_operation_the_caller_gave`
+
+**I86. A result the model cannot see whole says so.** A tool result was
+serialized and cut at a fixed length with nothing said, so a model that asked
+for twenty work items and was shown eight had no way to know the other twelve
+existed -- and would reason confidently from a truncated world. The same
+defect as I76, in the opposite direction. The Harness bounds the result,
+because it is the side that can store what does not fit and therefore name a
+digest something actually holds, and the notice says how much was withheld and
+what to do about it. The cognitive processes render what they are given and
+cut nothing: the limit used to live in both of them as a bare slice, free to
+drift from each other and to remove the notice at the last step.
+→ `test_a_truncated_tool_result_says_so_and_names_where_the_rest_is`,
+`test_the_copy_a_truncation_notice_names_is_really_there`,
+`test_a_truncation_notice_claims_no_digest_it_was_not_given`,
+`test_the_neuocyte_feeds_back_the_bounded_text_it_was_given`,
+`test_a_tool_result_that_fits_is_shown_whole`
+
+**I87. Evidence is never pruned; the working set is.** Retention here is a
+narrower question than usual, because most of this database is evidence and
+evidence is not a cache. The event chain, the receipts, conclusions, audits,
+disagreements, memory and the prompt library are listed explicitly as never
+pruned -- a list rather than a rule, because a rule invites the next person to
+reason their way to an exception. What is forgotten is `role_triggers` and
+`role_turns` past a window: an operational index into the record, not the
+record. Blob bytes are never reclaimed at all, because a digest is referenced
+from around twenty columns and from event payloads, and a collector that
+missed one source would delete content the chain points at. The footprint
+measures what such a collector would be reasoning about; that measurement can
+argue for building one later, which is a better basis than confidence.
+→ `test_pruning_touches_no_evidence_table`,
+`test_the_event_chain_still_verifies_after_pruning`,
+`test_the_footprint_reports_without_collecting`,
+`test_no_scope_can_prune`
+
+**I88. Nothing still in use is forgotten.** Age is not a reason to stop owing
+somebody a reply, so a request still awaiting an answer is never old enough --
+its row vanishing would leave the caller waiting on a trigger id that no
+longer exists, and be reported to them as a question that never existed. A
+running turn is the present whatever its timestamp says, and a turn wedged
+open for a week is exactly when somebody is investigating it. A turn a
+continuation still points at is kept, because `awaiting_answer` walks
+`parent_turn` to find the request that started a thought: prune the parent and
+the chain ends early, reintroducing by housekeeping the precise failure I80
+exists to remove.
+→ `test_a_request_still_owed_an_answer_is_never_old_enough`,
+`test_an_open_turn_is_never_pruned_however_old`,
+`test_a_turn_a_continuation_still_points_at_is_kept`,
+`test_an_old_consumed_trigger_and_its_closed_turn_are_forgotten`
+
+**I89. Ego chooses what crosses the external boundary, never whose.** A client
+can send files and can be sent results, and both routes are scoped to the
+interaction the current turn is answering -- resolved by the Harness from the
+turn, never named by Ego. There is no interaction parameter on either
+effector, so reaching another client's attachment or surfacing into another
+client's results is not refused so much as unsayable. That rests on I81: a
+turn holds at most one answer-bearing request, so "the interaction this turn
+is answering" is a single well-defined thing rather than a guess among
+several. Attachments are *named* in the bundle rather than inlined, because a
+role handed the bytes has no way to decline them, and a result becomes
+fetchable only by this deliberate act -- knowing a digest has never been
+authority to fetch it.
+→ `test_ego_cannot_read_an_attachment_from_another_request`,
+`test_an_attachment_reaches_the_turn_and_can_be_read`,
+`test_ego_surfaces_a_result_to_the_client_that_asked`,
+`test_a_request_tells_ego_what_was_sent_with_it`,
+`test_a_request_with_no_attachments_says_nothing_about_them`
+
+**I90. Batching changes throughput, never outcomes.** A grouped generation
+returns what a serial one would: the same text to the same caller, and a
+failure to the caller that caused it rather than to everyone decoding
+alongside them. A backend that cannot batch is not an error but a backend, so
+the fallback runs the group one at a time and everybody is still served --
+which matters more than the fast path, because it is the path every engine
+that is not llama.cpp takes. Batches form only from requests that were already
+waiting: the dispatcher blocks for the first one and then takes whatever is
+queued, so contention produces batches and an idle organism pays nothing for
+the machinery. The deterministic backend implements batching as a loop and
+says so in its docstring, because a truthful stand-in that lets the scheduling
+be tested beats a principled refusal that leaves the live path exercised only
+on a GPU.
+→ `test_one_broken_session_does_not_fail_the_others`,
+`test_a_backend_that_cannot_batch_still_serves_everyone`,
+`test_concurrent_generations_are_decoded_together`,
+`test_a_lone_generation_is_not_delayed_waiting_for_company`,
+`test_the_deterministic_backend_batches_without_claiming_to_measure`
+
+**I91. A specialisation nothing can be born into does not exist.** A specialist
+profile could be authored, versioned, approved, selected and advertised, and
+neuocyte birth bound the base namespace regardless, because it was derived
+from `work_class` alone. Ego now asks for a specialisation when it requests
+the work; the library governs whether that profile exists and is approved; the
+Harness records which one was actually bound. Ego names a *leaf*, never a
+namespace, so a specialisation cannot reach sideways into the other role's
+family tree or upward to a root -- that is unsayable rather than refused. An
+unavailable specialisation falls back to the base, because refusing a job
+because a prompt was missing is a worse failure than doing it on the baseline,
+and the fallback is recorded on the work item: one that quietly stopped
+applying otherwise looks exactly like one nobody asked for.
+→ `test_a_requested_specialisation_is_bound`,
+`test_an_unapproved_specialisation_falls_back_and_says_so`,
+`test_maintenance_work_specialises_under_id`,
+`test_ego_cannot_name_a_namespace_only_a_leaf`,
+`test_a_specialisation_reaches_the_work_item`,
+`test_work_with_no_specialisation_binds_the_base_directly`
 
 **I73. A role is never wedged by a turn it did not close.** One open turn per
 role is a database constraint, so a turn left running blocks every future turn

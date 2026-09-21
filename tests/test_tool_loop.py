@@ -437,3 +437,249 @@ def test_a_neuocyte_can_propose_an_artifact_but_not_promote_it(stack):
         assert "no such tool" in denied["reason"]
     finally:
         stack.call("cancel_work", work_id=work_id, reason="test")
+
+
+# ===========================================================================
+# A result the model cannot see whole says so
+# ===========================================================================
+def test_a_tool_result_that_fits_is_shown_whole(cfg):
+    """The bound is a ceiling, not a formatter. Nothing is added below it."""
+    from amoeba.tools import bounded_tool_result
+
+    out = bounded_tool_result({"state_version": 7})
+    assert out["truncated"] is False
+    assert out["sha256"] is None
+    assert out["text"] == '{"state_version": 7}'
+    assert "truncated" not in out["text"]
+
+
+def test_a_truncated_tool_result_says_so_and_names_where_the_rest_is(cfg):
+    """The defect was silence, so the test is about what the notice contains.
+
+    A model shown eight of twenty work items and told nothing will reason as
+    though the list is complete. It has to learn three things: that it was
+    cut, how much it did not see, and what to do about it.
+    """
+    from amoeba.tools import bounded_tool_result, MAX_TOOL_RESULT_CHARS
+
+    payload = {"items": [{"id": f"w{i}", "note": "x" * 80} for i in range(60)]}
+    digest = "a" * 64
+    out = bounded_tool_result(payload, store=lambda _text: digest)
+
+    assert out["truncated"] is True
+    assert out["chars"] > MAX_TOOL_RESULT_CHARS
+    assert out["sha256"] == digest
+    # what was shown, and that it was cut
+    assert out["text"].startswith('{"items":')
+    assert "truncated" in out["text"]
+    # how much was not shown -- both numbers, so the model can judge the gap
+    assert str(MAX_TOOL_RESULT_CHARS) in out["text"]
+    assert str(out["chars"]) in out["text"]
+    # where the rest is, and what to do
+    assert digest in out["text"]
+    assert "Narrow the call" in out["text"]
+    assert "complete result" in out["text"]
+
+
+def test_a_truncation_notice_claims_no_digest_it_was_not_given(cfg):
+    """Pointing at a copy nobody stored would be worse than saying nothing.
+
+    The notice is only as good as the thing it names, so without a store the
+    wording must not claim one exists.
+    """
+    from amoeba.tools import bounded_tool_result
+
+    out = bounded_tool_result({"items": ["y" * 100 for _ in range(60)]})
+    assert out["truncated"] is True
+    assert out["sha256"] is None
+    assert "stored as" not in out["text"]
+    assert "sha256" not in out["text"]
+    assert "Narrow the call" in out["text"]
+
+
+def test_the_copy_a_truncation_notice_names_is_really_there(mind):
+    """The digest has to resolve, against a real blob store.
+
+    A notice naming content nothing holds is theatre: an operator following
+    the digest finds nothing, and the model was told a comforting falsehood
+    about where its missing data went.
+    """
+    from amoeba.tools import bounded_tool_result
+
+    payload = {"items": [{"id": f"w{i}", "note": "z" * 80} for i in range(60)]}
+    out = bounded_tool_result(
+        payload, store=lambda text: mind.blobs.put(text.encode("utf-8")))
+
+    assert out["truncated"] is True and out["sha256"]
+    stored = mind.blobs.get(out["sha256"]).decode("utf-8")
+    assert len(stored) == out["chars"]
+    import json as _json
+    assert _json.loads(stored) == payload, "the stored copy is not the result"
+
+
+def test_the_neuocyte_feeds_back_the_bounded_text_it_was_given(cfg):
+    """The process renders; it does not re-cut.
+
+    The limit used to live in both cognitive processes as a bare `[:2000]`,
+    free to drift from each other and from the Harness. Cutting again here
+    would also remove the notice, which sits at the end of the text -- the
+    truncation would become silent again at the last step.
+    """
+    inf = _FakeInference([TOOL_CALL, "FINDING: done"])
+    bounded = "SHOWN" * 10 + "\n\n[truncated: showing the first 50 of 9000 characters.]"
+    sup = _FakeSupervisorRpc({"name": "current_state_version", "accepted": True,
+                              "result": {"items": ["ignored"]},
+                              "result_text": bounded, "result_truncated": True,
+                              "result_chars": 9000, "result_sha256": "b" * 64,
+                              "error": None, "reason": "executed",
+                              "receipt_id": "rcp_1"})
+    nc = _neuocyte(cfg, inf, sup)
+    nc._generate_with_tools(ITEM, budget=4000, deadline=time.time() + 60,
+                            max_turns=6)
+
+    fed = "\n".join(inf.ingested)
+    assert "[truncated:" in fed, "the truncation notice never reached the model"
+    assert "ignored" not in fed, "the process re-serialized instead of rendering"
+
+
+# ===========================================================================
+# Specialist neuocytes: asked for by Ego, governed by the library
+# ===========================================================================
+class _BindingSup:
+    """Answers `bind_profile` for some namespaces and refuses the rest."""
+
+    def __init__(self, approved: set[str]) -> None:
+        self.approved = approved
+        self.attempts: list[str] = []
+        self.recorded: list[dict] = []
+
+    def call(self, method: str, **params):
+        if method == "bind_profile":
+            ns = params["namespace"]
+            self.attempts.append(ns)
+            if ns not in self.approved:
+                raise RuntimeError(f"no approved version for {ns}")
+            return {"profile_ref": f"{ns}@1", "text": f"you are {ns}"}
+        if method == "record_profile_fallback":
+            self.recorded.append(params)
+            return {"recorded": True}
+        raise AssertionError(f"unexpected call {method}")
+
+
+def _binding_neuocyte(cfg, sup):
+    nc = Neuocyte.__new__(Neuocyte)
+    nc.cfg = cfg
+    nc.neuocyte_id = "nc_spec"
+    nc.sup = sup
+    nc.model_generation = "gen_1"
+    nc.profile = None
+    from amoeba.logging_setup import get_logger
+    nc.log = get_logger("test")
+    return nc
+
+
+def test_a_requested_specialisation_is_bound(cfg):
+    """The whole point: `ego.neuocyte.research` can finally be born into.
+
+    It could be authored, versioned, approved, selected and advertised, and
+    then birth bound `ego.neuocyte` regardless because the namespace came from
+    `work_class` alone. A specialisation nothing can be born into does not
+    exist.
+    """
+    sup = _BindingSup({"ego.neuocyte.research", "ego.neuocyte"})
+    nc = _binding_neuocyte(cfg, sup)
+
+    bound = nc._bind_profile({"work_class": "user",
+                                         "specialisation": "research"}, work_id="w1")
+    assert bound["profile_ref"] == "ego.neuocyte.research@1"
+    assert sup.attempts == ["ego.neuocyte.research"], (
+        "the base was tried even though the specialist bound")
+    assert sup.recorded == [], "a successful bind needs no annotation"
+
+
+def test_an_unapproved_specialisation_falls_back_and_says_so(cfg):
+    """Refusing the work would be the worse failure; doing it silently is next.
+
+    The library not having an approved `research` profile is a reason to run
+    on the baseline, not a reason to abandon the job. But a specialisation
+    that has quietly stopped applying looks exactly like one nobody asked for,
+    so the fallback is recorded against the work item.
+    """
+    sup = _BindingSup({"ego.neuocyte"})
+    nc = _binding_neuocyte(cfg, sup)
+
+    bound = nc._bind_profile({"work_class": "user",
+                                         "specialisation": "research"}, work_id="w2")
+    assert bound["profile_ref"] == "ego.neuocyte@1", "the work did not run"
+    assert sup.attempts == ["ego.neuocyte.research", "ego.neuocyte"]
+    assert len(sup.recorded) == 1
+    assert sup.recorded[0]["work_id"] == "w2"
+    assert "ego.neuocyte.research" in sup.recorded[0]["reason"]
+
+
+def test_maintenance_work_specialises_under_id(cfg):
+    """A neuocyte descends from the mind that spawned it, specialised or not.
+
+    Maintenance work forked from Id must not reach into Ego's family tree by
+    naming a leaf, which is why Ego names a leaf and never a namespace.
+    """
+    sup = _BindingSup({"id.neuocyte.integrity"})
+    nc = _binding_neuocyte(cfg, sup)
+
+    bound = nc._bind_profile({"work_class": "maintenance",
+                                         "specialisation": "integrity"}, work_id="w3")
+    assert bound["profile_ref"] == "id.neuocyte.integrity@1"
+    assert sup.attempts == ["id.neuocyte.integrity"]
+
+
+def test_work_with_no_specialisation_binds_the_base_directly(cfg):
+    """The ordinary case gains no extra round trip."""
+    sup = _BindingSup({"ego.neuocyte"})
+    nc = _binding_neuocyte(cfg, sup)
+
+    bound = nc._bind_profile({"work_class": "user"}, work_id="w4")
+    assert bound["profile_ref"] == "ego.neuocyte@1"
+    assert sup.attempts == ["ego.neuocyte"]
+    assert sup.recorded == []
+
+
+def test_no_profile_at_all_is_survivable_and_reported(cfg):
+    """An empty library is not a reason to stop working."""
+    sup = _BindingSup(set())
+    nc = _binding_neuocyte(cfg, sup)
+
+    bound = nc._bind_profile({"work_class": "user",
+                                         "specialisation": "research"}, work_id="w5")
+    assert bound is None
+    assert nc.profile is None
+    assert sup.attempts == ["ego.neuocyte.research", "ego.neuocyte"]
+    assert len(sup.recorded) == 1, "falling back to nothing went unrecorded"
+
+
+def test_ego_cannot_name_a_namespace_only_a_leaf(stack):
+    """Ego states intent; it does not address the family tree.
+
+    A specialisation that could contain dots would let Ego ask for
+    `id.neuocyte` -- or a root -- by writing one. The parameter takes a single
+    name and the Harness builds the namespace, so reaching sideways is not
+    refused so much as unsayable.
+    """
+    import pytest as _pytest
+
+    for bad in ("ego.neuocyte.research", "../root", "id.neuocyte", "a b"):
+        with _pytest.raises(Exception) as exc:
+            stack.call("ego_request_work", objective="look into something",
+                       specialisation=bad)
+        assert "single name" in str(exc.value) or "not a path" in str(exc.value), \
+            f"{bad!r} was not refused as a path"
+
+
+def test_a_specialisation_reaches_the_work_item(stack):
+    """Ego asks at request time and the row remembers, so birth can read it."""
+    out = stack.call("ego_request_work", objective="research the build logs",
+                     specialisation="research")
+    admitted = [a for a in out.get("admitted", []) if a.get("admitted")]
+    assert admitted, out
+    work_id = admitted[0]["work_id"]
+    row = stack.call("get_work", work_id=work_id)
+    assert row["specialisation"] == "research"

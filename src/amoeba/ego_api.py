@@ -172,6 +172,10 @@ def build(sup: "Supervisor") -> dict[str, Any]:  # noqa: C901
                          sandbox: bool = False, constraints: str = "",
                          evidence: Sequence[dict[str, Any]] = (),
                          budget_tokens: int | None = None,
+                         # A leaf name, not a namespace: "research" resolves to
+                         # `ego.neuocyte.research`. Ego states intent; the
+                         # library decides whether that profile exists.
+                         specialisation: str | None = None,
                          operation_id: str | None = None) -> dict[str, Any]:
         """Introduce an objective into the productive-work system.
 
@@ -204,6 +208,21 @@ def build(sup: "Supervisor") -> dict[str, Any]:  # noqa: C901
         if access not in ("none", "read", "read_write"):
             raise InvalidInput("unknown board access", board_access=access)
 
+        # A specialisation is a leaf name under this role's neuocyte
+        # namespace, not a namespace: Ego says "research", the Harness resolves
+        # `ego.neuocyte.research`. Ego cannot reach sideways into `id.*` or
+        # upward to a root by naming one, because it never names a namespace.
+        wanted = (specialisation or "").strip()
+        if wanted:
+            if not wanted.replace("_", "").isalnum():
+                raise InvalidInput(
+                    "a specialisation is a single name, not a path",
+                    specialisation=wanted,
+                    hint="ask for 'research', not 'ego.neuocyte.research'")
+            if len(wanted) > 64:
+                raise InvalidInput("specialisation name is too long",
+                                   specialisation=wanted[:80])
+
         text = _text(objective, "objective", limit=4000)
         if constraints:
             text = f"{text}\n\nConstraints: {_text(constraints, 'constraints')}"
@@ -213,7 +232,8 @@ def build(sup: "Supervisor") -> dict[str, Any]:  # noqa: C901
             out = sup.methods()["admit_work"](
                 objective=text, work_class=work_class, origin_actor="ego",
                 operation_id=operation_id, board_access=access,
-                sandbox_allowed=bool(sandbox), budget_tokens=budget_tokens)
+                sandbox_allowed=bool(sandbox), budget_tokens=budget_tokens,
+                specialisation=wanted or None)
             (admitted if out.get("admitted") else refused).append(out)
 
         def body(m: Mutation) -> None:

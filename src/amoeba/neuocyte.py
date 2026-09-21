@@ -193,22 +193,63 @@ class Neuocyte:
         be a worse failure than doing it on the baseline.
         """
         maintenance = item.get("work_class") == "maintenance"
-        namespace = "id.neuocyte" if maintenance else "ego.neuocyte"
-        try:
-            bound = self.sup.call(
-                "bind_profile", namespace=namespace,
-                actor_id=self.neuocyte_id, actor_kind="neuocyte",
-                work_id=work_id, model_generation=self.model_generation,
-                # Only the Ego-derived path inherits a primed context.
-                inherited_namespace=None if maintenance else "ego")
-        except Exception as exc:  # noqa: BLE001
-            self.log.warning("no prompt profile for %s (%s); using the "
-                             "built-in instruction", namespace, exc)
-            self.profile = None
-            return None
+        base = "id.neuocyte" if maintenance else "ego.neuocyte"
+        wanted = (item.get("specialisation") or "").strip()
+        # The specialisation first, the base as the fallback. Asking for a
+        # specialist that the library does not have, or has not approved, must
+        # not fail the work: refusing a job because a prompt was missing is a
+        # worse failure than doing it on the baseline.
+        candidates = [f"{base}.{wanted}", base] if wanted else [base]
+
+        bound = None
+        fallback = None
+        for namespace in candidates:
+            try:
+                bound = self.sup.call(
+                    "bind_profile", namespace=namespace,
+                    actor_id=self.neuocyte_id, actor_kind="neuocyte",
+                    work_id=work_id, model_generation=self.model_generation,
+                    # Only the Ego-derived path inherits a primed context.
+                    inherited_namespace=None if maintenance else "ego")
+                break
+            except Exception as exc:  # noqa: BLE001
+                if namespace != candidates[-1]:
+                    # Recorded rather than swallowed: a specialisation that has
+                    # quietly stopped applying looks exactly like one that was
+                    # never asked for, unless somebody says which happened.
+                    fallback = f"{namespace} unavailable: {exc}"[:300]
+                    self.log.warning("no approved profile for %s (%s); "
+                                     "falling back to %s", namespace, exc, base)
+                    continue
+                self.log.warning("no prompt profile for %s (%s); using the "
+                                 "built-in instruction", namespace, exc)
+                self.profile = None
+                self._report_profile(work_id, None,
+                                     f"{namespace} unavailable: {exc}"[:300])
+                return None
         self.profile = bound
+        self._report_profile(work_id, bound, fallback)
         self.log.info("%s bound to %s", self.neuocyte_id, bound["profile_ref"])
         return bound
+
+    def _report_profile(self, work_id: str, bound: dict | None,
+                        fallback: str | None) -> None:
+        """Tell the Harness which profile was actually used.
+
+        Only when something other than the plain request happened. A work item
+        that got what it asked for needs no annotation; one that silently got
+        something else is the case this exists for.
+        """
+        if not fallback:
+            return
+        try:
+            self.sup.call("record_profile_fallback", work_id=work_id,
+                          neuocyte_id=self.neuocyte_id,
+                          profile_ref=(bound or {}).get("profile_ref"),
+                          reason=fallback)
+        except Exception:  # noqa: BLE001
+            self.log.debug("could not record the profile fallback",
+                           exc_info=True)
 
     def _profile_block(self) -> str:
         """The profile text this neuocyte injects, as a prompt prefix."""
@@ -417,7 +458,12 @@ class Neuocyte:
         guessing at why its request vanished.
         """
         if res.get("accepted") and not res.get("error"):
-            body = json.dumps(res.get("result"), default=str)[:2000]
+            # Bounded by the Harness, which can store what does not fit and so
+            # can name a digest that exists. Cutting it again here would undo
+            # the notice that says it was cut.
+            body = res.get("result_text")
+            if body is None:
+                body = json.dumps(res.get("result"), default=str)
         elif res.get("accepted"):
             body = f"the tool ran but failed: {res.get('error')}"
         else:

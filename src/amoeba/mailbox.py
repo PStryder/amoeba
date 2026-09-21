@@ -25,6 +25,34 @@ before generation starts and nothing reopens it.
 rather than a convention. Ego and Id still run concurrently with each other,
 and neuocytes are untouched.
 
+====================================================================
+A TURN MAY CONSUME MANY TRIGGERS, BUT AN INTERACTION BECOMES COMPLETE
+ONLY WHEN A TERMINAL RESULT EXPLICITLY ADDRESSED TO THAT INTERACTION
+HAS BEEN DURABLY PRODUCED.
+
+NO RESULT FROM ONE INTERACTION MAY SATISFY ANOTHER INTERACTION MERELY
+BECAUSE THEIR TRIGGERS SHARED A TURN.
+====================================================================
+
+Everything below about requests, bundling and answers exists to hold those
+two. An answer used to be a property of a *turn*: whoever was waiting on any
+trigger that turn consumed received that turn's result. Two callers therefore
+received the same reply, and a thought continued into a second turn returned
+only what the first one had managed to say.
+
+Three rules keep them now:
+
+* a trigger records whether anyone is *waiting* on it -- a request is owed an
+  answer, an event that merely wakes a role is not;
+* a turn admits **at most one answer-bearing request**, and a turn continuing
+  an unanswered thought admits **no further answer-bearing request**, so two
+  interactions can never be in flight together in one turn. Everything that
+  merely *informs* a turn still bundles into it -- a work result, an artifact,
+  a message from the other role -- because a continuation usually needs
+  exactly that evidence to finish the thought it resumes;
+* the answer is written against the request, on a terminal stop, following the
+  continuation chain back to the question that started it.
+
 Nothing here is a cognitive component. The Harness decides *when* a role gets
 another bounded turn; the role decides only what to think within one.
 """
@@ -102,6 +130,14 @@ the model reads: a request truncated to a preview loses its own constraints,
 and Ego would answer a question it was never fully asked."""
 
 MAX_BODY_CHARS = 8000
+
+MAX_ATTACHMENTS_LISTED = 20
+"""How many attachments are named in a bundle before the list is summarised.
+
+A bound on the rendering, not on what arrived: the count is always stated, so
+a role is never told about fewer files than it was sent without being told
+that is what happened.
+"""
 """How much of a trigger's full body is rendered into a turn.
 
 The body lives in the content store, in full, whatever this is set to. What
@@ -128,7 +164,10 @@ def enqueue(m: Mutation, *, role: str, kind: str, source: str,
             payload: dict[str, Any] | None = None,
             correlation_id: str | None = None,
             causal_parent: str | None = None,
-            operation_id: str | None = None) -> dict[str, Any]:
+            operation_id: str | None = None,
+            expects_answer: bool = False,
+            lineage: str | None = None,
+            ambient: bool = False) -> dict[str, Any]:
     """Record that something happened which a role may need to think about.
 
     Deliberately cheap and always durable. The decision about whether this
@@ -146,18 +185,22 @@ def enqueue(m: Mutation, *, role: str, kind: str, source: str,
         digest = m.put_json(payload, schema="amoeba.role_trigger_payload/1")
     m.sql("INSERT INTO role_triggers(trigger_id, target_role, kind, source,"
           " source_ref, summary, payload_sha256, correlation_id, operation_id,"
-          " causal_parent, status, created_at, state_version)"
-          " VALUES (?,?,?,?,?,?,?,?,?,?,'queued',?,?)",
+          " causal_parent, expects_answer, lineage, ambient, status,"
+          " created_at, state_version)"
+          " VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,'queued',?,?)",
           (trigger_id, role, kind, source, source_ref,
            (summary or "")[:MAX_SUMMARY], digest, correlation_id, operation_id,
-           causal_parent, time.time(), m.prior_version + 1))
+           causal_parent, 1 if expects_answer else 0, lineage,
+           1 if ambient else 0, time.time(), m.prior_version + 1))
     m.emit(EventKind.ROLE_TRIGGER_QUEUED, {
         "trigger_id": trigger_id, "role": role, "kind": kind, "source": source,
         "source_ref": source_ref, "summary": (summary or "")[:200],
         "payload_sha256": digest, "causal_parent": causal_parent,
+        "expects_answer": bool(expects_answer), "lineage": lineage,
+        "ambient": bool(ambient),
         "note": "queued is not seen; it becomes cognitive input only in a turn"})
     return {"trigger_id": trigger_id, "role": role, "kind": kind,
-            "status": "queued"}
+            "status": "queued", "expects_answer": bool(expects_answer)}
 
 
 def pending(conn, role: str) -> list[dict[str, Any]]:
@@ -210,15 +253,35 @@ def trigger_body(trigger: dict[str, Any], blobs: Any = None) -> str:
         return (trigger.get("summary") or "") + "\n  (full body unavailable)"
     if not isinstance(payload, dict):
         return trigger.get("summary") or ""
+    body = trigger.get("summary") or ""
     for field in BODY_FIELDS:
         value = payload.get(field)
         if isinstance(value, str) and value.strip():
             if len(value) > MAX_BODY_CHARS:
-                return (value[:MAX_BODY_CHARS]
+                body = (value[:MAX_BODY_CHARS]
                         + f"\n  [truncated at {MAX_BODY_CHARS} characters; "
                           f"{len(value) - MAX_BODY_CHARS} more in {digest[:12]}]")
-            return value
-    return trigger.get("summary") or ""
+            else:
+                body = value
+            break
+    # Files sent with the request. Listed rather than inlined: they may be
+    # binary, or large, and a role that was shown the bytes would have no way
+    # to decline. It is told what arrived and can read what it needs.
+    attachments = payload.get("attachments")
+    if isinstance(attachments, list) and attachments:
+        lines = ["", f"  {len(attachments)} file(s) sent with this request; "
+                     "read one with ego_read_attachment(input_id=...):"]
+        for att in attachments[:MAX_ATTACHMENTS_LISTED]:
+            if not isinstance(att, dict):
+                continue
+            lines.append(
+                f"    - {att.get('filename')} "
+                f"({att.get('media_type') or 'unknown type'}, "
+                f"{att.get('bytes')} bytes) input_id={att.get('input_id')}")
+        if len(attachments) > MAX_ATTACHMENTS_LISTED:
+            lines.append(f"    ... and {len(attachments) - MAX_ATTACHMENTS_LISTED} more")
+        body = body + "\n".join(lines)
+    return body
 
 
 def render_bundle(triggers: Sequence[dict[str, Any]], *, role: str,
@@ -273,8 +336,72 @@ def claim(m: Mutation, mind: "Mind", *, role: str, incarnation: int | None,
     queued = pending(mind.db.conn, role)
     if not queued:
         return None
-    admitted = queued[:MAX_BUNDLE]
-    left_behind = len(queued) - len(admitted)
+    # Three independent questions decide what a turn may take.
+    #
+    #   expects_answer   is this trigger owed a reply?   -> reply routing
+    #   lineage          whose information is this?      -> cognitive isolation
+    #   ambient          may every turn see it?          -> global policy
+    #
+    # At most one answer-bearing request per turn, and none at all while a
+    # continuation is finishing a thought that already owes one: two requests
+    # in one turn would share its single answer, and a caller would receive a
+    # reply to somebody else's question.
+    #
+    # Supporting evidence is scoped to the turn's lineage. Nobody owes a work
+    # result a reply, so reply routing alone would happily let one
+    # interaction's evidence inform another's answer -- both of the rules
+    # above stay satisfied while it happens. "Unrelated" must not become the
+    # default merely because nothing is owed a reply, so evidence rides along
+    # only when it belongs to this lineage or is explicitly ambient.
+    turn_lineage: str | None = None
+    taken_request = False
+
+    # -- pass 1: whose thought is this turn? ------------------------------
+    for t in queued:
+        if t["kind"] == "continuation" and t["causal_parent"]:
+            if _chain_owes_an_answer(mind.db.conn, t["causal_parent"]):
+                taken_request = True
+                turn_lineage = turn_lineage_of(mind.db.conn, t["causal_parent"])
+                break
+    if not taken_request:
+        for t in queued:
+            if t["expects_answer"]:
+                turn_lineage = t["lineage"]
+                break
+
+    # -- pass 2: admit what belongs here ----------------------------------
+    admitted, deferred = [], []
+    request_taken = taken_request
+    for t in queued:
+        if len(admitted) >= MAX_BUNDLE:
+            deferred.append(t)
+            continue
+        if t["expects_answer"]:
+            if request_taken:
+                deferred.append(t)
+                continue
+            request_taken = True
+            admitted.append(t)
+            continue
+        if t["ambient"] or t["kind"] == "continuation":
+            admitted.append(t)
+            continue
+        if turn_lineage and t["lineage"] != turn_lineage:
+            # Another interaction's evidence, or nobody's. Unowned is not
+            # ambient: a trigger naming no lineage has no claim on a turn that
+            # is already serving someone, and it is admitted by the first turn
+            # that is not. Every production path either names a lineage or
+            # declares itself ambient -- enforced by
+            # `test_every_trigger_producer_declares_ownership` -- so arriving
+            # here means a producer forgot, not that work is being dropped.
+            deferred.append(t)
+            continue
+        if t["lineage"] and turn_lineage is None:
+            # No request yet, so this evidence decides the turn's lineage
+            # rather than mixing with a stranger's.
+            turn_lineage = t["lineage"]
+        admitted.append(t)
+    left_behind = len(deferred)
 
     turn_id = new_id("turn")
     bundle_id = new_id("bnd")
@@ -302,12 +429,13 @@ def claim(m: Mutation, mind: "Mind", *, role: str, incarnation: int | None,
           " profile_sha256, environment_sha256, environment_blob, bundle_id,"
           " bundle_sha256, bundle_blob, trigger_kinds, trigger_count,"
           " started_at, status, model_generation, parent_turn, operation_id,"
-          " state_version) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,'running',?,?,?,?)",
+          " lineage, state_version)"
+          " VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,'running',?,?,?,?,?)",
           (turn_id, role, incarnation, profile_ref, profile_sha256,
            environment_sha256, environment_blob, bundle_id, bundle_sha,
            bundle_blob, json.dumps([t["kind"] for t in admitted]),
            len(admitted), time.time(), model_generation, parent, operation,
-           m.prior_version + 1))
+           turn_lineage, m.prior_version + 1))
 
     for t in admitted:
         m.sql("UPDATE role_triggers SET status = 'claimed', bundle_id = ?,"
@@ -323,10 +451,20 @@ def claim(m: Mutation, mind: "Mind", *, role: str, incarnation: int | None,
         "bundle_blob": bundle_blob,
         "note": ("frozen for this turn; anything arriving now waits for the "
                  "next one")})
+    # Which requests this turn owes an answer to, decided by the Harness from
+    # the durable record rather than inferred by the role from trigger kinds.
+    # A continuation owes whatever the thought it resumes still owes, which is
+    # exactly the case kind-sniffing could not see -- and the ids matter as
+    # well as the count, because a conclusion has to name what it answers or
+    # it cannot be audited against the request that prompted it.
+    answering = [r["trigger_id"] for r in awaiting_answer(mind.db.conn, turn_id)]
+
     return {"turn_id": turn_id, "bundle_id": bundle_id, "role": role,
             "text": text, "triggers": members, "left_behind": left_behind,
+            "answering": answering, "owes_answer": bool(answering),
             "bundle_sha256": bundle_sha, "bundle_blob": bundle_blob,
-            "parent_turn": parent, "operation_id": operation}
+            "parent_turn": parent, "operation_id": operation,
+            "lineage": turn_lineage}
 
 
 # ---------------------------------------------------------------------------
@@ -355,6 +493,51 @@ def continuation_depth(conn, turn_id: str, *, limit: int = 32) -> int:
         depth += 1
         current = row["parent_turn"]
     return depth
+
+
+def turn_lineage_of(conn, turn_id: str) -> str | None:
+    """Whose interaction a turn serves.
+
+    A continuation inherits it, which is what keeps a resumed thought reading
+    its own evidence rather than whatever happened to arrive.
+    """
+    row = conn.execute("SELECT lineage FROM role_turns WHERE turn_id = ?",
+                       (turn_id,)).fetchone()
+    return row["lineage"] if row else None
+
+
+def _chain_owes_an_answer(conn, turn_id: str) -> bool:
+    """Is some request still waiting on the thought this turn continues?
+
+    Cheap, and it is the difference between a continuation quietly adopting a
+    stranger's question and one that only finishes its own.
+    """
+    return bool(awaiting_answer(conn, turn_id))
+
+
+def awaiting_answer(conn, turn_id: str) -> list[dict[str, Any]]:
+    """The requests this turn owes an answer to.
+
+    Follows the continuation chain back to the turn that admitted the request,
+    because a thought split across turns still answers the question that
+    started it -- returning only the first turn's text was one of the ways an
+    answer stopped belonging to a request.
+    """
+    seen: set[str] = set()
+    out: list[dict[str, Any]] = []
+    current = turn_id
+    while current and current not in seen and len(seen) < 32:
+        seen.add(current)
+        for row in conn.execute(
+                "SELECT trigger_id, operation_id, correlation_id FROM role_triggers"
+                " WHERE turn_id = ? AND expects_answer = 1"
+                " AND answer_status IS NULL", (current,)):
+            out.append(dict(row))
+        parent = conn.execute(
+            "SELECT parent_turn FROM role_turns WHERE turn_id = ?",
+            (current,)).fetchone()
+        current = parent["parent_turn"] if parent else None
+    return out
 
 
 def complete(m: Mutation, mind: "Mind", *, turn_id: str, stop_reason: str,
@@ -397,6 +580,37 @@ def complete(m: Mutation, mind: "Mind", *, turn_id: str, stop_reason: str,
     m.emit(EventKind.ROLE_TRIGGER_CONSUMED, {
         "turn_id": turn_id, "role": row["role"], "trigger_ids": consumed})
 
+    # --- answer the request, if this turn finished the thought -----------
+    awaiting = awaiting_answer(mind.db.conn, turn_id)
+    answered: list[str] = []
+    if awaiting and stop_reason not in NON_TERMINAL:
+        answer_text = ""
+        if isinstance(result, dict):
+            answer_text = str(result.get("answer") or result.get("text") or "")
+        if answer_text.strip():
+            answer_sha = m.put_json(
+                {"answer": answer_text, "turn_id": turn_id,
+                 "stop_reason": stop_reason, "role": row["role"]},
+                schema="amoeba.trigger_answer/1")
+            state = "answered"
+        else:
+            # A terminal stop that produced nothing is not an answer. Saying
+            # so lets a caller stop waiting instead of hanging on a thought
+            # that already ended.
+            answer_sha, state = None, "unanswerable"
+        for req in awaiting:
+            m.sql("UPDATE role_triggers SET answer_sha256 = ?,"
+                  " answer_status = ?, answered_at = ?, answered_by_turn = ?"
+                  " WHERE trigger_id = ?",
+                  (answer_sha, state, time.time(), turn_id, req["trigger_id"]))
+            answered.append(req["trigger_id"])
+        m.emit(EventKind.ROLE_TRIGGER_ANSWERED, {
+            "turn_id": turn_id, "role": row["role"], "trigger_ids": answered,
+            "answer_status": state, "answer_sha256": answer_sha,
+            "stop_reason": stop_reason,
+            "note": ("the answer belongs to the request that asked, not to "
+                     "the turn that happened to produce it")})
+
     continuation = None
     depth = continuation_depth(mind.db.conn, turn_id)
     exhausted = depth >= max(0, int(max_continuations))
@@ -411,6 +625,23 @@ def complete(m: Mutation, mind: "Mind", *, turn_id: str, stop_reason: str,
             "note": (f"continuation limit reached after {depth} consecutive "
                      "continuations; the chain stops here rather than "
                      "continuing to truncate")})
+        # Nobody is going to finish this thought, so nobody should keep
+        # waiting for it. A partial answer is still an answer; no answer at
+        # all is said plainly.
+        for req in awaiting:
+            partial = ""
+            if isinstance(result, dict):
+                partial = str(result.get("answer") or result.get("text") or "")
+            sha = m.put_json(
+                {"answer": partial, "turn_id": turn_id, "partial": True,
+                 "stop_reason": stop_reason, "role": row["role"]},
+                schema="amoeba.trigger_answer/1") if partial.strip() else None
+            m.sql("UPDATE role_triggers SET answer_sha256 = ?,"
+                  " answer_status = ?, answered_at = ?, answered_by_turn = ?"
+                  " WHERE trigger_id = ?",
+                  (sha, "answered" if sha else "unanswerable", time.time(),
+                   turn_id, req["trigger_id"]))
+            answered.append(req["trigger_id"])
     elif status == "completed" and stop_reason in NON_TERMINAL:
         # The Harness decides this, not the model. A thought cut off by an
         # output ceiling cannot be expected to ask for its own continuation:
@@ -420,6 +651,12 @@ def complete(m: Mutation, mind: "Mind", *, turn_id: str, stop_reason: str,
             source_ref=turn_id, causal_parent=turn_id,
             summary=(f"your previous turn stopped early ({stop_reason}); "
                      "continue from where you left off"),
+            lineage=row["lineage"],
+            # The second half of a thought is accountable to the same
+            # externally visible operation as the first. Without this a
+            # continuation delegates work under no operation at all, and the
+            # result comes back a stranger to the thought that asked for it.
+            operation_id=row["operation_id"],
             payload={"stop_reason": stop_reason, "previous_turn": turn_id})
         m.emit(EventKind.ROLE_CONTINUATION_SCHEDULED, {
             "role": row["role"], "previous_turn": turn_id,
@@ -429,7 +666,9 @@ def complete(m: Mutation, mind: "Mind", *, turn_id: str, stop_reason: str,
             "note": ("a continuation is a new bounded turn, not an invisible "
                      "extension of the last one")})
     return {"turn_id": turn_id, "status": status, "stop_reason": stop_reason,
-            "consumed": consumed, "continuation": continuation,
+            "consumed": consumed, "answered": answered,
+            "awaiting": [r["trigger_id"] for r in awaiting],
+            "continuation": continuation,
             "continuation_depth": depth,
             "continuation_limit_reached": bool(
                 exhausted and stop_reason in NON_TERMINAL)}
@@ -461,9 +700,12 @@ def abandon(m: Mutation, mind: "Mind", *, turn_id: str, reason: str
                   (r["trigger_id"],))
             expired.append(r["trigger_id"])
         else:
+            # Requeued for another turn, so any answer it was owed is still
+            # owed: the answer fields are cleared along with the claim.
             m.sql("UPDATE role_triggers SET status = 'queued', bundle_id = NULL,"
-                  " turn_id = NULL, claimed_at = NULL WHERE trigger_id = ?",
-                  (r["trigger_id"],))
+                  " turn_id = NULL, claimed_at = NULL, answer_status = NULL,"
+                  " answer_sha256 = NULL, answered_by_turn = NULL"
+                  " WHERE trigger_id = ?", (r["trigger_id"],))
             requeued.append(r["trigger_id"])
 
     m.emit(EventKind.ROLE_TURN_ABANDONED, {

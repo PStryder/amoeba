@@ -512,3 +512,93 @@ def test_nothing_writes_to_the_store_outside_the_single_writer():
                 offenders.append(f"{path.name}:{lineno} {stripped[:70]}")
     assert not offenders, "direct store writes outside the writer:\n" + \
         "\n".join(offenders)
+
+
+# ---------------------------------------------------------------------------
+# An existing database survives the upgrade that gave requests their answers.
+# ---------------------------------------------------------------------------
+OWNERSHIP_COLUMNS = ("expects_answer", "lineage", "ambient", "answer_sha256",
+                     "answer_status", "answered_at", "answered_by_turn")
+
+
+def _make_previous_release_shape(path: Path) -> None:
+    """Undo, in a real database, exactly what this release added.
+
+    Building the old shape by subtraction rather than by a pasted copy of the
+    old DDL: a copy would drift the moment the live schema changes, and the
+    test would then be comparing one piece of history against another.
+    """
+    raw = sqlite3.connect(path)
+    try:
+        for index in ("ix_trigger_lineage", "ix_trigger_awaiting"):
+            raw.execute(f"DROP INDEX IF EXISTS {index}")
+        for column in OWNERSHIP_COLUMNS:
+            raw.execute(f"ALTER TABLE role_triggers DROP COLUMN {column}")
+        raw.execute("ALTER TABLE role_turns DROP COLUMN lineage")
+        raw.commit()
+    finally:
+        raw.close()
+
+
+def test_a_database_from_the_previous_release_gains_the_ownership_columns(tmp_path):
+    """Upgrading in place must not leave the organism unable to think.
+
+    The schema is applied with CREATE TABLE IF NOT EXISTS, which does nothing
+    to a table that already exists. Without a migration, a database written
+    before answers belonged to requests keeps the old `role_triggers` and the
+    first mailbox read fails on a missing column -- an Amoeba that starts,
+    heartbeats, and cannot take a single turn.
+    """
+    from amoeba.store.db import Database
+
+    path = tmp_path / "state.db"
+    Database(path).close()
+    _make_previous_release_shape(path)
+
+    with sqlite3.connect(path) as raw:
+        old = {row[1] for row in raw.execute("PRAGMA table_info(role_triggers)")}
+    assert not (old & set(OWNERSHIP_COLUMNS)), "the old shape was not built"
+
+    db = Database(path)
+    try:
+        now = {row[1] for row in db.conn.execute("PRAGMA table_info(role_triggers)")}
+        assert set(OWNERSHIP_COLUMNS) <= now
+        assert "lineage" in {r[1] for r in db.conn.execute("PRAGMA table_info(role_turns)")}
+        # The indexes name the new columns, so they are the part that fails
+        # first if the migration runs after the schema script instead of
+        # before it.
+        indexes = {row[0] for row in db.conn.execute(
+            "SELECT name FROM sqlite_master WHERE type = 'index'")}
+        assert {"ix_trigger_lineage", "ix_trigger_awaiting"} <= indexes
+    finally:
+        db.close()
+
+
+def test_the_upgrade_does_not_invent_answers_for_old_requests(tmp_path):
+    """A trigger that predates the column is owed nothing, not owed an answer.
+
+    `expects_answer` defaults to 0 and `lineage` to NULL, which reads as
+    "nobody is waiting on this, and it belongs to no interaction". The other
+    default would have the first turn after an upgrade hand an unrelated
+    answer to a stranger.
+    """
+    from amoeba.store.db import Database
+
+    path = tmp_path / "state.db"
+    db = Database(path)
+    db.conn.execute(
+        "INSERT INTO role_triggers(trigger_id, target_role, kind, source,"
+        " summary, status, created_at, state_version)"
+        " VALUES ('t-old', 'ego', 'message', 'operator', 'hi', 'queued', 1.0, 1)")
+    db.conn.commit()
+    db.close()
+
+    _make_previous_release_shape(path)
+    db = Database(path)
+    try:
+        row = db.conn.execute(
+            "SELECT expects_answer, lineage, ambient, answer_status"
+            " FROM role_triggers WHERE trigger_id = 't-old'").fetchone()
+    finally:
+        db.close()
+    assert tuple(row) == (0, None, 0, None)

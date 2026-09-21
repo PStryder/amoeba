@@ -46,6 +46,11 @@ NEUOCYTE = (
     "maintenance_context",
     "board_read", "board_post",
     "tool_invoke", "tool_schemas",
+    # Saying that the requested specialisation was not available. An
+    # annotation on its own work item -- narrower than `fail_work`, which it
+    # already holds -- and the only component that knows, because it is the
+    # one that tried to bind.
+    "record_profile_fallback",
     # Collected at a turn boundary, never pushed into the process.
     "work_messages",
 )
@@ -101,12 +106,17 @@ EGO = ROLE_BASE + (
     # effectors
     "ego_request_work", "ego_work_message", "ego_request_cancellation",
     "ego_propose_memory", "ego_message_id", "ego_request_id_review",
+    # The external loop. Both are scoped to the turn Ego is running rather
+    # than to an argument it supplies, so neither is a route to another
+    # client's files or another client's results.
+    "ego_read_attachment", "ego_surface_result",
 )
 
 EGO_ONLY = (
     "ego_work_view", "ego_artifact_evidence", "ego_resource_identities",
     "ego_request_work", "ego_work_message", "ego_request_cancellation",
     "ego_propose_memory", "ego_message_id", "ego_request_id_review",
+    "ego_read_attachment", "ego_surface_result",
 )
 
 # Id's senses beyond the shared base, plus its effectors. Everything in
@@ -116,6 +126,11 @@ ID_SENSES = (
     "board_independence", "board_corroboration",
     "context_assess", "sandbox_capabilities", "file_roots",
     "id_health",
+    # How much the organism is storing, and how much of that is forgettable.
+    # A sense: `store_prune` is deliberately absent from every scope, because
+    # a mind that could prune its own turn history could remove the record of
+    # what it did in the same motion.
+    "store_footprint",
 )
 
 # The Prompt Library, split at the authority line. Id may read the whole family

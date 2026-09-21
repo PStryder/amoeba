@@ -22,6 +22,7 @@ a mind that could would be scheduling itself.
 
 from __future__ import annotations
 
+import inspect
 import json
 import time
 from typing import TYPE_CHECKING, Any
@@ -29,6 +30,7 @@ from typing import TYPE_CHECKING, Any
 from . import mailbox
 from .errors import InvalidInput, NotFound
 from .scopes import model_facing_verbs
+from .tools import bounded_tool_result
 from .store.writer import Mutation
 
 if TYPE_CHECKING:
@@ -191,8 +193,8 @@ def build(sup: "Supervisor") -> dict[str, Any]:  # noqa: C901
         widens nothing.
         """
         row = mind.db.conn.execute(
-            "SELECT role, status FROM role_turns WHERE turn_id = ?",
-            (turn_id,)).fetchone()
+            "SELECT role, status, operation_id FROM role_turns"
+            " WHERE turn_id = ?", (turn_id,)).fetchone()
         if row is None:
             return {"accepted": False, "result": None,
                     "reason": "no such turn"}
@@ -210,14 +212,56 @@ def build(sup: "Supervisor") -> dict[str, Any]:  # noqa: C901
         if handler is None:
             return {"accepted": False, "result": None,
                     "reason": f"{name!r} is not a dispatchable verb"}
+        args = dict(arguments or {})
+        # What a role does during a turn is accountable to the operation that
+        # caused the turn. The role cannot supply this -- `operation_id` is
+        # stripped from model-supplied arguments like every other authority
+        # argument -- so the Harness supplies it from the turn itself.
+        #
+        # It matters beyond bookkeeping: work delegated here comes back as a
+        # trigger whose lineage is the work's operation, and if that is empty
+        # the result is untagged and will not enter the continuation that
+        # delegated it.
         try:
-            result = handler(**(arguments or {}))
+            accepts = inspect.signature(handler).parameters
+        except (TypeError, ValueError):  # a builtin or C callable
+            accepts = {}
+        takes_anything = any(p.kind is inspect.Parameter.VAR_KEYWORD
+                             for p in accepts.values())
+        if row["operation_id"] and "operation_id" not in args:
+            if "operation_id" in accepts or takes_anything:
+                args["operation_id"] = row["operation_id"]
+        # A verb that scopes itself to the turn asking for it gets the turn,
+        # from the fence rather than from the model. `turn_id` is an authority
+        # argument, so anything the model supplied under that name was already
+        # stripped before this.
+        if "turn_id" in accepts:
+            args["turn_id"] = turn_id
+        try:
+            result = handler(**args)
         except Exception as exc:  # noqa: BLE001
             # Reported back as a failed call rather than killing the turn: the
             # model may well be able to proceed without it.
             return {"accepted": False, "result": None,
                     "reason": f"{type(exc).__name__}: {exc}"[:500]}
-        return {"accepted": True, "result": result, "reason": None}
+        # Bounded here rather than in the role process: this is the side
+        # that can store what does not fit, and a digest named by a notice has
+        # to be a digest something actually holds.
+        def _store(text: str) -> str:
+            digest = mind.blobs.put(text.encode("utf-8"))
+            mind.writer.apply(
+                lambda m: m.register_blob(digest, len(text.encode("utf-8")),
+                                          "application/json",
+                                          "tool_result_full"),
+                actor=role, bump_version=False)
+            return digest
+
+        bounded = bounded_tool_result(result, store=_store)
+        return {"accepted": True, "result": result, "reason": None,
+                "result_text": bounded["text"],
+                "result_truncated": bounded["truncated"],
+                "result_chars": bounded["chars"],
+                "result_sha256": bounded["sha256"]}
 
     # ==================================================================
     # Queueing: the Harness noticing that something happened
@@ -227,20 +271,31 @@ def build(sup: "Supervisor") -> dict[str, Any]:  # noqa: C901
                              payload: dict[str, Any] | None = None,
                              correlation_id: str | None = None,
                              causal_parent: str | None = None,
-                             operation_id: str | None = None) -> dict[str, Any]:
+                             operation_id: str | None = None,
+                             expects_answer: bool = False,
+                             lineage: str | None = None,
+                             ambient: bool = False) -> dict[str, Any]:
         """Record that something happened which a role may need to think about.
 
         Queueing is not waking and not consumption. The trigger becomes a
         cognitive input only when a turn bundles it, and a caller can see both
         states separately rather than having to guess which one it is looking
         at.
+
+        `lineage` says whose interaction this belongs to and `ambient` says
+        every turn may see it. Both are separate from `expects_answer`, which
+        is only about who is owed a reply: a work result is owed no reply and
+        still belongs to exactly one interaction. Leaving both unset means
+        "owned by nobody", which is deliberately *not* the same as ambient --
+        such a trigger waits for a turn that is not already serving somebody.
         """
         receipt, out = mind.writer.apply(
             lambda m: mailbox.enqueue(
                 m, role=role, kind=kind, source=source, summary=summary,
                 source_ref=source_ref, payload=payload,
                 correlation_id=correlation_id, causal_parent=causal_parent,
-                operation_id=operation_id),
+                operation_id=operation_id, expects_answer=expects_answer,
+                lineage=lineage, ambient=ambient),
             actor=source or "harness", operation_id=operation_id,
             bump_version=False)
         sup.note_trigger(role)
@@ -256,11 +311,13 @@ def build(sup: "Supervisor") -> dict[str, Any]:  # noqa: C901
         """
         if not message.strip():
             raise InvalidInput("a message needs a body")
+        # Addressed to the role itself rather than to any interaction it is
+        # handling, so it is ambient by construction.
         return role_enqueue_trigger(
             role=role, kind="operator_message", source="operator",
             summary=message.strip()[:mailbox.MAX_SUMMARY],
             payload={"message": message[:8000], "kind": kind},
-            operation_id=operation_id)
+            operation_id=operation_id, ambient=True)
 
     # ==================================================================
     # Looking at it

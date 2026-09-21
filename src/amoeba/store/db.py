@@ -172,6 +172,14 @@ CREATE TABLE IF NOT EXISTS work_items (
   result_blob       TEXT,
   failure           TEXT,
   created_at        REAL NOT NULL,
+  -- The neuocyte specialisation Ego asked for, as a leaf under its
+  -- role's namespace: 'research' means `ego.neuocyte.research`. A
+  -- request, not an instruction -- the library governs whether such a
+  -- profile exists and is approved, and `profile_fallback` records the
+  -- answer so a specialisation that quietly stopped applying is
+  -- visible rather than merely absent.
+  specialisation    TEXT,
+  profile_fallback  TEXT,
   updated_at        REAL NOT NULL
 );
 CREATE INDEX IF NOT EXISTS ix_work_status ON work_items(status, work_class, priority, created_at);
@@ -584,11 +592,31 @@ CREATE TABLE IF NOT EXISTS role_triggers (
   claimed_at    REAL,
   consumed_at   REAL,
   deliveries    INTEGER NOT NULL DEFAULT 0,
+  -- Someone is waiting on this one. A request expects an answer; an event
+  -- that merely wakes a role does not, and conflating them is how a work
+  -- completion ended up "answering" a user's question.
+  expects_answer INTEGER NOT NULL DEFAULT 0,
+  -- Whose information this is. Derived rather than required: an interaction
+  -- id, a conversation, or the operation that started the lineage. NULL means
+  -- unowned, which is not the same as ambient.
+  lineage        TEXT,
+  -- Every turn may see it: a resource change, an approved profile, an
+  -- operator announcement. Explicit, because "unrelated" must never become
+  -- the default merely because nothing is owed a reply.
+  ambient        INTEGER NOT NULL DEFAULT 0,
+  answer_sha256  TEXT,             -- the answer to THIS request
+  answer_status  TEXT,             -- NULL | answered | unanswerable
+  answered_at    REAL,
+  answered_by_turn TEXT,           -- which turn finally produced it
   state_version INTEGER NOT NULL
 );
 CREATE INDEX IF NOT EXISTS ix_trigger_queue
   ON role_triggers(target_role, status, created_at);
 CREATE INDEX IF NOT EXISTS ix_trigger_turn ON role_triggers(turn_id);
+CREATE INDEX IF NOT EXISTS ix_trigger_lineage
+  ON role_triggers(target_role, lineage, status);
+CREATE INDEX IF NOT EXISTS ix_trigger_awaiting
+  ON role_triggers(target_role, expects_answer, answer_status);
 
 -- One bounded turn of a persistent role. Rows are append-only: a turn is
 -- opened, then closed with its stop reason. The environment and profile are
@@ -615,6 +643,7 @@ CREATE TABLE IF NOT EXISTS role_turns (
   tool_call_count  INTEGER NOT NULL DEFAULT 0,
   result_sha256    TEXT,
   parent_turn      TEXT,                 -- the turn this continues
+  lineage          TEXT,                 -- whose interaction this turn serves
   operation_id     TEXT,
   state_version    INTEGER NOT NULL
 );
@@ -675,6 +704,12 @@ class Database:
             self.initialize()
 
     def initialize(self) -> None:
+        # Before the schema script, not after: the script creates indexes that
+        # name the ownership columns, so against a database written by the
+        # previous release it would abort at `CREATE INDEX ... (lineage)`
+        # having already run half of itself. On a fresh database the tables do
+        # not exist yet and this is a no-op.
+        self._migrate_turn_ownership()
         self.conn.executescript(SCHEMA_SQL)
         cur = self.conn.execute("SELECT version FROM state_version WHERE id = 1")
         if cur.fetchone() is None:
@@ -705,6 +740,56 @@ class Database:
                         "INSERT OR REPLACE INTO meta(key, value) VALUES (?, ?)",
                         (f"migrated_{table}_{column}", str(cur.rowcount)))
             except sqlite3.OperationalError:
+                pass
+
+    # The columns that make an answer belong to a request rather than to a
+    # turn, and information belong to a lineage rather than to whoever is
+    # nearby. Table, column, and the DDL fragment to add it with.
+    _OWNERSHIP_COLUMNS = (
+        ("role_triggers", "expects_answer", "INTEGER NOT NULL DEFAULT 0"),
+        ("role_triggers", "answer_sha256", "TEXT"),
+        ("role_triggers", "answer_status", "TEXT"),
+        ("role_triggers", "answered_at", "REAL"),
+        ("role_triggers", "answered_by_turn", "TEXT"),
+        ("role_triggers", "lineage", "TEXT"),
+        ("role_triggers", "ambient", "INTEGER NOT NULL DEFAULT 0"),
+        ("role_turns", "lineage", "TEXT"),
+        ("work_items", "specialisation", "TEXT"),
+        ("work_items", "profile_fallback", "TEXT"),
+    )
+
+    def _migrate_turn_ownership(self) -> None:
+        """Add the request-ownership columns to a database that predates them.
+
+        `CREATE TABLE IF NOT EXISTS` does nothing to a table that already
+        exists, so a database written by the previous release keeps the old
+        `role_triggers` and every mailbox read fails on a missing column. The
+        live table is inspected rather than a version number trusted: adding a
+        column that is already there is then simply a no-op, and a database
+        that was interrupted half-way through an upgrade still converges.
+
+        Every added column is nullable or carries a default, so existing rows
+        stay valid. An old trigger gets `expects_answer = 0` and no lineage,
+        which reads as "nothing is owed a reply, and this belongs to nobody" --
+        the conservative interpretation, and the one that cannot invent an
+        answer for a request that never asked for one.
+        """
+        for table, column, ddl in self._OWNERSHIP_COLUMNS:
+            try:
+                cur = self.conn.execute(f"PRAGMA table_info({table})")
+                existing = {row[1] for row in cur.fetchall()}
+            except sqlite3.OperationalError:
+                continue
+            if not existing or column in existing:
+                continue
+            try:
+                self.conn.execute(
+                    f"ALTER TABLE {table} ADD COLUMN {column} {ddl}")
+                self.conn.execute(
+                    "INSERT OR REPLACE INTO meta(key, value) VALUES (?, ?)",
+                    (f"migrated_{table}_{column}", "added"))
+            except sqlite3.OperationalError:
+                # Lost a race with another process applying the same schema.
                 pass
 
     def close(self) -> None:

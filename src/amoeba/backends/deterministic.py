@@ -304,7 +304,25 @@ class DeterministicBackend:
 
     def generate_batched(self, requests: Sequence[dict[str, Any]], **kwargs: Any
                          ) -> dict[str, GenerationResult]:
-        raise CapabilityUnsupported(
-            "the deterministic backend does not model batching; it would not "
-            "measure anything real"
-        )
+        """Generate for several sessions, one after another.
+
+        **This models no batching and measures nothing.** There is no fused
+        kernel here and no shared decode step; it is a loop, and any timing
+        taken from it is the timing of a loop. It must never be cited as
+        evidence about batched throughput.
+
+        It exists because the alternative was worse. Refusing meant the
+        batching *scheduler* -- how requests are grouped, in what order they
+        are answered, what happens when one of them fails, whether the
+        fallback works -- could not be exercised anywhere except on a machine
+        with a GPU. A truthful stand-in that lets the scheduling logic be
+        tested is better than an untested live path defended by a principled
+        refusal.
+        """
+        out: dict[str, GenerationResult] = {}
+        for req in requests:
+            session_id = req["session_id"]
+            params = {**kwargs, **{k: v for k, v in req.items()
+                                   if k != "session_id"}}
+            out[session_id] = self.generate(session_id, **params)
+        return out

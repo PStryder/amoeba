@@ -51,6 +51,7 @@ class EventKind:
 
     # work
     WORK_ADMITTED = "work.admitted"
+    WORK_PROFILE_FALLBACK = "work.profile_fallback"
     WORK_REJECTED = "work.rejected"
     WORK_LEASED = "work.leased"
     WORK_LEASE_EXPIRED = "work.lease_expired"
@@ -155,6 +156,8 @@ class EventKind:
     ROLE_TRIGGER_QUEUED = "role.trigger_queued"
     ROLE_TRIGGER_CLAIMED = "role.trigger_claimed"
     ROLE_TRIGGER_CONSUMED = "role.trigger_consumed"
+    ROLE_TRIGGER_ANSWERED = "role.trigger_answered"
+    STORE_PRUNED = "store.pruned"
     ROLE_TRIGGER_RECOVERED = "role.trigger_recovered"
     ROLE_TURN_ENDED = "role.turn_ended"
     ROLE_TURN_ABANDONED = "role.turn_abandoned"

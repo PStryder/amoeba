@@ -25,7 +25,8 @@ from .ids import new_id, sha256_hex
 from .sandbox import SandboxLimits
 from .store.events import EventKind
 from .filespace import decode_exact_text
-from .tools import ToolCallRequest, build_neuocyte_registry
+from .tools import (ToolCallRequest, bounded_tool_result,
+                    build_neuocyte_registry)
 from .store.writer import Mutation
 
 if TYPE_CHECKING:
@@ -872,6 +873,34 @@ def build(sup: "Supervisor") -> dict[str, Any]:  # noqa: C901
     # ==================================================================
     # Tool execution
     # ==================================================================
+
+    def record_profile_fallback(*, work_id: str, neuocyte_id: str,
+                                reason: str, profile_ref: str | None = None
+                                ) -> dict[str, Any]:
+        """Record that a neuocyte did not get the profile that was asked for.
+
+        A specialisation that quietly stopped applying looks exactly like one
+        that was never requested -- same behaviour, same logs, no difference
+        anybody would notice for months. So the work item says what happened
+        and the event log says why.
+
+        Annotation only. It cannot change the work's status, its lease or its
+        result; it writes one column about a neuocyte's own item.
+        """
+        def body(m: Mutation) -> None:
+            m.sql("UPDATE work_items SET profile_fallback = ? WHERE work_id = ?",
+                  (str(reason)[:300], work_id))
+            m.emit(EventKind.WORK_PROFILE_FALLBACK, {
+                "work_id": work_id, "neuocyte_id": neuocyte_id,
+                "profile_ref": profile_ref, "reason": str(reason)[:300],
+                "note": ("the requested specialisation was unavailable; the "
+                         "work ran on the profile named here")})
+
+        receipt, _ = mind.writer.apply(body, actor=neuocyte_id,
+                                       bump_version=False)
+        return {"work_id": work_id, "recorded": True,
+                "receipt_id": receipt.receipt_id}
+
     def tool_invoke(*, neuocyte_id: str, work_id: str, fencing_token: int,
                     name: str, arguments: dict[str, Any] | None = None,
                     turn: int = 0, operation_id: str | None = None
@@ -935,8 +964,15 @@ def build(sup: "Supervisor") -> dict[str, Any]:  # noqa: C901
                                        operation_id=operation_id,
                                        bump_version=outcome.accepted
                                        and not outcome.error)
+        bounded = bounded_tool_result(
+            outcome.result,
+            store=lambda text: mind.blobs.put(text.encode("utf-8")))
         return {**outcome.to_dict(), "receipt_id": receipt.receipt_id,
                 "turn": turn,
+                "result_text": bounded["text"],
+                "result_truncated": bounded["truncated"],
+                "result_chars": bounded["chars"],
+                "result_sha256": bounded["sha256"],
                 "available_tools": registry.names(role="neuocyte")}
 
     def tool_schemas(*, work_id: str | None = None, role: str = "neuocyte"
@@ -998,6 +1034,7 @@ def build(sup: "Supervisor") -> dict[str, Any]:  # noqa: C901
         "artifact_propose": artifact_propose, "artifact_promote": artifact_promote,
         "artifact_reject": artifact_reject, "artifact_list": artifact_list,
         # tool execution
+        "record_profile_fallback": record_profile_fallback,
         "tool_invoke": tool_invoke, "tool_schemas": tool_schemas,
         # host filesystem
         "file_roots": file_roots, "file_list": file_list,

@@ -387,6 +387,33 @@ not, and cannot, make one persistent mind into several.
 > One Amoeba is one cognitive trust domain. Two workloads that need real
 > isolation get two Amoebas.
 
+### Where a lineage comes from
+
+Lineage is assigned by the producer of a trigger, at the point where the
+organism still knows why the trigger exists. Nothing infers it later, because
+by then the answer is always "nobody".
+
+| trigger | lineage |
+|---|---|
+| a conversational request | the conversation, or the operation if there is none |
+| an investigation, introspection or audit request | the operation that opened it |
+| a work result | the operation that requested the work |
+| a continuation | inherited from the turn it continues |
+| a heartbeat or startup review | none, and explicitly ambient |
+| an operator message, or one role messaging the other | none, and explicitly ambient — it addresses the role, not an interaction |
+
+Declaring one or the other is mandatory: a trigger that names neither belongs
+to nobody, and a turn already serving an interaction will not admit it. That
+is the intended rule, and it makes an omission invisible at runtime — the
+trigger simply waits. So the requirement is enforced in the test suite
+instead, where forgetting fails the build rather than stalling a role.
+
+The three questions stay independent. `expects_answer` is about who is owed a
+reply; a work result is owed none and still belongs to exactly one
+interaction. `ambient` is a statement that every turn may see something, not
+a shrug about who owns it.
+
+
 See `ARCHITECTURE.md`, "One Amoeba is one cognitive trust domain".
 
 ## 17. The substrate is not a cognitive component
@@ -427,13 +454,12 @@ submit_wait_seconds = 120.0     # how long a caller blocks, not how long work ta
   push would need a second channel into the role process; the poll is one
   cheap query and was not worth the complexity yet.
 * **At-least-once, not exactly-once.** Stated in §13 rather than claimed away.
-* **One answer per turn, not per request.** `_await_turn` returns the *turn's*
-  result to every waiter whose trigger that turn consumed, so two requests
-  bundled into one turn receive the same answer, and a thought continued
-  across turns returns only the first turn's text. Answers are a property of
-  turns here and ought to be a property of requests; fixing it properly means
-  Ego recording which trigger each answer addresses, which is a design change
-  rather than a patch.
+* **Untagged evidence can wait a while.** A trigger that names no lineage is
+  admitted by the first turn that is not already serving an interaction, which
+  on a busy role may not be the next one. Every producer in the source
+  declares a lineage or declares itself ambient, so this is reachable only by
+  a new producer that forgets -- which fails a test rather than stalling
+  quietly -- but the runtime behaviour is deferral, not an error.
 * **Resource pressure does not yet gate heartbeat cognition.** The Arbiter
   knows about pressure and the heartbeat does not consult it. An event-driven
   Id turn must never be prevented indefinitely, and today nothing prevents

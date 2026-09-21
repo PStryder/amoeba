@@ -437,13 +437,171 @@ def build(sup: "Supervisor") -> dict[str, Any]:
     # ------------------------------------------------------------------
     # work queue
     # ------------------------------------------------------------------
+
+    # ==================================================================
+    # The external loop: what arrived with a request, and what goes back
+    # ==================================================================
+    def _interaction_of_turn(turn_id: str) -> str | None:
+        """Which interaction this turn is answering, from the durable record.
+
+        Walked from the turn's own triggers rather than taken as an argument.
+        Ego naming an interaction would be a cross-client read, and Ego is the
+        component most exposed to a confident user -- so the identifier it
+        would need to do that is one it never handles.
+
+        A turn holds at most one answer-bearing request (I81), so there is at
+        most one answer here. A continuation follows `parent_turn` to the turn
+        that admitted the request, because the second half of a thought is
+        still answering the first half's question.
+        """
+        seen: set[str] = set()
+        current: str | None = turn_id
+        while current and current not in seen and len(seen) < 32:
+            seen.add(current)
+            for row in mind.db.conn.execute(
+                    "SELECT payload_sha256 FROM role_triggers"
+                    " WHERE turn_id = ? AND expects_answer = 1", (current,)):
+                if not row["payload_sha256"]:
+                    continue
+                try:
+                    payload = mind.blobs.get_json(row["payload_sha256"])
+                except Exception:  # noqa: BLE001
+                    continue
+                if isinstance(payload, dict) and payload.get("interaction_id"):
+                    return str(payload["interaction_id"])
+            parent = mind.db.conn.execute(
+                "SELECT parent_turn FROM role_turns WHERE turn_id = ?",
+                (current,)).fetchone()
+            current = parent["parent_turn"] if parent else None
+        return None
+
+    def ego_read_attachment(*, input_id: str, turn_id: str,
+                            max_chars: int = 8000) -> dict[str, Any]:
+        """Read a file that arrived with the request this turn is answering.
+
+        The attachment must belong to *this* turn's interaction. Ego does not
+        say which interaction that is and cannot: the Harness resolves it from
+        the turn, so an input id belonging to somebody else resolves to a
+        refusal rather than to their file.
+
+        Text is returned as text and bounded, because an unbounded read is a
+        way to fill a context window from outside. Anything that is not text
+        is described rather than decoded: handing a model a base64 wall serves
+        nobody, and the digest is how the bytes are reached by something that
+        can actually use them.
+        """
+        row = mind.db.conn.execute(
+            "SELECT input_id, interaction_id, filename, sha256, bytes,"
+            " media_type FROM interaction_inputs WHERE input_id = ?",
+            (input_id,)).fetchone()
+        mine = _interaction_of_turn(turn_id)
+        if row is None or not mine or row["interaction_id"] != mine:
+            # Deliberately one answer for "no such input" and "not yours": the
+            # difference is only useful to somebody probing for other clients'
+            # identifiers.
+            raise NotFound("no attachment by that id on this request",
+                           input_id=input_id)
+
+        media = (row["media_type"] or "").lower()
+        textual = (media.startswith("text/") or media in
+                   ("application/json", "application/xml", "application/x-yaml")
+                   or not media)
+        out = {"input_id": row["input_id"], "filename": row["filename"],
+               "media_type": row["media_type"], "bytes": row["bytes"],
+               "sha256": row["sha256"]}
+        if not textual:
+            out["text"] = None
+            out["note"] = (f"{row['media_type']} is not text; it is stored "
+                           f"with exact-byte provenance as {row['sha256']} and "
+                           "can be given to work that can read it")
+            return out
+        try:
+            raw = mind.blobs.get(row["sha256"]).decode("utf-8")
+        except UnicodeDecodeError:
+            out["text"] = None
+            out["note"] = ("declared as text but is not valid UTF-8; the bytes "
+                           f"are stored as {row['sha256']}")
+            return out
+        if len(raw) > max(0, int(max_chars)):
+            shown = raw[:int(max_chars)]
+            out["text"] = shown
+            out["truncated"] = True
+            out["note"] = (f"showing the first {len(shown)} of {len(raw)} "
+                           f"characters; the whole file is {row['sha256']}")
+        else:
+            out["text"] = raw
+            out["truncated"] = False
+        return out
+
+    def ego_surface_result(*, sha256: str, turn_id: str,
+                           filename: str | None = None,
+                           media_type: str | None = None,
+                           artifact_id: str | None = None) -> dict[str, Any]:
+        """Make something fetchable by the client who asked this question.
+
+        The counterpart to reading an attachment, and the production caller
+        `surface_result` never had. Knowing a digest has never been authority
+        to fetch it from outside; this is the deliberate act that makes one
+        specific thing reachable, and it is recorded as such.
+
+        The interaction comes from the turn. Ego decides *what* to surface and
+        never *to whom*.
+        """
+        from .io_api import surface_result
+
+        interaction_id = _interaction_of_turn(turn_id)
+        if not interaction_id:
+            raise InvalidInput(
+                "this turn is not answering an external request, so there is "
+                "nobody to surface a result to", turn_id=turn_id)
+        return surface_result(sup, interaction_id=interaction_id,
+                              sha256=sha256, filename=filename,
+                              media_type=media_type, artifact_id=artifact_id,
+                              surfaced_by="ego")
+
+    def store_footprint() -> dict[str, Any]:
+        """How much of what there is, and what may be forgotten.
+
+        A sense. It reads and changes nothing, which is why Id may have it:
+        noticing that the organism is accumulating is homeostasis, and acting
+        on it is not Id's to decide.
+        """
+        from . import retention
+
+        out = retention.footprint(mind.db.conn)
+        cutoff = time.time() - mind.cfg.retention.working_set_seconds
+        doomed = retention.prunable(mind.db.conn, older_than=cutoff)
+        out["prunable_now"] = {"triggers": len(doomed["triggers"]),
+                               "turns": len(doomed["turns"])}
+        out["window_seconds"] = mind.cfg.retention.working_set_seconds
+        out["enabled"] = mind.cfg.retention.enabled
+        return out
+
+    def store_prune(*, older_than_seconds: float | None = None
+                    ) -> dict[str, Any]:
+        """Forget the operational working set past its window.
+
+        Never model-facing. What an organism is allowed to forget is policy,
+        and a mind that could prune its own turn history could remove the
+        record of what it did in the same motion.
+        """
+        from . import retention
+
+        window = (mind.cfg.retention.working_set_seconds
+                  if older_than_seconds is None else float(older_than_seconds))
+        _, out = mind.writer.apply(
+            lambda m: retention.prune(m, mind, older_than_seconds=window),
+            actor="supervisor", bump_version=False)
+        return out
+
     def admit_work(*, objective: str, work_class: str, origin_actor: str,
                    operation_id: str | None = None, priority: int = 0,
                    budget_tokens: int | None = None, wall_seconds: float | None = None,
                    maintenance_depth: int = 0, snapshot_id: str | None = None,
                    depends_on: Sequence[str] | None = None,
                    board_access: str = "read_write",
-                   sandbox_allowed: bool = False) -> dict[str, Any]:
+                   sandbox_allowed: bool = False,
+                   specialisation: str | None = None) -> dict[str, Any]:
         decision = sup.arbiter.admit(
             work_class=work_class, snapshot=sup.resource_snapshot(),
             requested_budget_tokens=budget_tokens, requested_wall_seconds=wall_seconds,
@@ -463,6 +621,7 @@ def build(sup: "Supervisor") -> dict[str, Any]:
         work_id, receipt = mind.work.admit(
             objective=objective, work_class=work_class, origin_actor=origin_actor,
             operation_id=operation_id, priority=priority, snapshot_id=snapshot_id,
+            specialisation=specialisation,
             model_generation=gen, budget_tokens=decision.granted_budget_tokens,
             deadline=decision.granted_deadline, maintenance_depth=maintenance_depth,
             depends_on=depends_on, board_access=board_access,
@@ -516,7 +675,11 @@ def build(sup: "Supervisor") -> dict[str, Any]:
                          "objective": (row or {}).get("objective"),
                          "work_class": (row or {}).get("work_class"),
                          "status": (row or {}).get("status")},
-                correlation_id=(row or {}).get("operation_id"))
+                correlation_id=(row or {}).get("operation_id"),
+                # The operation that requested the work *is* its lineage: the
+                # result returns to the thought that asked for it, and to no
+                # other.
+                lineage=(row or {}).get("operation_id"))
         except Exception:  # noqa: BLE001
             sup.log.debug("could not queue %s trigger for %s", kind, work_id,
                           exc_info=True)
@@ -712,45 +875,73 @@ def build(sup: "Supervisor") -> dict[str, Any]:
         }
 
     def _await_turn(trigger_id: str, *, timeout: float) -> dict[str, Any]:
-        """Wait for the turn that consumes a specific trigger.
+        """Wait for the answer to **this request**.
 
-        Waiting is a convenience for the caller, not a different ingestion
-        path. The trigger is durable and ordered the moment it is queued, and
-        whether anyone is blocked on it changes nothing about when Ego sees
-        it. A caller that gives up gets "still queued" and the cognition
-        happens anyway.
+        It used to wait for the turn that consumed the trigger and return that
+        turn's result, which made an answer a property of a turn rather than
+        of the question asked. Two requests bundled into one turn received the
+        same reply, and a thought continued across turns returned only its
+        first turn's text -- the rest was produced and then unreachable.
+
+        The mailbox now writes an answer against the request itself, following
+        the continuation chain, so this waits for exactly that. Waiting is
+        still only a convenience: the request is durable and ordered the
+        moment it is queued, and a caller that gives up changes nothing except
+        its own patience.
         """
-        from . import mailbox
-
         deadline = time.time() + max(0.0, timeout)
         while True:
             row = mind.db.conn.execute(
-                "SELECT status, turn_id FROM role_triggers WHERE trigger_id = ?",
+                "SELECT status, turn_id, answer_status, answer_sha256,"
+                " answered_by_turn FROM role_triggers WHERE trigger_id = ?",
                 (trigger_id,)).fetchone()
             if row is None:
                 raise NotFound("trigger disappeared", trigger_id=trigger_id)
             if row["status"] == "expired":
                 return {"status": "expired", "turn_id": None,
                         "note": "undeliverable after repeated failures"}
-            if row["status"] == "consumed" and row["turn_id"]:
+
+            if row["answer_status"] == "answered":
+                answer = ""
+                if row["answer_sha256"]:
+                    try:
+                        answer = (mind.blobs.get_json(row["answer_sha256"])
+                                  or {}).get("answer", "")
+                    except Exception:  # noqa: BLE001
+                        answer = ""
                 turn = mind.db.conn.execute(
                     "SELECT * FROM role_turns WHERE turn_id = ?",
-                    (row["turn_id"],)).fetchone()
-                if turn is not None and turn["status"] != "running":
-                    result = None
-                    if turn["result_sha256"]:
-                        try:
-                            result = mind.blobs.get_json(turn["result_sha256"])
-                        except Exception:  # noqa: BLE001
-                            result = None
-                    return {"status": "completed", "turn_id": row["turn_id"],
-                            "stop_reason": turn["stop_reason"],
-                            "result": result,
-                            "environment_sha256": turn["environment_sha256"],
-                            "profile_ref": turn["profile_ref"]}
+                    (row["answered_by_turn"],)).fetchone()
+                result = None
+                if turn is not None and turn["result_sha256"]:
+                    try:
+                        result = mind.blobs.get_json(turn["result_sha256"])
+                    except Exception:  # noqa: BLE001
+                        result = None
+                if isinstance(result, dict):
+                    # The answer of record wins over whatever the turn result
+                    # happened to carry.
+                    result = {**result, "answer": answer}
+                else:
+                    result = {"answer": answer}
+                return {"status": "completed",
+                        "turn_id": row["answered_by_turn"],
+                        "stop_reason": turn["stop_reason"] if turn else None,
+                        "result": result,
+                        "environment_sha256": (turn["environment_sha256"]
+                                               if turn else None),
+                        "profile_ref": turn["profile_ref"] if turn else None}
+
+            if row["answer_status"] == "unanswerable":
+                return {"status": "unanswerable",
+                        "turn_id": row["answered_by_turn"],
+                        "result": {"answer": ""},
+                        "note": ("the thought ended without producing an "
+                                 "answer to this request")}
+
             if time.time() >= deadline:
                 return {"status": row["status"], "turn_id": row["turn_id"],
-                        "note": ("still queued; Ego will process it at a turn "
+                        "note": ("still queued; Ego will answer it at a turn "
                                  "boundary and the answer is retrievable by "
                                  "trigger id")}
             time.sleep(0.1)
@@ -773,7 +964,12 @@ def build(sup: "Supervisor") -> dict[str, Any]:
                      idempotency_key: str | None = None,
                      max_tokens: int | None = None,
                      temperature: float | None = None,
-                     wait: bool = True, wait_seconds: float | None = None
+                     wait: bool = True, wait_seconds: float | None = None,
+                     # Supplied by the io worker, never by a model: they are
+                     # how the Harness scopes Ego's attachment and surfacing
+                     # effectors to this request and no other.
+                     interaction_id: str | None = None,
+                     attachments: list | None = None,
                      ) -> dict[str, Any]:
         """Give Ego something to think about, and optionally wait for it.
 
@@ -789,10 +985,25 @@ def build(sup: "Supervisor") -> dict[str, Any]:
         def run(op_id: str, limitations: list[str]) -> dict[str, Any]:
             queued = sup.methods()["role_enqueue_trigger"](
                 role="ego", kind="user_input", source="operator",
+                expects_answer=True,
                 summary=message.strip()[:400],
                 payload={"message": message[:16000],
-                         "conversation_id": conversation_id},
-                correlation_id=conversation_id, operation_id=op_id)
+                         "conversation_id": conversation_id,
+                         # Who is waiting, and what they sent. Ego never
+                         # supplies either: both are how the Harness scopes
+                         # `ego_read_attachment` and `ego_surface_result` to
+                         # this request and no other.
+                         "interaction_id": interaction_id,
+                         "attachments": list(attachments or [])},
+                correlation_id=conversation_id, operation_id=op_id,
+                # The operation, not the conversation. A conversation is many
+                # interactions, and work delegated while answering this one
+                # comes back tagged with *this* operation -- tagging the
+                # request with the conversation instead would make the
+                # returning result a stranger to the turn that asked for it.
+                # Continuity across a conversation is Ego's persistent
+                # context, which is what `conversation_id` still correlates.
+                lineage=op_id)
             out: dict[str, Any] = {"trigger_id": queued["trigger_id"],
                                    "status": "queued",
                                    "conversation_id": conversation_id}
@@ -850,12 +1061,13 @@ def build(sup: "Supervisor") -> dict[str, Any]:
                 framing += f"\nconstraints: {constraints.strip()}"
             queued = sup.methods()["role_enqueue_trigger"](
                 role="ego", kind="user_input", source="operator",
+                expects_answer=True,
                 summary=framing[:400],
                 payload={"question": question[:8000],
                          "constraints": constraints[:2000],
                          "budget_tokens": budget_tokens,
                          "intent": "investigate"},
-                operation_id=op_id)
+                operation_id=op_id, lineage=op_id)
             out: dict[str, Any] = {"trigger_id": queued["trigger_id"],
                                    "status": "queued", "question": question}
             if not wait:
@@ -926,10 +1138,11 @@ def build(sup: "Supervisor") -> dict[str, Any]:
         def run(op_id: str, limitations: list[str]) -> dict[str, Any]:
             queued = sup.methods()["role_enqueue_trigger"](
                 role="id", kind="operator_message", source="operator",
+                expects_answer=True,
                 summary=f"introspect ({scope}): {question.strip()}"[:400],
                 payload={"question": question[:8000], "scope": scope,
                          "intent": "introspect"},
-                operation_id=op_id)
+                operation_id=op_id, lineage=op_id)
             out: dict[str, Any] = {"trigger_id": queued["trigger_id"],
                                    "status": "queued", "question": question}
             if not wait:
@@ -1022,11 +1235,12 @@ def build(sup: "Supervisor") -> dict[str, Any]:
                          "UNRESOLVED: <what the record does not establish>")
             queued = sup.methods()["role_enqueue_trigger"](
                 role="id", kind="operator_message", source="operator",
+                expects_answer=True,
                 source_ref=target, summary=framing[:400],
                 payload={"conclusion_id": conclusion_id,
                          "operation_id_target": operation_id,
                          "focus": focus[:2000], "intent": "audit"},
-                operation_id=op_id)
+                operation_id=op_id, lineage=op_id)
 
             # Measured, by the Harness, regardless of what Id says.
             dossier = sup.methods()["audit_dossier"](
@@ -1288,7 +1502,10 @@ def build(sup: "Supervisor") -> dict[str, Any]:
             queued = sup.methods()["role_enqueue_trigger"](
                 role=to_role, kind="role_message", source=from_role or "supervisor",
                 summary=summary[:mailbox.MAX_SUMMARY],
-                payload={"kind": kind, "from_role": from_role, "body": body})
+                payload={"kind": kind, "from_role": from_role, "body": body},
+                # One role speaking to the other addresses the role itself, not
+                # any one of its interactions.
+                ambient=True)
         transient: dict[str, Any] = {}
         try:
             transient = sup.client(to_role).call(
@@ -1326,6 +1543,9 @@ def build(sup: "Supervisor") -> dict[str, Any]:
         "history": history, "audit_dossier": audit_dossier,
         "maintenance_context": maintenance_context,
         # work
+        "store_footprint": store_footprint, "store_prune": store_prune,
+        "ego_read_attachment": ego_read_attachment,
+        "ego_surface_result": ego_surface_result,
         "admit_work": admit_work, "lease_work": lease_work,
         "complete_work": complete_work, "fail_work": fail_work,
         "cancel_work": cancel_work, "get_work": get_work, "queue_stats": queue_stats,

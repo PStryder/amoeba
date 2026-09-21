@@ -245,24 +245,31 @@ def build(sup: "Supervisor") -> dict[str, Any]:  # noqa: C901
             sched = sup.cfg.scheduler
             patience = (sched.turn_wall_seconds
                         * (max(1, sched.max_continuations) + 2))
+            # What the client sent with this request, read back from the
+            # rows `io_submit` already verified they own. Built here rather
+            # than passed in, so what Ego is told about is what the database
+            # says arrived.
+            attachments = [
+                {"input_id": r["input_id"], "filename": r["filename"],
+                 "media_type": r["media_type"], "bytes": r["bytes"],
+                 "sha256": r["sha256"]}
+                for r in mind.db.conn.execute(
+                    "SELECT input_id, filename, media_type, bytes, sha256"
+                    " FROM interaction_inputs WHERE interaction_id = ?"
+                    " ORDER BY created_at", (interaction_id,))]
             if kind == "investigate":
                 out = sup.methods()["ego_investigate"](
                     question=text, wait_seconds=patience)
             else:
                 out = sup.methods()["ego_converse"](
                     message=text, conversation_id=conversation_id,
+                    interaction_id=interaction_id, attachments=attachments,
                     wait_seconds=patience)
             result = out.get("result") if isinstance(out, dict) else None
             answer = ""
             if isinstance(result, dict):
                 answer = (result.get("answer") or result.get("claim")
                           or result.get("plan") or "")
-            # "Complete" has to mean answered. Ego's input is queued and
-            # answered at a turn boundary, so a caller that waited longer than
-            # the turn took gets `queued` back with no answer -- and marking
-            # that complete would tell the client, permanently, that an empty
-            # response was the organism's reply. It stays in progress, and the
-            # trigger id is how the answer is collected later.
             # "Complete" has to mean answered. Reporting an empty answer as a
             # completed interaction tells the client, permanently, that
             # nothing was the organism's reply.

@@ -460,7 +460,9 @@ class Supervisor:
                 summary=("periodic homeostatic review: nothing has woken you, "
                          "check the organism's internal state"),
                 payload={"reason": "periodic_homeostatic_review",
-                         "interval_seconds": interval})
+                         "interval_seconds": interval},
+                # About the organism, not about anybody's question.
+                ambient=True)
         except Exception:  # noqa: BLE001
             self.log.debug("heartbeat scheduling failed", exc_info=True)
             return
@@ -492,7 +494,8 @@ class Supervisor:
                 self.methods()["role_enqueue_trigger"](
                     role=role, kind="startup", source="supervisor",
                     summary=summary,
-                    payload={"run_id": self.mind.run_id if self.mind else None})
+                    payload={"run_id": self.mind.run_id if self.mind else None},
+                    ambient=True)
             except Exception:  # noqa: BLE001
                 self.log.warning("could not queue %s startup turn", role,
                                  exc_info=True)
@@ -659,6 +662,31 @@ class Supervisor:
         # writer lock, and holding the scheduler lock across it would make
         # every trigger enqueue wait behind a neuocyte spawn.
         self._expire_stale_turns()
+        self._retention_tick()
+
+    def _retention_tick(self) -> None:
+        """Housekeeping, on a cadence measured in hours.
+
+        Not a cognitive decision and not an urgent one. The working set grows
+        slowly, so a sweep that finds nothing should be rare rather than
+        merely cheap.
+        """
+        policy = self.cfg.retention
+        if not policy.enabled or self.mind is None:
+            return
+        now = time.time()
+        if now - getattr(self, "_last_prune", 0.0) < policy.sweep_seconds:
+            return
+        self._last_prune = now
+        try:
+            out = self.methods()["store_prune"]()
+        except Exception:  # noqa: BLE001
+            self.log.exception("retention sweep failed")
+            return
+        if out.get("triggers_pruned") or out.get("turns_pruned"):
+            self.log.info("pruned %d trigger(s) and %d turn(s) older than %.0fs",
+                          out["triggers_pruned"], out["turns_pruned"],
+                          policy.working_set_seconds)
 
     def _homeostasis_tick(self) -> None:
         """Context pressure is checked on a slow cadence, not every second."""
