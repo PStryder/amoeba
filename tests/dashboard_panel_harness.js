@@ -73,6 +73,36 @@ function respond(i) {
   };
 }
 
+// A room, when the scenario asks for one. The backchannel panel polls with
+// the last sequence it saw, so canned positional responses would re-deliver
+// the same entries forever and prove nothing. This is the smallest server
+// that makes `since` mean what it means: entries after a sequence, plus
+// whatever the operator just said.
+let roomSeq = (scn.room || []).reduce((m, e) => Math.max(m, e.seq || 0), 0);
+function roomResponse(params) {
+  const since = Number(params.since || 0);
+  // Somebody else speaking while the page is open, on a chosen poll.
+  for (const inj of scn.injections || []) {
+    if (inj.beforeRequest === requests.length) {
+      scn.room.push({seq: ++roomSeq, ts: 0, author: inj.author, text: inj.text});
+    }
+  }
+  if (params.message) {
+    scn.room.push({seq: ++roomSeq, ts: 0, author: "operator",
+                   text: params.message});
+  }
+  return {
+    status: 200,
+    headers: {get: () => "application/json"},
+    text: async () => JSON.stringify({jsonrpc: "2.0", id: 1, result: {
+      entries: scn.room.filter((e) => e.seq > since),
+      latest_seq: roomSeq, held: scn.room.length, capacity: 400,
+      delivered: params.message ? [{role: "ego"}, {role: "id"}] : [],
+      note: "the live room for this runtime",
+    }}),
+  };
+}
+
 function fetchShim(_url, opts) {
   // The script boots itself on load. Nothing during boot should consume a
   // scripted response, so it hangs harmlessly until the panel under test
@@ -81,6 +111,14 @@ function fetchShim(_url, opts) {
   const body = JSON.parse(opts.body);
   requests.push({method: body.method, params: body.params,
                  token: (opts.headers || {})["X-Amoeba-Operator"]});
+  if (scn.room) {
+    inflight += 1;
+    const params = body.params || {};
+    return new Promise((resolve) => hostTimeout(() => {
+      inflight -= 1;
+      resolve(roomResponse(params));
+    }, 0));
+  }
   if (scn.maxRequests && requests.length > scn.maxRequests) {
     return new Promise(() => {});   // freeze: the panel is still waiting
   }
@@ -104,9 +142,11 @@ const ctx = {
   },
   localStorage: {getItem: () => scn.session || "", setItem: () => {}},
   fetch: fetchShim,
-  // Real ordering, no real waiting: the poll interval is not what is under
-  // test and a test should not spend it.
-  setTimeout: (fn) => hostTimeout(fn, 0),
+  // Real ordering, compressed waiting. A poll interval is not what is under
+  // test and a test should not spend it, but collapsing it to zero makes a
+  // live-polling panel spin as fast as the event loop and drown everything
+  // else. Long waits become short ones; short ones stay immediate.
+  setTimeout: (fn, ms) => hostTimeout(fn, (ms || 0) >= 1000 ? 20 : 0),
   setInterval: () => 0,
   alert: () => {},
   console: {log() {}, error() { errors.push([...arguments].map(String).join(" ")); }},
@@ -165,6 +205,13 @@ async function idle() {
 
   for (const a of scn.actions || []) {
     if (a.type === "type") box.value = a.text;
+    else if (a.type === "wait") {
+      // Let a live panel poll. Waiting for a request count rather than for a
+      // duration keeps the test deterministic on a slow machine.
+      for (let i = 0; i < 400 && requests.length < (a.untilRequests || 0); i++) {
+        await new Promise((r) => hostTimeout(r, 5));
+      }
+    }
     else if (a.type === "click") send.onclick();
     else if (a.type === "key") {
       box.onkeydown({key: a.key, shiftKey: !!a.shift, isComposing: !!a.composing,

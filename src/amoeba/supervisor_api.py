@@ -1608,6 +1608,18 @@ def build(sup: "Supervisor") -> dict[str, Any]:
                 # One role speaking to the other addresses the role itself, not
                 # any one of its interactions.
                 ambient=True)
+        # Peer traffic reaches the live room from here, which is the one
+        # place it all passes through, so the view is assembled from what was
+        # actually carried rather than from each caller remembering to report
+        # itself. Authorship is `from_role`, which the Harness sets.
+        #
+        # Not the Operator: a room entry is an utterance, and the Operator
+        # utters once even though the Harness delivers to both minds. That
+        # entry is posted by `operator_backchannel`, where the one act is.
+        if from_role in ("ego", "id"):
+            sup.room.post(author=from_role,
+                          text=str(body.get("message") or ""), kind=kind)
+
         transient: dict[str, Any] = {}
         try:
             transient = sup.client(to_role).call(

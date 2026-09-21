@@ -145,7 +145,14 @@ on loopback does not make JavaScript privileged.
 Views: organism state, Ego/Id incarnations, neuocytes and work, blackboard,
 maintained memory, artifacts and proposals, provenance, prompt library and
 lineage, Id telemetry, security and sandbox posture, resource versions,
-backchannel transcript, Ego conversation, Id consultation.
+the live Ego/Id/Operator room, Ego conversation, Id
+consultation.
+
+**The backchannel page is a viewport, not a transcript.** It shows a bounded
+in-memory buffer of this runtime's room traffic, and a restart starts it
+empty. Nothing about what a message influenced depends on it: that is the
+message's durable trigger and the turn that consumed it. An Operator message
+addresses the room and is delivered, separately attributed, to both minds.
 
 **Operator authority does not leak into cognition.** Talking to Ego and
 consulting Id are *inputs* — auditable, attributed, carrying no capability. Ego

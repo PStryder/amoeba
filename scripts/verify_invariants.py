@@ -1516,6 +1516,32 @@ MUTATIONS: list[Mutation] = [
         layer="DASHBOARD_HTML (whether the embedded script parses at all)",
         note="The mutant restores the Python habit that broke the console: drop one `+` between wrapped string literals. It is invisible in Python, fatal in JavaScript, and takes the whole page down rather than the one line it appears on.",
     ),
+    Mutation(
+        "I105", "The Operator contributes to the room and cannot speak as either mind in it",
+        "src/amoeba/operator_api.py",
+        '            for role in ("ego", "id"):',
+        '            for role in ("ego",):  # MUTANT: only one mind hears it',
+        ["test_the_operator_speaks_to_the_room_and_both_minds_hear_it",
+         "test_an_author_nobody_can_be_held_to_is_refused"],
+        layer="operator_backchannel / Room.post (who an Operator message reaches, and who it can claim to be)",
+        note="The mutant is the shape the verb had before: one recipient, chosen by the caller. It passes every other test here, and it is how a room quietly becomes a private wire -- one mind acting on something the other never heard. The second anchor removes the authorship check, so an entry can be recorded that nobody can be held to.",
+        also=[("src/amoeba/room.py",
+               "        if author not in AUTHORS:",
+               "        if False:  # MUTANT: any author will do")],
+    ),
+    Mutation(
+        "I106", "The live view may forget; the record may not",
+        "src/amoeba/room.py",
+        "        self._entries: deque[dict[str, Any]] = deque(maxlen=maxlen)",
+        "        self._entries: deque[dict[str, Any]] = deque()  # MUTANT: unbounded",
+        ["test_the_room_is_bounded",
+         "test_a_room_message_is_durably_recorded_even_though_the_view_is_not"],
+        layer="Room (a viewport that is allowed to forget, and must not be the record)",
+        note="An unbounded viewport is a leak wearing a feature's clothes, and a viewport that never forgets starts being treated as history. The second test holds the other end: durable causal recording is not this buffer's job and must survive without it.",
+        also=[("src/amoeba/supervisor_api.py",
+               '        if from_role in ("ego", "id"):',
+               "        if False:  # MUTANT: peer messages never reach the room")],
+    ),
 ]
 
 

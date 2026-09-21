@@ -69,6 +69,10 @@ DASHBOARD_HTML = """<!doctype html>
   .turn .who { font-size:11px; text-transform:uppercase; letter-spacing:.09em;
                color:var(--dim); margin-bottom:.2rem; }
   .turn.them .who { color:var(--accent); }
+  .turn.ego .who { color:var(--accent); }
+  .turn.id .who { color:var(--warn); }
+  .turn.operator .who { color:var(--ink); }
+  .turn.operator .said { color:var(--dim); }
   .said { white-space:pre-wrap; word-break:break-word; line-height:1.55; }
   .turn.me .said { color:var(--dim); }
   .waiting { color:var(--dim); font-style:italic; font-size:13px; }
@@ -96,6 +100,9 @@ const PANELS = ["overview","work","blackboard","memory","artifacts","prompts",
                 "health","provenance","converse","consult id","backchannel"];
 let session = localStorage.getItem("amoeba_operator") || "";
 let current = "overview";
+// Navigating away ends whatever the last panel was waiting on. A poll
+// that outlives its page keeps asking questions nobody is reading.
+let panelGen = 0;
 
 // Read the response before believing it. This used to call `r.json()`
 // unconditionally, so an HTML error page -- which is what the stock server
@@ -224,6 +231,7 @@ function table(rows, cols) {
 // at it would be a second memory telling a slightly different story. A reload
 // starting empty is correct, not a missing feature.
 const POLL_MS = 1500;
+const ROOM_POLL_MS = 2000;
 const GIVE_UP_MS = 20 * 60 * 1000;
 
 // The operation completing is not the answer arriving. The envelope's status
@@ -277,7 +285,9 @@ function conversation(main, spec) {
 
   async function collect(trigger_id) {
     const until = Date.now() + GIVE_UP_MS;
+    const mine = panelGen;
     for (;;) {
+      if (panelGen !== mine) throw new Error("left the page while waiting");
       // This request's answer, by this request's id. A thought spanning
       // continuation turns is still answering the message that began it, and
       // the operator never has to know that happened.
@@ -644,24 +654,106 @@ const render = {
     });
   },
   async backchannel(main) {
-    const b = await rpc("operator_backchannel", {limit:40});
-    const c = card("ego ↔ id backchannel", true);
-    c.appendChild(table(b.transcript, ["seq","kind","actor","from_role","to_role"]));
-    const row = el("div","row");
-    const who = el("select");
-    ["ego","id"].forEach(r=>{const o=el("option",null,r); o.value=r; who.appendChild(o);});
-    const m = el("input"); m.placeholder="message…";
-    const go2 = el("button","go","send");
-    go2.onclick = async()=>{ try{ await rpc("operator_backchannel",
-      {to_role:who.value, message:m.value}); go(current);}catch(e){alert(e.message);} };
-    row.append(who, m, go2); c.appendChild(row);
-    c.appendChild(el("div","pill", b.note));
-    main.appendChild(c);
+    // One room, three participants, live. Authorship is the Harness's to
+    // state: there is no sender control here and there cannot be one, since
+    // the verb has no parameter the Operator could use to post as Ego or Id.
+    const chat = el("div","chat");
+    chat.appendChild(el("div","pill",
+      "the live room for this runtime \u2014 it is not history, and a " +
+      "restart starts it empty"));
+    const stream = el("div","stream");
+    const notice = el("div","notice"); notice.hidden = true;
+    const composer = el("div","composer");
+    const box = el("textarea");
+    box.placeholder = "say something to Ego and Id\u2026";
+    const send = el("button","go","send");
+    composer.append(box, send);
+    chat.append(stream, notice, composer);
+    main.appendChild(chat);
+
+    const mine = panelGen;
+    let seen = 0, quiet = 0;
+
+    const atBottom = () =>
+      stream.scrollHeight - stream.scrollTop - stream.clientHeight < 96;
+
+    function append(entries) {
+      if (!entries || !entries.length) return;
+      const was = atBottom();
+      for (const e of entries) {
+        // A poll already in flight when the operator sends carries the same
+        // `since`, so the same entry can arrive twice. Appending by sequence
+        // makes that harmless instead of making it a duplicate on screen.
+        if (e.seq <= seen) continue;
+        const turn = el("div","turn " + e.author);
+        turn.appendChild(el("div","who", e.author));
+        turn.appendChild(el("div","said", e.text));
+        stream.appendChild(turn);
+        if (e.seq > seen) seen = e.seq;
+      }
+      if (was) stream.scrollTop = stream.scrollHeight;
+    }
+
+    function complain(e) {
+      notice.hidden = false; notice.textContent = e.message;
+      if (e.reauth) chat.insertBefore(tokenRow(), composer);
+    }
+
+    async function pump(params) {
+      const room = await rpc("operator_backchannel", params);
+      append(room.entries);
+      notice.hidden = true;
+      quiet = 0;
+      return room;
+    }
+
+    try { await pump({since:0}); }
+    catch (e) { complain(e); if (e.reauth) return; }
+
+    // Bounded polling. The dashboard already works this way and the room is
+    // a handful of short entries; a second transport would be infrastructure
+    // for its own sake.
+    (async function watch() {
+      while (panelGen === mine) {
+        await new Promise(r => setTimeout(r, ROOM_POLL_MS));
+        if (panelGen !== mine) return;
+        try { await pump({since:seen}); }
+        catch (e) {
+          if (e.reauth) { complain(e); return; }
+          // One blip is not worth a banner; a pattern is.
+          if (++quiet >= 3) complain(e);
+        }
+      }
+    })();
+
+    async function submit() {
+      const text = box.value.trim();
+      if (!text || send.disabled) return;
+      send.disabled = true; notice.hidden = true;
+      try {
+        // The operator's own words come back through the same buffer as
+        // everyone else's, so the room reflects what was carried rather than
+        // what this page hoped had been.
+        await pump({message:text, since:seen});
+        box.value = "";
+      } catch (e) { complain(e); }
+      send.disabled = false;
+    }
+
+    send.onclick = submit;
+    box.onkeydown = (e) => {
+      if (e.key !== "Enter" || e.shiftKey || e.isComposing) return;
+      if (e.ctrlKey || e.altKey || e.metaKey) return;
+      e.preventDefault();
+      submit();
+    };
+    if (box.focus) box.focus();
   },
 };
 
 async function go(panel) {
   current = panel;
+  panelGen += 1;
   [...document.querySelectorAll("nav button")]
     .forEach(b => b.classList.toggle("on", b.textContent === panel));
   const main = document.getElementById("main");

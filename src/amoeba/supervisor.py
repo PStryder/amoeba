@@ -34,6 +34,7 @@ from .http_api import ApiServer
 from .mind import Mind
 from .pulse import PulseCollector
 from .rpc import RpcClient, RpcServer, read_or_create_token, wait_for_port
+from .room import Room
 from .sandbox import SandboxManager
 from .security import audit_paths, harden_state_tree
 from .store.events import EventKind, read_events
@@ -124,6 +125,10 @@ class Supervisor:
         self.log = get_logger("supervisor")
         self.lock = SingleInstanceLock(cfg.lock_path)
         self.token = read_or_create_token(cfg.token_path)
+        # The live backchannel, for watching rather than for the record. It is
+        # capped and it dies with this process; what a message actually did
+        # lives in its trigger and in the turn that consumed it.
+        self.room = Room()
         self.mind: Mind | None = None
         self.arbiter = Arbiter(cfg.arbiter)
         self.started_at = time.time()

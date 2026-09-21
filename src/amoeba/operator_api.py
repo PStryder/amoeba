@@ -241,46 +241,62 @@ def build(sup: "Supervisor") -> dict[str, Any]:
         return {"consult_id": consult_id, "receipt_id": receipt.receipt_id,
                 "answer": answer}
 
-    def operator_backchannel(*, limit: int = 50, message: str = "",
-                             to_role: str = "", operation_id: str | None = None
-                             ) -> dict[str, Any]:
-        """Observe, and optionally join, the Ego/Id backchannel.
+    def operator_backchannel(*, limit: int = 100, since: int = 0,
+                             message: str = "",
+                             operation_id: str | None = None) -> dict[str, Any]:
+        """Watch the Ego/Id/Operator room, and optionally speak into it.
 
-        Every message carries explicit authorship. The Operator joining the
-        room grants nobody anything: Ego does not acquire operator capability
-        because the Operator spoke in a thread it can read.
+        There is no recipient argument, because there is no recipient. The
+        Operator addresses the room, and the Harness delivers one durably
+        attributed `role_message` to each mind. Two deliveries rather than one
+        hidden broadcast: each carries its own provenance and each shows up in
+        the receiving role's own bundle, so nothing about who heard what is
+        inferred after the fact.
+
+        Authorship is structural. There is no `from_role` parameter and never
+        was; the Operator cannot post as Ego or Id, and the Harness stamps
+        every entry with the author it actually carried. The Operator speaking
+        in a room Ego can read grants Ego nothing -- this is information, not
+        capability.
+
+        What comes back is the live buffer, not history. It holds this
+        runtime's traffic, it is capped, and it is gone after a restart. What
+        a message *did* is a different question, answered by its trigger and
+        by the turn that consumed it.
         """
-        from .store.events import read_events
-
+        delivered = []
         if message:
-            if to_role not in ("ego", "id"):
-                raise InvalidInput("backchannel messages target ego or id",
-                                   to_role=to_role)
-            sup.methods()["side_channel"](
-                to_role=to_role, kind="operator_message",
-                payload={"message": message[:2000], "from": "operator"},
-                from_role="operator")
+            text = message.strip()[:2000]
+            if not text:
+                raise InvalidInput("a room message needs something in it")
+            # One utterance, whatever the delivery count.
+            sup.room.post(author="operator", text=text, kind="operator_message")
+            # Both minds, each on the record. The room is the addressee; the
+            # two deliveries are how a room is spelled in a mailbox model.
+            for role in ("ego", "id"):
+                out = sup.methods()["side_channel"](
+                    to_role=role, kind="operator_message",
+                    payload={"message": text, "from": "operator"},
+                    from_role="operator")
+                delivered.append({"role": role,
+                                  "trigger_id": out.get("trigger_id")})
 
             def body(m: Mutation) -> None:
+                # One act by the Operator, two deliveries by the Harness.
                 m.emit(EventKind.SIDE_CHANNEL_SIGNAL, {
-                    "from_role": "operator", "to_role": to_role,
-                    "kind": "operator_message", "message": message[:2000],
+                    "from_role": "operator", "to_role": ["ego", "id"],
+                    "kind": "operator_message", "message": text,
                     "note": "information, not capability"})
 
             mind.writer.apply(body, actor="operator", operation_id=operation_id,
                               bump_version=False)
 
-        transcript = []
-        for ev in read_events(mind.db.conn,
-                              kinds=[EventKind.SIDE_CHANNEL_SIGNAL,
-                                     EventKind.EGO_REVIEW_REQUESTED,
-                                     EventKind.OPERATOR_CONSULTED_ID],
-                              limit=max(1, min(int(limit), 200))):
-            payload = ev.payload(mind.blobs) or {}
-            transcript.append({"seq": ev.seq, "ts": ev.ts, "kind": ev.kind,
-                               "actor": ev.actor_id, **payload})
-        return {"transcript": transcript, "count": len(transcript),
-                "note": "every entry carries explicit authorship"}
+        return {"entries": sup.room.since(int(since), limit=int(limit)),
+                **sup.room.state(),
+                "delivered": delivered,
+                "note": ("the live room for this runtime; it is capped and "
+                         "does not survive a restart. What a message "
+                         "influenced is recorded in its trigger and turn.")}
 
     return {
         "operator_overview": operator_overview,

@@ -1345,6 +1345,41 @@ needing an engine present, and parsed outright when one is.
 `test_the_dashboard_script_parses_as_javascript`,
 `test_the_dashboard_page_is_served_whole`
 
+**I105. The Operator contributes to the room and cannot speak as either
+mind in it.** The backchannel is one room with three participants, and an
+Operator message addresses the room rather than a role: the Harness delivers a
+separately attributed `role_message` to Ego and to Id, so which mind heard
+what is a fact on the record and not an inference. Two deliveries rather than
+one hidden broadcast.
+
+Authorship is structural rather than validated. `operator_backchannel` has no
+`from_role`, `actor` or `author` parameter, so posting as Ego is not refused —
+it is unsayable. Every room entry is stamped by the Harness with the author it
+actually carried, and an entry nobody can be held to is refused rather than
+recorded. The Operator speaking in a room Ego reads grants Ego nothing; this
+is information, not capability.
+→ `test_the_operator_speaks_to_the_room_and_both_minds_hear_it`,
+`test_the_operator_cannot_post_as_ego_or_id`,
+`test_an_author_nobody_can_be_held_to_is_refused`,
+`test_each_direction_of_the_backchannel_lands_in_the_other_mind`
+
+**I106. The live view may forget; the record may not.** The room buffer is
+bounded, in memory, and owned by the running supervisor: it shows this
+runtime's traffic and is empty after a restart. That is correct for a
+viewport, and it is only acceptable because it is not the record. What a
+backchannel message *influenced* lives where influence always lives here — in
+the durable trigger it was queued as, and in the turn that consumed it — and
+the Operator's own act is in the event ledger, because that is governance.
+
+Reconstructing the conversation from the event ledger was the alternative, and
+it is worse: it makes the ledger answer a question it is not for, and a second
+stored copy of what a role said is a record that can disagree with the one
+that actually shaped cognition. The division is the point. Only the view
+forgets.
+→ `test_the_room_does_not_survive_a_restart_but_the_record_does`,
+`test_a_room_message_is_durably_recorded_even_though_the_view_is_not`,
+`test_the_room_is_bounded`, `test_a_reader_gets_only_what_it_has_not_seen`
+
 **I73. A role is never wedged by a turn it did not close.** One open turn per
 role is a database constraint, so a turn left running blocks every future turn
 for that role — the role heartbeats, reports healthy, and never thinks again
