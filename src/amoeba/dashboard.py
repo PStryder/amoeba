@@ -43,6 +43,12 @@ DASHBOARD_HTML = """<!doctype html>
              letter-spacing:.08em; color:var(--dim); font-weight:600; }
   .kv { display:grid; grid-template-columns:auto 1fr; gap:.15rem .75rem; font-size:13px; }
   .kv dt { color:var(--dim); } .kv dd { margin:0; font-variant-numeric:tabular-nums; }
+  .kv .group { grid-column:1/-1; color:var(--dim); margin-top:.3rem; }
+  .kv .nest { grid-column:1/-1; }
+  .kv .nest > .kv { padding-left:.6rem; margin-left:.1rem;
+                    border-left:1px solid var(--line); }
+  .kv .note { grid-column:1/-1; color:var(--dim); font-size:11px;
+              line-height:1.35; opacity:.8; }
   pre { margin:0; white-space:pre-wrap; word-break:break-word; font-size:12px;
         color:var(--dim); max-height:22rem; overflow:auto; }
   .wide { grid-column:1/-1; }
@@ -90,11 +96,47 @@ const el = (t,c,x) => { const n=document.createElement(t); if(c)n.className=c;
 function card(title, wide) {
   const c = el("div","card"+(wide?" wide":"")); c.appendChild(el("h2",null,title)); return c;
 }
-function kv(obj) {
+// Presentation only. Cards are handed whatever shape the pulse reports, so
+// making structure legible is the renderer's job rather than each caller's.
+const DASH = "\u2014";
+// Units live in the pulse field names; the card shows the measurement, so the
+// name loses the unit and gains the reading.
+const LABELS = {oldest_seconds:"oldest", over_a_day:">24h", over_a_week:">7d"};
+function humanSeconds(n) {
+  if (!isFinite(n)) return String(n);
+  if (n < 90) return (n < 10 ? n.toFixed(1) : Math.round(n)) + "s";
+  if (n < 5400) return Math.round(n/60) + "m";
+  if (n < 172800) return (n/3600).toFixed(1) + "h";
+  return (n/86400).toFixed(1) + "d";
+}
+function metric(k, v) {
+  // An absent measurement is an absence. "null" in a numeric column reads as
+  // a broken reading rather than as nothing to report.
+  if (v === null || v === undefined || v === "") return DASH;
+  if (typeof v === "number" && /_seconds$/.test(k)) return humanSeconds(v);
+  return String(v);
+}
+function kv(obj, nested) {
   const d = el("dl","kv");
-  for (const [k,v] of Object.entries(obj)) {
-    d.appendChild(el("dt",null,k));
-    d.appendChild(el("dd",null, typeof v==="object"&&v!==null?JSON.stringify(v):String(v)));
+  for (const [k,v] of Object.entries(obj || {})) {
+    const label = LABELS[k] || k.replace(/_seconds$/,"");
+    const flat = Array.isArray(v) && v.every(x => x === null || typeof x !== "object");
+    if (v !== null && typeof v === "object" && !flat) {
+      // Nested, not stringified: an object in a value column is unreadable
+      // at any width, and widening the column is not the fix.
+      d.appendChild(el("dt","group",label));
+      const dd = el("dd","nest");
+      dd.appendChild(kv(Array.isArray(v)
+        ? Object.fromEntries(v.map((x,i)=>[String(i),x])) : v, true));
+      d.appendChild(dd);
+    } else if (typeof v === "string" && v.length > 48) {
+      // Prose, kept rather than dropped, but out of the measurement column.
+      const dd = el("dd","note",v); dd.title = k; d.appendChild(dd);
+    } else {
+      d.appendChild(el("dt",null,label));
+      d.appendChild(el("dd",null,
+        flat ? (v.length ? v.join(", ") : DASH) : metric(k,v)));
+    }
   }
   return d;
 }
@@ -234,7 +276,7 @@ const render = {
       go(current);}catch(e){alert(e.message);} };
     grow.append(vid, st, setst, sel); c.appendChild(grow);
     c.appendChild(el("div","pill",
-      "approving makes a version selectable; selecting changes what is born "
+      "approving makes a version selectable; selecting changes what is born " +
       "next. A running Ego, Id or neuocyte keeps the profile it was bound to."));
 
     // Cascade, previewed before it is run.
@@ -277,7 +319,7 @@ const render = {
     const oc = card("root suggestions (legacy proposal log)", false);
     oc.appendChild(table(p.pending, ["proposal_id","role","candidate_sha256","rationale"]));
     oc.appendChild(el("div","pill",
-      "ego and id are bootstrap-only roots: these are suggested wordings, not "
+      "ego and id are bootstrap-only roots: these are suggested wordings, not " +
       "library candidates. Adopting one means editing the shipped prompt file."));
     main.appendChild(oc);
   },
@@ -316,7 +358,7 @@ const render = {
       tools: x.tool_call_count, continues: x.parent_turn || "",
     })), ["turn_id","role","why","n","stop_reason","status","tools","continues"]));
     c.appendChild(el("div","pill",
-      "a continuation is a new bounded turn whose parent is recorded, not an "
+      "a continuation is a new bounded turn whose parent is recorded, not an " +
       "invisible extension of the previous one"));
 
     // Drill into one turn: the exact bundle and environment it was given.
@@ -347,7 +389,7 @@ const render = {
       go(current);}catch(e){alert(e.message);} };
     mrow.append(who, msg, send); c.appendChild(mrow);
     c.appendChild(el("div","pill",
-      "a message wakes the role and is attributable; it carries no authority, "
+      "a message wakes the role and is attributable; it carries no authority, " +
       "and the role acts only through its own effectors"));
     main.appendChild(c);
   },

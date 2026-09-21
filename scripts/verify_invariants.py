@@ -1493,6 +1493,29 @@ MUTATIONS: list[Mutation] = [
         layer="_settle_if_the_ground_moved (whether a supporting audit closes a dispute)",
         note="The mutant is the tempting wrong implementation: close whenever a later audit says supported. It passes every other test here, and lets Id open a dispute and then self-certify it away against identical evidence -- which is what separating Ego from Id exists to prevent.",
     ),
+    Mutation(
+        "I103", "A refused request does not poison the next one",
+        "src/amoeba/http_api.py",
+        "            self._drain()",
+        "            pass  # MUTANT: the unread body stays in the socket",
+        ["test_a_refused_request_does_not_poison_the_next_one",
+         "test_several_refusals_in_a_row_leave_the_connection_usable"],
+        layer="Handler._send (whether a response consumes the body it did not read)",
+        note="Defended twice, because the fix has two halves and each fails alone. Removing the drain breaks the first refusal; leaving the drain but not clearing its state per request breaks the second one instead, since a single handler instance serves the whole connection. The second mutant is the more instructive: it looks fixed until somebody mistypes a token twice.",
+        also=[("src/amoeba/http_api.py",
+               "            self._body_consumed = False",
+               "            pass  # MUTANT: last request's state decides this one")],
+    ),
+    Mutation(
+        "I104", "The operator console is valid JavaScript",
+        "src/amoeba/dashboard.py",
+        " +\n",
+        "\n",
+        ["test_the_dashboard_script_has_no_python_string_concatenation",
+         "test_the_dashboard_script_parses_as_javascript"],
+        layer="DASHBOARD_HTML (whether the embedded script parses at all)",
+        note="The mutant restores the Python habit that broke the console: drop one `+` between wrapped string literals. It is invisible in Python, fatal in JavaScript, and takes the whole page down rather than the one line it appears on.",
+    ),
 ]
 
 

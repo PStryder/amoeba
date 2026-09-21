@@ -246,8 +246,51 @@ def _make_handler(api: ApiServer) -> type[BaseHTTPRequestHandler]:  # noqa: C901
             api.log.debug("%s - %s", self.address_string(), fmt % args)
 
         # -- helpers ---------------------------------------------------
+        def handle_one_request(self) -> None:
+            # One handler instance serves every request on a keep-alive
+            # connection, so per-request state has to be cleared here. Leaving
+            # `_body_consumed` set from the previous request meant the second
+            # refusal on a connection skipped its drain and desynchronised the
+            # stream -- the same failure the drain exists to prevent, one
+            # request later.
+            self._body_consumed = False
+            super().handle_one_request()
+
+        def _drain(self) -> None:
+            """Consume any request body the handler did not read.
+
+            A keep-alive connection carries the next request immediately after
+            this one's body. Answering without reading that body leaves it in
+            the socket, and the next request is parsed starting from the
+            middle of it -- so the failure surfaces on the *following*
+            request, which is invariably an innocent one.
+
+            An oversized body is not drained. Reading an attacker-chosen
+            number of bytes in order to discard them is exactly what the size
+            limit exists to prevent, so the connection is closed instead.
+            """
+            if getattr(self, "_body_consumed", False):
+                return
+            self._body_consumed = True
+            try:
+                length = int(self.headers.get("Content-Length") or 0)
+            except ValueError:
+                length = 0
+            if length <= 0:
+                return
+            if length > MAX_BODY_BYTES:
+                self.close_connection = True
+                return
+            try:
+                self.rfile.read(length)
+            except Exception:  # noqa: BLE001
+                self.close_connection = True
+
         def _send(self, code: int, payload: Any, *, ctype: str = "application/json"
                   ) -> None:
+            # Before the response, not after: the body has to leave the socket
+            # while the connection is still ours to keep in step.
+            self._drain()
             data = (payload if isinstance(payload, bytes)
                     else json.dumps(payload, default=str).encode("utf-8"))
             self.send_response(code)
@@ -261,7 +304,13 @@ def _make_handler(api: ApiServer) -> type[BaseHTTPRequestHandler]:  # noqa: C901
         def _body(self) -> Any:
             length = int(self.headers.get("Content-Length") or 0)
             if length > MAX_BODY_BYTES:
+                # Not read at all, so the connection cannot be reused: the
+                # bytes are still in the socket and draining them is the very
+                # thing this limit refuses to do.
+                self.close_connection = True
+                self._body_consumed = True
                 raise ValueError("request body too large")
+            self._body_consumed = True
             return json.loads(self.rfile.read(length) or b"null")
 
         def _origin_ok(self) -> bool:

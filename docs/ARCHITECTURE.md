@@ -1314,6 +1314,37 @@ that only grows stops being read.
 `test_the_evidence_basis_digest_reflects_the_measured_dossier`,
 `test_a_supporting_audit_on_a_changed_basis_settles_the_dispute`
 
+**I103. A refused request does not poison the next one.** A response that
+never read the request body leaves it in the socket, and because the operator
+console speaks over a keep-alive connection the *next* request is then parsed
+starting from the middle of it. The failure surfaces one request late, on an
+innocent one, as a nonsense method name assembled from the previous body and
+the new verb -- which reads like a server that has lost its mind rather than
+like an unread body. Every response therefore drains what the handler did not
+read, in `_send` rather than in each handler, because every error path returns
+through there including ones nobody has written yet.
+
+Two things this deliberately does not do. An oversized body is not drained:
+reading an attacker-chosen number of bytes in order to discard them is exactly
+what the size limit exists to prevent, so the connection is closed instead. And
+the drain state is cleared per request, not per handler -- one handler instance
+serves the whole connection, so state left over from the previous request made
+the *second* refusal skip its drain and desynchronise anyway.
+→ `test_a_refused_request_does_not_poison_the_next_one`,
+`test_several_refusals_in_a_row_leave_the_connection_usable`
+
+**I104. The operator console is valid JavaScript.** The dashboard script lives
+inside a Python string, where `"a"` on one line and `"b"` on the next
+concatenate silently. In JavaScript that is a syntax error, and a syntax error
+anywhere in the script means none of it runs: no nav, no panels, no request
+ever attempted, and a header left saying "connecting..." forever. The page
+presents a compile error as a connection problem, so the operator debugs the
+wrong thing. The embedded script is checked for that specific mistake without
+needing an engine present, and parsed outright when one is.
+→ `test_the_dashboard_script_has_no_python_string_concatenation`,
+`test_the_dashboard_script_parses_as_javascript`,
+`test_the_dashboard_page_is_served_whole`
+
 **I73. A role is never wedged by a turn it did not close.** One open turn per
 role is a database constraint, so a turn left running blocks every future turn
 for that role — the role heartbeats, reports healthy, and never thinks again
