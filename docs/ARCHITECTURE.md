@@ -1214,6 +1214,39 @@ reason that is not about resources.
 `test_maintenance_demand_is_estimated_from_its_own_budget`,
 `test_the_shipped_policy_fits_the_pool_it_shares`
 
+**I99. Only the discretionary turn yields to pressure.** A heartbeat is the
+one turn the organism gives itself when nothing has happened, so it is the one
+worth not taking while the pool is strained: it costs a prefill and grows Id's
+context at exactly the wrong moment, and nobody is waiting on it. An
+event-driven turn is never held back at any pressure -- a role that something
+happened to must be able to think about it -- which is why the gate lives in
+the heartbeat scheduler and is reachable from nowhere else.
+
+The tension this has to survive is that **Id's heartbeat is the homeostatic
+review**, so deferring it risks suppressing the thing that notices pressure.
+That is tolerable only because relief does not depend on Id: the Harness
+rejuvenates on its own authority at critical. It is still bounded, because a
+review that never happens is worse than a turn that costs a prefill, so a
+deferral has a hard ceiling and the heartbeat that finally runs is told how
+long it waited. The clock measures one continuous run of strain and resets
+when pressure clears, so a busy hour last week cannot spend the protection
+owed to a real episode now.
+
+Unknown pressure proceeds. An absent measurement is not evidence of pressure,
+and holding cognition back because a monitor was down would stop the organism
+thinking for a reason that has nothing to do with its resources. Deferrals are
+recorded rather than merely logged: an operator asking why Id went quiet
+deserves an entry in the same record as everything else, because a silence
+with nothing beside it is indistinguishable from a scheduler that stopped
+working.
+→ `test_a_heartbeat_is_held_back_under_pressure`,
+`test_a_deferred_heartbeat_eventually_runs_anyway`,
+`test_the_deferral_clock_resets_when_pressure_clears`,
+`test_an_unknown_pressure_never_defers`,
+`test_only_the_heartbeat_consults_the_gate`,
+`test_a_heartbeat_is_not_held_back_below_the_threshold`,
+`test_the_gate_can_be_turned_off`
+
 **I73. A role is never wedged by a turn it did not close.** One open turn per
 role is a database constraint, so a turn left running blocks every future turn
 for that role — the role heartbeats, reports healthy, and never thinks again

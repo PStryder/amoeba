@@ -1447,6 +1447,19 @@ MUTATIONS: list[Mutation] = [
         layer="Arbiter.admit (consulting the KV pool before starting work)",
         note="This check did not exist before the pass that added it; the mutant restores the previous behaviour, in which admission read no token figure at all and overcommit was prevented only by the configured numbers happening to be small.",
     ),
+    Mutation(
+        "I99", "Only the discretionary turn yields to pressure",
+        "src/amoeba/supervisor.py",
+        "        if waited >= ceiling:",
+        "        if False:  # MUTANT: defer the review for as long as pressure lasts",
+        ["test_a_deferred_heartbeat_eventually_runs_anyway"],
+        layer="Supervisor._heartbeat_deferred_for_pressure (the bound on deferral)",
+        note="Defended in three places and all three come out: the ceiling that guarantees the review still happens, the reset that keeps the clock measuring one episode, and the rule that unknown pressure proceeds. The ceiling is the one that matters most -- without it, sustained pressure silently ends Id's self-examination at the moment it is most worth having.",
+        also=[('            self._heartbeat_deferred_since.pop(role, None)\n            return None\n\n        since',
+               "            return None\n\n        since"),
+              ("        if level is None or level not in PRESSURE_LEVELS:\n            return None",
+               '        if level is None:\n            level = "critical"  # MUTANT: unknown means pressure')],
+    ),
 ]
 
 

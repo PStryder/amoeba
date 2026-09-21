@@ -112,23 +112,43 @@ class ContextHomeostasis:
     # ------------------------------------------------------------------
     # inspect
     # ------------------------------------------------------------------
+    def last_pressure(self) -> tuple[str | None, float]:
+        """The most recent measured pressure, and how old it is in seconds.
+
+        Cached rather than measured, so a caller deciding a few times a minute
+        whether to hold something back does not take an RPC to the very
+        service it is worried about.
+
+        `None` means nothing has been measured yet, or the last attempt found
+        the backend unavailable. A caller must read that as *unknown*, never
+        as pressure: an absent measurement is not evidence, and holding back
+        cognition because a monitor was down would stop the organism thinking
+        for a reason that has nothing to do with its resources.
+        """
+        report = getattr(self, "_last_report", None)
+        if report is None or not report.backend_available:
+            return None, float("inf")
+        return report.pressure, max(0.0, time.time() - report.measured_at)
+
     def measure(self) -> ContextReport:
         """Read occupancy from the inference service. Never estimates."""
         try:
             raw = self._inference().call("context_report")
         except Exception as exc:  # noqa: BLE001
-            return ContextReport(
+            self._last_report = ContextReport(
                 pool_tokens_used=0, pool_capacity=0, occupancy=0.0,
                 pressure="nominal", measured_at=time.time(),
                 backend_available=False, detail=f"inference unreachable: {exc!r}")
+            return self._last_report
         used = int(raw.get("pool_tokens_used", 0))
         cap = int(raw.get("pool_capacity", 0)) or 1
         occ = used / cap
-        return ContextReport(
+        self._last_report = ContextReport(
             pool_tokens_used=used, pool_capacity=cap, occupancy=occ,
             pressure=self.classify(occ), sessions=raw.get("sessions", []),
             measured_at=time.time(), backend_available=True,
             detail=raw.get("detail", ""))
+        return self._last_report
 
     def classify(self, occupancy: float) -> str:
         c = self.cfg

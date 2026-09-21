@@ -484,3 +484,139 @@ def test_an_eviction_never_reads_spans_measured_in_a_previous_session(homeo, min
         "ego", {"session_id": new_handle}, list(range(500)))
     assert plan["evicted_turns"] == [], (
         f"a later eviction reached back into stale coordinates: {plan}")
+
+
+# ---------------------------------------------------------------------------
+# The heartbeat yields to pressure. Nothing else does.
+# ---------------------------------------------------------------------------
+class _GateSup:
+    """The supervisor's heartbeat gate, with everything else stubbed out."""
+
+    def __init__(self, homeo, cfg, *, pressure=None):
+        from amoeba.supervisor import Supervisor
+
+        self.cfg = cfg
+        self.homeostasis = homeo
+        self.mind = None
+        self._heartbeat_deferred_since = {}
+        self.log = __import__("logging").getLogger("test")
+        self._gate = Supervisor._heartbeat_deferred_for_pressure.__get__(self)
+
+    def gate(self, now):
+        return self._gate("id", now)
+
+
+def _gate_for(mind, pressure, **sched):
+    """A gate whose measured pressure is whatever the test says it is."""
+    from amoeba.config import Config
+
+    cfg = Config()
+    for k, v in sched.items():
+        setattr(cfg.scheduler, k, v)
+
+    class _Homeo:
+        def last_pressure(self):
+            return pressure, 1.0
+
+    return _GateSup(_Homeo(), cfg)
+
+
+def test_a_heartbeat_is_held_back_under_pressure(mind):
+    """A heartbeat is discretionary: nothing is waiting on it.
+
+    It costs a prefill and grows Id's context at exactly the moment the pool
+    is stressed, which is the one turn worth not taking.
+    """
+    sup = _gate_for(mind, "high")
+    held = sup.gate(1000.0)
+    assert held is not None
+    assert held["pressure"] == "high" and held["threshold"] == "high"
+
+
+def test_a_heartbeat_is_not_held_back_below_the_threshold(mind):
+    """Elevated is not high. The gate is a threshold, not a mood."""
+    sup = _gate_for(mind, "elevated")
+    assert sup.gate(1000.0) is None
+
+
+def test_an_unknown_pressure_never_defers(mind):
+    """Absent evidence is not evidence.
+
+    The inference service may be down or starting. Refusing cognition on a
+    measurement nobody took would stop the organism thinking for a reason
+    that has nothing to do with its resources.
+    """
+    sup = _gate_for(mind, None)
+    assert sup.gate(1000.0) is None
+
+
+def test_a_deferred_heartbeat_eventually_runs_anyway(mind):
+    """Id's heartbeat *is* the homeostatic review.
+
+    Suppressing it for as long as pressure lasts would silence the organism's
+    self-examination exactly while it was under strain. Relief does not depend
+    on Id -- the Harness rejuvenates on its own authority at critical -- but a
+    review that never happens is worse than a turn that costs a prefill.
+    """
+    sup = _gate_for(mind, "critical", heartbeat_max_deferral_seconds=300.0)
+    assert sup.gate(1000.0) is not None, "it should defer at first"
+    assert sup.gate(1200.0) is not None, "still inside the ceiling"
+    assert sup.gate(1301.0) is None, "the ceiling did not release it"
+
+
+def test_the_deferral_clock_resets_when_pressure_clears(mind):
+    """The ceiling measures one continuous run of strain, not a lifetime.
+
+    Otherwise an organism that was briefly busy hours ago would spend its
+    ceiling on that and lose the protection during a later, real episode.
+    """
+    from amoeba.config import Config
+
+    cfg = Config()
+    cfg.scheduler.heartbeat_max_deferral_seconds = 300.0
+    levels = ["high"]
+
+    class _Homeo:
+        def last_pressure(self):
+            return levels[0], 1.0
+
+    sup = _GateSup(_Homeo(), cfg)
+    assert sup.gate(1000.0) is not None
+    levels[0] = "nominal"
+    assert sup.gate(1100.0) is None, "pressure cleared and it still deferred"
+    levels[0] = "high"
+    held = sup.gate(1200.0)
+    assert held is not None and held["deferred_seconds"] == 0.0, (
+        "the deferral clock carried over from the earlier episode")
+
+
+def test_the_gate_can_be_turned_off(mind):
+    """An operator who does not want this behaviour can say so."""
+    sup = _gate_for(mind, "critical", heartbeat_defer_at_pressure="never")
+    assert sup.gate(1000.0) is None
+
+
+def test_only_the_heartbeat_consults_the_gate():
+    """Event-driven turns are never held back.
+
+    A role that something happened to must be able to think about it, whatever
+    the pool is doing. The gate is called from the heartbeat scheduler and
+    from nowhere else, which is what keeps that true.
+    """
+    import ast
+    from pathlib import Path
+
+    src = (Path(__file__).resolve().parents[1] / "src" / "amoeba"
+           / "supervisor.py").read_text(encoding="utf-8")
+    tree = ast.parse(src)
+    callers = set()
+    for node in ast.walk(tree):
+        if isinstance(node, ast.FunctionDef):
+            for sub in ast.walk(node):
+                if (isinstance(sub, ast.Call)
+                        and isinstance(sub.func, ast.Attribute)
+                        and sub.func.attr == "_heartbeat_deferred_for_pressure"):
+                    callers.add(node.name)
+    assert callers == {"_schedule_heartbeats"}, (
+        f"the pressure gate is consulted outside the heartbeat scheduler: "
+        f"{sorted(callers)}")

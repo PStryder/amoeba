@@ -107,6 +107,7 @@ class EventKind:
     # context homeostasis
     CONTEXT_MEASURED = "context.measured"
     CONTEXT_PRESSURE = "context.pressure"
+    HEARTBEAT_DEFERRED = "scheduler.heartbeat_deferred"
     SESSION_RETIRED = "session.retired"
     SESSION_REBORN = "session.reborn"
     REJUVENATION_REQUESTED = "rejuvenation.requested"

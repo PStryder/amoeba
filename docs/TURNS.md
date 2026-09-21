@@ -462,7 +462,9 @@ submit_wait_seconds = 120.0     # how long a caller blocks, not how long work ta
   declares a lineage or declares itself ambient, so this is reachable only by
   a new producer that forgets -- which fails a test rather than stalling
   quietly -- but the runtime behaviour is deferral, not an error.
-* **Resource pressure does not yet gate heartbeat cognition.** The Arbiter
-  knows about pressure and the heartbeat does not consult it. An event-driven
-  Id turn must never be prevented indefinitely, and today nothing prevents
-  either, so this is a missing optimisation rather than a missing guarantee.
+* **Only the heartbeat yields to pressure**, and only for a bounded time. An
+  event-driven turn is never held back at any pressure; the discretionary
+  heartbeat is deferred while the pool is strained and runs regardless once
+  the ceiling is reached, because Id's heartbeat is the homeostatic review and
+  a review that never happens is worse than a turn that costs a prefill. See
+  I99.

@@ -186,6 +186,20 @@ class SchedulerConfig:
     id_startup_turn: bool = True
     ego_startup_turn: bool = False
 
+    # Pool pressure at which the *discretionary* heartbeat is held back.
+    # One of the levels in `homeostasis.PRESSURE_LEVELS`, or "never" to
+    # disable the gate. Event-driven turns are never gated at any level: a
+    # role that something happened to must be able to think about it.
+    heartbeat_defer_at_pressure: str = "high"
+
+    # How long a heartbeat may be deferred before it runs regardless. Id's
+    # heartbeat *is* the homeostatic review, so suppressing it indefinitely
+    # would silence the organism's self-examination exactly while it was
+    # under strain. Relief does not depend on Id -- the Harness rejuvenates
+    # on its own authority at critical -- but a review that never happens is
+    # worse than a turn that costs a prefill.
+    heartbeat_max_deferral_seconds: float = 1800.0
+
     # How many times in a row the Harness will grant a continuation turn for
     # a thought that keeps being cut off. Without a bound this is a token
     # furnace: a turn that always truncates schedules a successor that always

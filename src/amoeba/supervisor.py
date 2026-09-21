@@ -36,7 +36,7 @@ from .pulse import PulseCollector
 from .rpc import RpcClient, RpcServer, read_or_create_token, wait_for_port
 from .sandbox import SandboxManager
 from .security import audit_paths, harden_state_tree
-from .store.events import read_events
+from .store.events import EventKind, read_events
 from .store.writer import Mutation
 
 SERVICE_NAME = "supervisor"
@@ -160,6 +160,10 @@ class Supervisor:
         self._role_activity: dict[str, str] = {"ego": "idle", "id": "idle"}
         self._next_heartbeat: dict[str, float] = {}
         self._heartbeat_interval: dict[str, float] = {}
+        # When the current run of pressure deferrals began, per role. Cleared
+        # the moment pressure drops, so the ceiling measures one continuous
+        # period of strain rather than a lifetime total.
+        self._heartbeat_deferred_since: dict[str, float] = {}
         # NB: guarded by the existing `_sched_lock` above, which is also held
         # across the whole scheduler tick. Sharing it keeps the ordering
         # obvious; it also means a trigger enqueue can wait behind a neuocyte
@@ -416,6 +420,65 @@ class Supervisor:
         with self._sched_lock:
             self._role_activity["id"] = "idle"
 
+
+    def _record_heartbeat_deferral(self, role: str, held: dict) -> None:
+        """Note that a review was held back, once per run of pressure.
+
+        Recorded rather than merely logged: an operator asking why Id went
+        quiet deserves an answer in the same record as everything else, and a
+        silence with no entry beside it is indistinguishable from a scheduler
+        that stopped working.
+        """
+        if self.mind is None:
+            return
+        try:
+            self.mind.writer.apply(
+                lambda m: m.emit(EventKind.HEARTBEAT_DEFERRED, {
+                    "role": role, **held,
+                    "note": ("the discretionary heartbeat only; event-driven "
+                             "turns are never held back, and this one runs "
+                             "regardless once the ceiling is reached")}),
+                actor="supervisor", bump_version=False)
+        except Exception:  # noqa: BLE001
+            self.log.debug("could not record the heartbeat deferral",
+                           exc_info=True)
+
+    def _heartbeat_deferred_for_pressure(self, role: str, now: float) -> dict | None:
+        """Should this discretionary heartbeat wait for the pool to settle?
+
+        Returns a reason to defer, or None to proceed. Only the heartbeat ever
+        asks: an event-driven turn is something that happened, and holding one
+        back would make the organism unable to think about its own world
+        because it was busy.
+
+        Unknown pressure proceeds. An absent measurement is not evidence of
+        pressure, and refusing cognition on it would stop the organism
+        thinking because a monitor was down.
+        """
+        from .homeostasis import PRESSURE_LEVELS
+
+        want = (self.cfg.scheduler.heartbeat_defer_at_pressure or "never").lower()
+        if want == "never" or want not in PRESSURE_LEVELS:
+            return None
+        level, _age = self.homeostasis.last_pressure()
+        if level is None or level not in PRESSURE_LEVELS:
+            return None
+        if PRESSURE_LEVELS.index(level) < PRESSURE_LEVELS.index(want):
+            self._heartbeat_deferred_since.pop(role, None)
+            return None
+
+        since = self._heartbeat_deferred_since.setdefault(role, now)
+        waited = now - since
+        ceiling = max(0.0, self.cfg.scheduler.heartbeat_max_deferral_seconds)
+        if waited >= ceiling:
+            # Long enough. Id's heartbeat is the homeostatic review, and a
+            # review that never happens is worse than a turn that costs a
+            # prefill.
+            self._heartbeat_deferred_since.pop(role, None)
+            return None
+        return {"pressure": level, "threshold": want,
+                "deferred_seconds": round(waited, 1), "ceiling": ceiling}
+
     def _schedule_heartbeats(self) -> None:
         """Give Id a turn when the organism has been quiet.
 
@@ -455,12 +518,32 @@ class Supervisor:
                 with self._sched_lock:
                     self._next_heartbeat[role] = now + interval
                 return
+            held = self._heartbeat_deferred_for_pressure(role, now)
+            if held is not None:
+                # Re-examined sooner than a full interval, so the review
+                # resumes shortly after the pool settles rather than waiting
+                # out a cycle it did not use.
+                with self._sched_lock:
+                    self._next_heartbeat[role] = now + min(interval, 60.0)
+                if held["deferred_seconds"] <= 0.0:
+                    self.log.info(
+                        "holding %s's heartbeat while pressure is %s", role,
+                        held["pressure"])
+                    self._record_heartbeat_deferral(role, held)
+                return
+
+            overdue = self._heartbeat_deferred_since.pop(role, None)
             self.methods()["role_enqueue_trigger"](
                 role=role, kind="heartbeat", source="scheduler",
                 summary=("periodic homeostatic review: nothing has woken you, "
                          "check the organism's internal state"),
                 payload={"reason": "periodic_homeostatic_review",
-                         "interval_seconds": interval},
+                         "interval_seconds": interval,
+                         # Said plainly, because a review that ran late under
+                         # strain is a different fact from one that ran on
+                         # time, and Id is the component that should know.
+                         "deferred_for_pressure_seconds": (
+                             round(now - overdue, 1) if overdue else 0.0)},
                 # About the organism, not about anybody's question.
                 ambient=True)
         except Exception:  # noqa: BLE001

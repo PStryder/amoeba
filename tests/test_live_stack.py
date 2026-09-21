@@ -1378,10 +1378,17 @@ def test_a_role_posting_about_its_own_work_does_not_wake_itself(tmp_path: Path):
                    post_type="finding", body="I looked into this myself",
                    work_id=work_id)
 
+        # Specifically Ego's own post, not any board event. This work is real
+        # and gets dispatched, so a neuocyte may legitimately post a finding
+        # about it -- a different author on work Ego originated is exactly
+        # what should wake Ego. Forbidding every board event made this pass or
+        # fail on whether that neuocyte got as far as posting inside the
+        # window, which is one run in three.
         deadline = time.time() + 5.0
         while time.time() < deadline:
-            assert not _ego_triggers(stack, "board_event"), \
-                "Ego woke itself by posting about its own work"
+            mine = [t for t in _ego_triggers(stack, "board_event")
+                    if t["summary"].startswith("ego posted")]
+            assert not mine, f"Ego woke itself by posting about its own work: {mine}"
             time.sleep(0.25)
     finally:
         stack.stop()
