@@ -1247,6 +1247,73 @@ working.
 `test_a_heartbeat_is_not_held_back_below_the_threshold`,
 `test_the_gate_can_be_turned_off`
 
+**I100. A claim can stop being made.** Id audits conclusions, and until this a
+conclusion could be recorded and never changed: no retraction, no
+supersession, only a `review_status` saying what an audit *found*. So an
+adverse audit could establish that a claim was unsupported while the claim
+stayed active and unqualified, and the dispute stayed open beside it forever.
+The thing an audit is about was the one thing with no way to change.
+
+`standing` is separate from `review_status` because they answer different
+questions: what an audit found, and whether the claim is still being made. A
+claim may be audited `contested` and still stand -- its author may disagree
+with the audit -- and may be withdrawn with no audit having happened.
+
+The author may change its own claim and nobody may change another's. Ego
+withdrawing an Ego conclusion is Ego changing its mind; Id doing it would be
+the auditor editing the record it audits, so there is no Id verb for it. The
+check is on the stored `produced_by`, not on anything the caller asserts. The
+row survives withdrawal: what the organism used to assert is a fact about it,
+and the audits and disputes that name a conclusion keep naming something.
+→ `test_only_the_author_may_withdraw_a_claim`,
+`test_a_superseded_claim_cannot_then_be_withdrawn`,
+`test_withdrawing_twice_is_a_no_op_that_keeps_the_first_reason`
+
+**I101. A disagreement ends because the record moved, not because somebody
+said so.** It could be opened and never closed -- one INSERT, no UPDATE -- so
+`system_pulse` counted a number that only grew. Closure is now mechanical, and
+each condition is a fact the Harness already holds: the disputed conclusion
+superseded, the disputed conclusion retracted, a later audit supporting it on
+a changed evidence basis, or an operator deciding.
+
+The rule about the subject is narrower than "the subject may not close it". If
+Ego retracts or supersedes its own disputed conclusion, that *should* end the
+dispute -- Ego has not dismissed the finding, it has changed the thing being
+disputed. What the subject may not do is end a dispute by assertion, and there
+is no verb through which it could: closure is reached only by changing the
+record, or by an operator, whose decision is recorded as a decision rather
+than dressed up as evidence.
+
+One open dispute per disputed subject, enforced by a partial unique index
+rather than a check. Every adverse audit opened a disagreement
+unconditionally, so auditing one conclusion twenty times produced twenty rows
+and one unresolved issue looked like twenty. A repeat now attaches to the live
+dispute as a recurrence.
+→ `test_withdrawing_the_claim_ends_the_dispute_about_it`,
+`test_superseding_the_claim_ends_the_dispute_about_it`,
+`test_a_repeated_contradiction_does_not_open_a_second_dispute`,
+`test_a_closed_dispute_does_not_block_a_later_one`,
+`test_a_dispute_cannot_be_closed_twice`
+
+**I102. An adjudicator changing its mind is not the ground moving.** A later
+audit returning `supported` does not settle a dispute on its own: that is the
+same adjudicator reversing itself about the same evidence, and closing on it
+would let Id open a dispute and quietly self-certify it away -- exactly what
+separating Ego from Id exists to prevent. Resolution by audit therefore
+requires the evidence basis to have changed, measured as a digest of the
+Harness's own dossier rather than of anything Id reports having looked at.
+
+A verdict that flips on an unchanged basis is preserved rather than erased.
+Two opposite verdicts against identical evidence is a fact about the
+organism's own reasoning, and it is recorded as one; smoothing it over would
+be the single kind of forgetting this system refuses. Open disputes are never
+aged out either, and the pulse reports them by age instead of as a bare count,
+because an unresolved contradiction nobody has addressed is true and a number
+that only grows stops being read.
+→ `test_the_opening_evidence_basis_is_recorded`,
+`test_the_evidence_basis_digest_reflects_the_measured_dossier`,
+`test_a_supporting_audit_on_a_changed_basis_settles_the_dispute`
+
 **I73. A role is never wedged by a turn it did not close.** One open turn per
 role is a database constraint, so a turn left running blocks every future turn
 for that role — the role heartbeats, reports healthy, and never thinks again

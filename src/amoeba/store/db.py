@@ -107,6 +107,14 @@ CREATE TABLE IF NOT EXISTS conclusions (
   operation_id   TEXT,
   produced_by    TEXT NOT NULL,
   review_status  TEXT NOT NULL DEFAULT 'unreviewed',
+  -- Whether the claim is still being made. Deliberately not `review_status`,
+  -- which says what an audit found: a claim may be audited `contested` and
+  -- still stand, and may be withdrawn with no audit having happened.
+  standing       TEXT NOT NULL DEFAULT 'active',   -- active|retracted|superseded
+  superseded_by  TEXT,
+  withdrawn_at   REAL,
+  withdrawn_by   TEXT,
+  withdrawn_reason TEXT,
   model_identity TEXT,
   snapshot_id    TEXT,
   created_at     REAL NOT NULL,
@@ -258,10 +266,26 @@ CREATE TABLE IF NOT EXISTS disagreements (
   actor_b         TEXT NOT NULL,
   evidence_a      TEXT,
   evidence_b      TEXT,
-  status          TEXT NOT NULL,
+  status          TEXT NOT NULL,   -- open|superseded|retracted|
+                                   -- resolved_supported|closed_by_operator
+  -- What the opening audit was performed against. A later audit may close
+  -- this dispute only if its own basis differs: the same adjudicator
+  -- changing its mind about the same evidence is not a resolution.
+  evidence_basis_digest TEXT,
+  resolution      TEXT,
+  resolved_at     REAL,
+  resolved_by     TEXT,
+  -- How many times the same contradiction has been reached again. A repeat
+  -- attaches here instead of opening a rival row.
+  recurrences     INTEGER NOT NULL DEFAULT 0,
   created_at      REAL NOT NULL,
   state_version   INTEGER NOT NULL
 );
+-- One live dispute per disputed thing. Without this, auditing one conclusion
+-- twenty times turns one unresolved issue into twenty rows, and the count
+-- stops describing anything.
+CREATE UNIQUE INDEX IF NOT EXISTS ux_one_open_disagreement_per_subject
+  ON disagreements(subject_kind, subject_id) WHERE status = 'open';
 
 -- ------------------------------------------------------------------
 -- Cognitive blackboard: neuocyte-to-neuocyte communication.
@@ -781,6 +805,16 @@ class Database:
         ("role_turns", "session_handle", "TEXT"),
         ("role_turns", "token_start", "INTEGER"),
         ("role_turns", "token_end", "INTEGER"),
+        ("conclusions", "standing", "TEXT NOT NULL DEFAULT 'active'"),
+        ("conclusions", "superseded_by", "TEXT"),
+        ("conclusions", "withdrawn_at", "REAL"),
+        ("conclusions", "withdrawn_by", "TEXT"),
+        ("conclusions", "withdrawn_reason", "TEXT"),
+        ("disagreements", "evidence_basis_digest", "TEXT"),
+        ("disagreements", "resolution", "TEXT"),
+        ("disagreements", "resolved_at", "REAL"),
+        ("disagreements", "resolved_by", "TEXT"),
+        ("disagreements", "recurrences", "INTEGER NOT NULL DEFAULT 0"),
         ("board_posts", "author_fencing_token", "INTEGER"),
         ("board_posts", "author_attempt", "INTEGER"),
         ("board_reads", "attempt_fate_at_read", "TEXT"),

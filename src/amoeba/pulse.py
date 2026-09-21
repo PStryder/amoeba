@@ -78,6 +78,29 @@ REMOTE_TTL = 5.0
 """Inference and role round trips are not free, so they age more slowly."""
 
 
+def _disagreement_pressure(conn) -> dict[str, Any]:
+    """Open contradictions, by how long they have been open.
+
+    A bare count only grows, and a number that only grows stops being read.
+    Ageing them out would be worse: an unresolved contradiction nobody has
+    addressed is a true fact about the organism, and forgetting it would
+    falsify the current state rather than improve it. So the accumulation is
+    reported in a shape somebody can act on.
+    """
+    now = time.time()
+    ages = sorted((now - float(r["created_at"]) for r in conn.execute(
+        "SELECT created_at FROM disagreements WHERE status = 'open'")),
+        reverse=True)
+    return {
+        "open": len(ages),
+        "oldest_seconds": round(ages[0], 1) if ages else None,
+        "over_a_day": sum(1 for a in ages if a > 86400),
+        "over_a_week": sum(1 for a in ages if a > 7 * 86400),
+        "note": ("open contradictions are never aged out; an unresolved "
+                 "dispute nobody has addressed is a fact about the organism"),
+    }
+
+
 class PulseCollector:
     """Owned by the Harness. Assembles and caches the pulse."""
 
@@ -260,6 +283,7 @@ class PulseCollector:
             "artifact_proposals": conn.execute(
                 "SELECT COUNT(*) AS n FROM artifacts WHERE status = 'proposed'"
             ).fetchone()["n"],
+            "disagreement_pressure": _disagreement_pressure(conn),
             "open_disagreements": conn.execute(
                 "SELECT COUNT(*) AS n FROM disagreements WHERE status = 'open'"
             ).fetchone()["n"],

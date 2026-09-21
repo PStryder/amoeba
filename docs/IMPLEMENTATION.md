@@ -90,6 +90,9 @@ Read this before trusting anything below it.
 | Artifact promotion by Harness decision | **Implemented, tested** | proposal -> re-hash -> receipt |
 | Context homeostasis: measure, retire, checkpoint, rebirth | **Implemented, tested** | `tests/test_homeostasis.py` |
 | Pressure gating for discretionary turns | **Implemented, tested** | the heartbeat defers while the pool is strained and runs regardless after a bounded wait; event-driven turns are never gated — see I99 |
+| Withdrawing a claim or a belief | **Implemented, tested** | a conclusion can be retracted by its author or superseded by its successor; `operator_retract_memory` makes belief retraction reachable. Neither existed: an adverse audit could not lead to the claim changing — see I100 |
+| Disagreement resolution | **Implemented, tested** | closed by the record moving — superseded, retracted, a supporting audit on a *changed* evidence basis, or an operator decision. One open dispute per subject; a reversal on unchanged evidence is recorded, not accepted — see I101, I102 |
+| Open contradictions reported as pressure | **Implemented** | `system_pulse` gives open count, oldest age, and counts over a day and a week. Disputes are never aged out: an unresolved contradiction nobody addressed is a true fact about the organism |
 | Per-actor context budgets | **Implemented, tested** | a session carries `context_budget_tokens` and `budget_basis` from creation; Ego 16384, Id 8192, `ego.neuocyte` 6144 private-growth, `id.neuocyte` 4096 total — see I96, I97 |
 | Physical KV admission | **Implemented, tested** | measured occupancy for live sessions, work-class budget as a conservative estimate for prospective ones, with a 15% reserve held back from new work for decode — see I98 |
 | Proactive rejuvenation before the hard ceiling | **Implemented, tested** | `role_context_high` measures the role against its own budget, so Ego is a candidate at 12288 of 16384 rather than after being refused — see I96 |

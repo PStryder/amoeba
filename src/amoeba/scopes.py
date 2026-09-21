@@ -106,6 +106,10 @@ EGO = ROLE_BASE + (
     # effectors
     "ego_request_work", "ego_work_message", "ego_request_cancellation",
     "ego_propose_memory", "ego_message_id", "ego_request_id_review",
+    # Changing its own mind. Ego's conclusions only, and there is no Id
+    # equivalent on purpose: a dispute the disputing party could end by
+    # deleting the claim is not a dispute.
+    "ego_withdraw_conclusion",
     # The external loop. Both are scoped to the turn Ego is running rather
     # than to an argument it supplies, so neither is a route to another
     # client's files or another client's results.
@@ -116,6 +120,7 @@ EGO_ONLY = (
     "ego_work_view", "ego_artifact_evidence", "ego_resource_identities",
     "ego_request_work", "ego_work_message", "ego_request_cancellation",
     "ego_propose_memory", "ego_message_id", "ego_request_id_review",
+    "ego_withdraw_conclusion",
     "ego_read_attachment", "ego_surface_result",
 )
 

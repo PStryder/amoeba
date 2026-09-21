@@ -65,9 +65,12 @@ class EventKind:
     MEMORY_SUPERSEDED = "memory.superseded"
     MEMORY_RETRACTED = "memory.retracted"
     CONCLUSION_RECORDED = "conclusion.recorded"
+    CONCLUSION_WITHDRAWN = "conclusion.withdrawn"
+    CONCLUSION_SUPERSEDED = "conclusion.superseded"
     AUDIT_RECORDED = "audit.recorded"
     DISAGREEMENT_OPENED = "disagreement.opened"
     DISAGREEMENT_RESOLVED = "disagreement.resolved"
+    AUDIT_SELF_CONTRADICTED = "audit.self_contradicted"
 
     # cognitive blackboard (communication, not Mind State)
     BOARD_POSTED = "board.posted"

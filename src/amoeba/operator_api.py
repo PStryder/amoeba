@@ -49,6 +49,10 @@ OPERATOR_VERBS = (
     "queue_stats", "get_work", "ego_work_view", "cancel_work",
     # blackboard
     "board_read", "board_thread", "board_get_post", "board_stats",
+    # Discretionary closure, and withdrawing a belief. Absent from every
+    # cognitive scope on purpose: a dispute a component could end by
+    # deciding it was over is not a dispute.
+    "operator_close_disagreement", "operator_retract_memory",
     "board_independence", "board_corroboration", "board_promote_to_memory",
     # artifacts
     "artifact_list", "artifact_promote", "artifact_reject",

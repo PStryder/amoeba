@@ -619,3 +619,295 @@ def test_silence_on_another_lineage_is_not_reported(mind):
     mine, _ = mind.work.admit(objective="try the cold path", work_class="user",
                               origin_actor="ego", operation_id="op-b")
     assert mind.board.silent_attempts(mine)["count"] == 0
+
+
+# ===========================================================================
+# Withdrawal, and disputes that end because the record moved
+# ===========================================================================
+def _concl(mind, claim="the cache is cold on boot", by="ego"):
+    cid, _ = mind.memory.record_conclusion(claim=claim, produced_by=by)
+    return cid
+
+
+def _dispute(mind, conclusion_id, *, basis="basis-1"):
+    did, _ = mind.memory.open_disagreement(
+        subject_kind="conclusion", subject_id=conclusion_id,
+        claim_a="the cache is cold on boot", actor_a="ego",
+        claim_b="the evidence does not establish that", actor_b="id",
+        evidence_basis_digest=basis)
+    return did
+
+
+def _status(mind, did):
+    return mind.db.conn.execute(
+        "SELECT status, resolution, recurrences FROM disagreements"
+        " WHERE disagreement_id = ?", (did,)).fetchone()
+
+
+def test_withdrawing_the_claim_ends_the_dispute_about_it(mind):
+    """The subject may close a dispute by changing the record, not by assertion.
+
+    Ego retracting its own conclusion is Ego changing its mind, and the
+    dispute has nothing left to be about. That is categorically different
+    from Ego declaring the audit finding dismissed -- which it has no verb
+    for and cannot do.
+    """
+    cid = _concl(mind)
+    did = _dispute(mind, cid)
+    assert _status(mind, did)["status"] == "open"
+
+    mind.memory.withdraw_conclusion(conclusion_id=cid, actor="ego",
+                                    reason="I could not support it")
+    row = _status(mind, did)
+    assert row["status"] == "retracted", "the dispute outlived the claim"
+
+    concl = mind.memory.get_conclusion(cid)
+    assert concl["standing"] == "retracted"
+    assert concl["claim"], "the row was deleted rather than withdrawn"
+
+
+def test_superseding_the_claim_ends_the_dispute_about_it(mind):
+    """A claim is replaced by the claim that replaces it."""
+    old = _concl(mind)
+    did = _dispute(mind, old)
+    new, _ = mind.memory.record_conclusion(
+        claim="the cache is cold only after a cold boot", produced_by="ego",
+        supersedes=old)
+
+    assert _status(mind, did)["status"] == "superseded"
+    prior = mind.memory.get_conclusion(old)
+    assert prior["standing"] == "superseded" and prior["superseded_by"] == new
+
+
+class _EgoSup:
+    """Enough supervisor for the Ego verbs to be built against."""
+
+    def __init__(self, mind):
+        self.mind = mind
+        self.cfg = mind.cfg
+        self.log = __import__("logging").getLogger("test")
+
+    def methods(self):
+        return {}
+
+
+def test_only_the_author_may_withdraw_a_claim(mind):
+    """An auditor that can edit the record it audits is not an auditor.
+
+    The check is on the stored `produced_by`, not on anything the caller
+    says, so there is no phrasing that turns editing somebody else's record
+    into changing your own mind.
+    """
+    from amoeba.errors import InvalidInput
+    from amoeba import ego_api
+
+    verbs = ego_api.build(_EgoSup(mind))
+    mine = _concl(mind, by="ego")
+    theirs = _concl(mind, claim="something Id concluded", by="id")
+
+    with pytest.raises(InvalidInput) as exc:
+        verbs["ego_withdraw_conclusion"](conclusion_id=theirs, reason="no")
+    assert "only by whoever made it" in str(exc.value)
+    assert mind.memory.get_conclusion(theirs)["standing"] == "active"
+
+    out = verbs["ego_withdraw_conclusion"](conclusion_id=mine,
+                                           reason="I could not support it")
+    assert out["standing"] == "retracted"
+    assert mind.memory.get_conclusion(mine)["standing"] == "retracted"
+
+
+def test_withdrawing_twice_is_a_no_op_that_keeps_the_first_reason(mind):
+    """A repeat is idempotent rather than an error, and does not rewrite why.
+
+    The withdrawal carries a mutation id derived from the conclusion, so the
+    writer returns the stored receipt instead of running it again. That is the
+    right shape -- withdrawing something already withdrawn is a no-op, not a
+    fault -- and it must not quietly replace the recorded reason with a later
+    one.
+    """
+    cid = _concl(mind)
+    mind.memory.withdraw_conclusion(conclusion_id=cid, actor="ego",
+                                    reason="first reason")
+    mind.memory.withdraw_conclusion(conclusion_id=cid, actor="ego",
+                                    reason="a different second reason")
+    row = mind.db.conn.execute(
+        "SELECT standing, withdrawn_reason FROM conclusions"
+        " WHERE conclusion_id = ?", (cid,)).fetchone()
+    assert row["standing"] == "retracted"
+    assert row["withdrawn_reason"] == "first reason"
+
+
+def test_a_superseded_claim_cannot_then_be_withdrawn(mind):
+    """The standing guard, on the path idempotency does not short-circuit.
+
+    A claim that was replaced has already stopped being made, by somebody
+    else's act. Withdrawing it afterwards would record a second, contradictory
+    account of how it ended.
+    """
+    from amoeba.errors import InvalidInput
+
+    old_id = _concl(mind)
+    mind.memory.record_conclusion(claim="a better claim", produced_by="ego",
+                                  supersedes=old_id)
+    assert mind.memory.get_conclusion(old_id)["standing"] == "superseded"
+    with pytest.raises(InvalidInput) as exc:
+        mind.memory.withdraw_conclusion(conclusion_id=old_id, actor="ego",
+                                        reason="also withdrawing it")
+    assert "no longer being made" in str(exc.value)
+
+
+def test_a_repeated_contradiction_does_not_open_a_second_dispute(mind):
+    """One unresolved issue must not look like twenty.
+
+    Every adverse audit called `open_disagreement` unconditionally, so
+    revisiting one conclusion twenty times produced twenty open rows and the
+    count stopped describing anything.
+    """
+    cid = _concl(mind)
+    first = _dispute(mind, cid)
+    again = _dispute(mind, cid)
+    assert again == first, "a rival dispute was opened about the same claim"
+
+    row = _status(mind, first)
+    assert row["recurrences"] == 1, "the repeat was not recorded"
+    n = mind.db.conn.execute(
+        "SELECT COUNT(*) FROM disagreements WHERE subject_id = ?", (cid,)
+    ).fetchone()[0]
+    assert n == 1
+
+
+def test_a_closed_dispute_does_not_block_a_later_one(mind):
+    """The uniqueness is on *open* disputes, not on the subject forever."""
+    cid = _concl(mind)
+    first = _dispute(mind, cid)
+    mind.memory.resolve_disagreement(disagreement_id=first,
+                                     resolution="closed_by_operator",
+                                     actor="operator", detail="decided")
+    second = _dispute(mind, cid, basis="basis-2")
+    assert second != first
+    assert _status(mind, second)["status"] == "open"
+
+
+def test_a_dispute_cannot_be_closed_twice(mind):
+    """A second closure would overwrite how the first one ended."""
+    from amoeba.errors import InvalidInput
+
+    cid = _concl(mind)
+    did = _dispute(mind, cid)
+    mind.memory.resolve_disagreement(disagreement_id=did, resolution="retracted",
+                                     actor="ego", detail="withdrawn")
+    with pytest.raises(InvalidInput):
+        mind.memory.resolve_disagreement(disagreement_id=did,
+                                         resolution="closed_by_operator",
+                                         actor="operator", detail="again")
+
+
+# ---------------------------------------------------------------------------
+# Resolution by audit requires the ground to have moved
+# ---------------------------------------------------------------------------
+def test_a_supporting_audit_on_a_changed_basis_settles_the_dispute(mind):
+    """The contradiction really has changed, and the Harness can see it.
+
+    New evidence arrived, the fresh audit was performed against it, and the
+    verdict reversed. That is the ground moving, which is what a resolution
+    is supposed to mean.
+    """
+    cid = _concl(mind)
+    did = _dispute(mind, cid, basis="basis-at-open")
+
+    mind.memory.resolve_disagreement(
+        disagreement_id=did, resolution="resolved_supported", actor="harness",
+        detail="a later audit supported the claim against a changed basis")
+    row = _status(mind, did)
+    assert row["status"] == "resolved_supported"
+
+
+def test_the_opening_evidence_basis_is_recorded(mind):
+    """Without it there is nothing to compare a later audit against.
+
+    The whole rule depends on knowing what the dispute was opened against, so
+    the digest is stored at open time rather than reconstructed later -- the
+    dossier will have moved on by then, which is precisely the thing being
+    measured.
+    """
+    cid = _concl(mind)
+    did = _dispute(mind, cid, basis="basis-at-open")
+    row = mind.db.conn.execute(
+        "SELECT evidence_basis_digest FROM disagreements"
+        " WHERE disagreement_id = ?", (did,)).fetchone()
+    assert row["evidence_basis_digest"] == "basis-at-open"
+
+
+def test_the_evidence_basis_digest_reflects_the_measured_dossier(mind):
+    """Taken from what was measured, not from what the adjudicator says.
+
+    The point is to tell a changed world from a changed mind, so the digest
+    has to come from the Harness's own dossier rather than from anything Id
+    reports about what it looked at.
+    """
+    from amoeba.supervisor_api import _evidence_basis_digest
+
+    a = _evidence_basis_digest({"evidence": ["e17"], "resolved_from": "record"})
+    b = _evidence_basis_digest({"resolved_from": "record", "evidence": ["e17"]})
+    c = _evidence_basis_digest({"evidence": ["e17", "e18"],
+                                "resolved_from": "record"})
+    assert a == b, "key order changed the basis; it must not"
+    assert a != c, "adding evidence did not change the basis"
+
+
+def test_a_reversal_on_an_unchanged_basis_does_not_settle_the_dispute(mind):
+    """The adjudicator changing its mind is not the ground moving.
+
+    Id opens a dispute, nothing about the evidence changes, and a later audit
+    says supported. Closing on that would let the auditor open a dispute and
+    then quietly certify it away -- which is precisely what separating Ego
+    from Id exists to prevent.
+    """
+    from amoeba.supervisor_api import _settle_if_the_ground_moved
+
+    cid = _concl(mind)
+    did = _dispute(mind, cid, basis="same-basis")
+
+    out = _settle_if_the_ground_moved(mind, cid, "same-basis", "audit-2")
+    assert out["disagreement_resolved"] is False
+    assert out["self_contradicted"] is True
+    assert _status(mind, did)["status"] == "open", "the dispute was settled"
+
+
+def test_a_reversal_on_an_unchanged_basis_is_recorded_not_discarded(mind):
+    """Two opposite verdicts against identical evidence is worth keeping.
+
+    It is a fact about the organism's own reasoning, and smoothing it over
+    would be the one kind of forgetting this system refuses.
+    """
+    from amoeba.store.events import read_events
+    from amoeba.supervisor_api import _settle_if_the_ground_moved
+
+    cid = _concl(mind)
+    _dispute(mind, cid, basis="same-basis")
+    _settle_if_the_ground_moved(mind, cid, "same-basis", "audit-2")
+
+    noticed = [e for e in read_events(mind.db.conn)
+               if e.kind == "audit.self_contradicted"]
+    assert noticed, "the contradiction was discarded rather than recorded"
+
+
+def test_a_reversal_after_the_evidence_moved_does_settle_it(mind):
+    """New evidence, fresh audit, reversed verdict -- the contradiction changed."""
+    from amoeba.supervisor_api import _settle_if_the_ground_moved
+
+    cid = _concl(mind)
+    did = _dispute(mind, cid, basis="basis-at-open")
+
+    out = _settle_if_the_ground_moved(mind, cid, "a-different-basis", "audit-2")
+    assert out["disagreement_resolved"] is True
+    row = _status(mind, did)
+    assert row["status"] == "resolved_supported"
+
+
+def test_a_supporting_audit_with_no_open_dispute_changes_nothing(mind):
+    """The ordinary case: most audits have no dispute to settle."""
+    from amoeba.supervisor_api import _settle_if_the_ground_moved
+
+    cid = _concl(mind)
+    assert _settle_if_the_ground_moved(mind, cid, "any-basis", "audit-1") == {}

@@ -12,6 +12,7 @@ Two layers live here:
 
 from __future__ import annotations
 
+import json
 import re
 import time
 from typing import TYPE_CHECKING, Any, Sequence
@@ -33,6 +34,64 @@ SCHEMA_VERSION = "1.0.0"
 VERDICTS = ("supported", "contested", "unsupported", "inconclusive")
 _VERDICT_RE = re.compile(
     r"\b(unsupported|inconclusive|contested|supported)\b")
+
+def _evidence_basis_digest(dossier: Any) -> str:
+    """A digest of what an audit was actually performed against.
+
+    Taken from the measured dossier rather than from anything Id says it
+    looked at, because the point is to tell a changed world from a changed
+    mind.
+    """
+    from .ids import sha256_hex
+
+    return sha256_hex(json.dumps(dossier, sort_keys=True, default=str)
+                      .encode("utf-8", "replace"))
+
+def _settle_if_the_ground_moved(mind: Any, conclusion_id: str, basis: str,
+                                audit_id: str, op_id: str | None = None
+                                ) -> dict[str, Any]:
+    """A supporting audit closes a dispute only if the evidence moved.
+
+    Id reversing itself about the same evidence is not a resolution -- it
+    is the adjudicator changing its mind, and letting it close the dispute
+    would make the audit self-certifying. So the basis digest has to
+    differ from the one recorded when the dispute opened.
+
+    When it does not differ, the contradiction is recorded rather than
+    discarded. Two opposite verdicts against identical evidence is a fact
+    about the organism's own reasoning, and it is exactly the sort of
+    thing it should be able to notice about itself.
+    """
+    live = mind.memory.open_disagreement_for(
+        subject_kind="conclusion", subject_id=conclusion_id)
+    if live is None:
+        return {}
+    opened_on = live.get("evidence_basis_digest")
+    if opened_on and opened_on == basis:
+        mind.writer.apply(
+            lambda m: m.emit(EventKind.AUDIT_SELF_CONTRADICTED, {
+                "disagreement_id": live["disagreement_id"],
+                "conclusion_id": conclusion_id, "audit_id": audit_id,
+                "evidence_basis_digest": basis,
+                "note": ("a later audit reached the opposite verdict "
+                         "against an identical evidence basis; the "
+                         "dispute stays open, because the adjudicator "
+                         "changing its mind is not the ground moving")}),
+            actor="id", operation_id=op_id, bump_version=False)
+        return {"disagreement_id": live["disagreement_id"],
+                "disagreement_resolved": False,
+                "self_contradicted": True,
+                "note": ("the evidence basis is unchanged, so this "
+                         "reversal does not settle the dispute")}
+    mind.memory.resolve_disagreement(
+        disagreement_id=live["disagreement_id"],
+        resolution="resolved_supported", actor="harness",
+        detail=(f"a later audit ({audit_id}) supported the claim against a "
+                f"changed evidence basis"),
+        operation_id=op_id)
+    return {"disagreement_id": live["disagreement_id"],
+            "disagreement_resolved": True,
+            "resolution": "resolved_supported"}
 
 def _parse_audit(text: str) -> dict[str, Any]:
     """Pull VERDICT / FINDING / UNRESOLVED out of an audit turn.
@@ -334,6 +393,39 @@ def build(sup: "Supervisor") -> dict[str, Any]:
     def disagreements(*, status: str = "open", limit: int = 50) -> list[dict[str, Any]]:
         """Recorded contradictions between claims, and whether they are resolved."""
         return mind.memory.get_disagreements(status=status, limit=limit)
+
+    def operator_close_disagreement(*, disagreement_id: str, reason: str,
+                                    operation_id: str | None = None
+                                    ) -> dict[str, Any]:
+        """Close a dispute the record is never going to settle.
+
+        The only discretionary route. Recorded as a decision by a person
+        rather than as evidence, because that is what it is: an operator
+        closing a contradiction is a different fact from the contradiction
+        having been resolved.
+        """
+        receipt = mind.memory.resolve_disagreement(
+            disagreement_id=disagreement_id, resolution="closed_by_operator",
+            actor="operator", detail=reason, operation_id=operation_id)
+        return {"disagreement_id": disagreement_id,
+                "resolution": "closed_by_operator",
+                "receipt_id": receipt.receipt_id}
+
+    def operator_retract_memory(*, memory_id: str, reason: str,
+                                operation_id: str | None = None
+                                ) -> dict[str, Any]:
+        """Withdraw a maintained belief.
+
+        `MemoryRepo.retract` existed and no verb reached it, so the organism
+        could form a belief and never withdraw one. An operator act, which is
+        consistent with memory writes already being Harness acts:
+        `board_promote_to_memory` is the Harness turning discussion into
+        belief, and withdrawing one is the same kind of decision.
+        """
+        receipt = mind.memory.retract(memory_id=memory_id, actor="operator",
+                                      reason=reason, operation_id=operation_id)
+        return {"memory_id": memory_id, "status": "retracted",
+                "receipt_id": receipt.receipt_id}
 
     def open_disagreement(*, subject_kind: str, subject_id: str, claim_a: str,
                           actor_a: str, claim_b: str, actor_b: str,
@@ -1291,6 +1383,8 @@ def build(sup: "Supervisor") -> dict[str, Any]:
             # A contested audit of an Ego conclusion is a real disagreement,
             # and it is recorded as one rather than quietly overwriting the
             # claim.
+            basis = _evidence_basis_digest(dossier)
+            out["evidence_basis_digest"] = basis
             if conclusion_id and out["verdict"] in ("contested", "unsupported"):
                 concl = mind.memory.get_conclusion(conclusion_id)
                 did, _ = mind.memory.open_disagreement(
@@ -1300,9 +1394,13 @@ def build(sup: "Supervisor") -> dict[str, Any]:
                     actor_b="id",
                     evidence_a={"conclusion_evidence": concl.get("evidence", [])},
                     evidence_b={"audit_id": audit_id},
+                    evidence_basis_digest=basis,
                     operation_id=op_id,
                 )
                 out["disagreement_id"] = did
+            elif conclusion_id and out["verdict"] == "supported":
+                out.update(_settle_if_the_ground_moved(
+                    mind, conclusion_id, basis, audit_id, op_id))
             return out
 
         return _run_operation("id_audit", "id",
@@ -1516,6 +1614,8 @@ def build(sup: "Supervisor") -> dict[str, Any]:
         "record_conclusion": record_conclusion, "get_conclusion": get_conclusion,
         "record_audit": record_audit, "disagreements": disagreements,
         "open_disagreement": open_disagreement,
+        "operator_close_disagreement": operator_close_disagreement,
+        "operator_retract_memory": operator_retract_memory,
         # provenance
         "provenance": provenance, "verify_integrity": verify_integrity,
         "history": history, "audit_dossier": audit_dossier,

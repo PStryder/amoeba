@@ -166,6 +166,40 @@ def build(sup: "Supervisor") -> dict[str, Any]:  # noqa: C901
     # ==================================================================
     # Effectors: delegation
     # ==================================================================
+    def ego_withdraw_conclusion(*, conclusion_id: str, reason: str,
+                                operation_id: str | None = None
+                                ) -> dict[str, Any]:
+        """Stop making a claim you made.
+
+        The act that lets an adverse audit change something. Without it, Id
+        could establish that a conclusion was unsupported and the conclusion
+        stayed active and unqualified, with the dispute open beside it
+        forever.
+
+        Ego's own conclusions only, checked against the stored `produced_by`
+        rather than against anything the caller asserts. Withdrawing another
+        component's claim would be editing the record rather than changing
+        your mind, and no phrasing makes it the former.
+
+        The row survives. What the organism used to assert is a fact about
+        it, and the audits and disagreements that name this conclusion keep
+        naming something.
+        """
+        row = mind.memory.get_conclusion(conclusion_id)
+        if row is None:
+            raise NotFound("no such conclusion", conclusion_id=conclusion_id)
+        if row.get("produced_by") != "ego":
+            raise InvalidInput(
+                "a conclusion may be withdrawn only by whoever made it",
+                conclusion_id=conclusion_id, produced_by=row.get("produced_by"),
+                hint="dispute it instead; withdrawing another component's "
+                     "claim would be editing the record, not changing a mind")
+        receipt = mind.memory.withdraw_conclusion(
+            conclusion_id=conclusion_id, actor="ego", reason=reason,
+            operation_id=operation_id)
+        return {"conclusion_id": conclusion_id, "standing": "retracted",
+                "receipt_id": receipt.receipt_id}
+
     def ego_request_work(*, objective: str, work_class: str = "user",
                          replicas: int = 1, independent: bool = False,
                          board_access: str | None = None,
@@ -427,6 +461,7 @@ def build(sup: "Supervisor") -> dict[str, Any]:  # noqa: C901
         "ego_work_view": ego_work_view,
         "ego_artifact_evidence": ego_artifact_evidence,
         "ego_resource_identities": ego_resource_identities,
+        "ego_withdraw_conclusion": ego_withdraw_conclusion,
         "ego_request_work": ego_request_work,
         "ego_work_message": ego_work_message,
         "ego_request_cancellation": ego_request_cancellation,

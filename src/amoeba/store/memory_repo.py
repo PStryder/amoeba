@@ -326,6 +326,7 @@ class MemoryRepo:
         operation_id: str | None = None,
         model_identity: str | None = None,
         snapshot_id: str | None = None,
+        supersedes: str | None = None,
         mutation_id: str | None = None,
     ) -> tuple[str, Receipt]:
         conclusion_id = new_id("concl")
@@ -347,10 +348,31 @@ class MemoryRepo:
                     (conclusion_id, ev.get("event_seq"), ev.get("event_id"),
                      ev.get("blob_sha256"), ev.get("memory_id"), ev.get("note")),
                 )
+            if supersedes:
+                # A claim is replaced by the claim that replaces it, rather
+                # than by a separate act of replacement. The old row keeps
+                # its identity: audits and disagreements that named it still
+                # name something.
+                prior = m.sql("SELECT standing FROM conclusions"
+                              " WHERE conclusion_id = ?", (supersedes,)).fetchone()
+                if prior is None:
+                    raise NotFound("conclusion to supersede does not exist",
+                                   conclusion_id=supersedes)
+                m.sql("UPDATE conclusions SET standing = 'superseded',"
+                      " superseded_by = ?, withdrawn_at = ?, withdrawn_by = ?"
+                      " WHERE conclusion_id = ? AND standing = 'active'",
+                      (conclusion_id, time.time(), produced_by, supersedes))
+                m.emit(EventKind.CONCLUSION_SUPERSEDED, {
+                    "conclusion_id": supersedes, "superseded_by": conclusion_id,
+                    "actor": produced_by})
+                self._close_disputes_in(
+                    m, subject_kind="conclusion", subject_id=supersedes,
+                    resolution="superseded", actor=produced_by,
+                    detail=f"replaced by {conclusion_id}")
             m.emit(EventKind.CONCLUSION_RECORDED, {
                 "conclusion_id": conclusion_id, "claim": claim,
                 "evidence_count": len(evidence), "model_identity": model_identity,
-                "snapshot_id": snapshot_id,
+                "snapshot_id": snapshot_id, "supersedes": supersedes,
             })
 
         receipt, _ = self.writer.apply(
@@ -375,6 +397,54 @@ class MemoryRepo:
             )
         ]
         return item
+
+    CONCLUSION_STANDINGS = ("active", "retracted", "superseded")
+
+    def withdraw_conclusion(self, *, conclusion_id: str, actor: str,
+                            reason: str, operation_id: str | None = None
+                            ) -> Receipt:
+        """Stop making a claim.
+
+        The author's act. Whether a caller *may* do this is decided by the
+        verb that reaches here -- Ego may withdraw an Ego conclusion, and Id
+        may not withdraw anybody's, because an auditor that can edit the
+        record it audits is not an auditor.
+
+        The row is not deleted. A withdrawn claim is a fact about what the
+        organism used to assert, and the audits and disagreements that refer
+        to it keep their subject.
+        """
+        def body(m: Mutation) -> None:
+            row = m.sql("SELECT produced_by, standing FROM conclusions"
+                        " WHERE conclusion_id = ?", (conclusion_id,)).fetchone()
+            if row is None:
+                raise NotFound("no such conclusion", conclusion_id=conclusion_id)
+            if row["standing"] != "active":
+                raise InvalidInput(
+                    "that conclusion is no longer being made",
+                    conclusion_id=conclusion_id, standing=row["standing"])
+            m.sql("UPDATE conclusions SET standing = 'retracted',"
+                  " withdrawn_at = ?, withdrawn_by = ?, withdrawn_reason = ?"
+                  " WHERE conclusion_id = ?",
+                  (time.time(), actor, reason[:500], conclusion_id))
+            m.emit(EventKind.CONCLUSION_WITHDRAWN, {
+                "conclusion_id": conclusion_id, "actor": actor,
+                "reason": reason[:500], "produced_by": row["produced_by"],
+                "note": ("the claim is no longer made; the row stays, because "
+                         "what the organism used to assert is a fact about it")})
+            # A dispute about a claim nobody is making any more has nothing
+            # left to be about. This is the subject causing closure by
+            # changing the disputed record, which is the one way it may:
+            # withdrawing the claim is not dismissing the finding.
+            self._close_disputes_in(
+                m, subject_kind="conclusion", subject_id=conclusion_id,
+                resolution="retracted", actor=actor,
+                detail=f"the claim was withdrawn by {actor}")
+
+        receipt, _ = self.writer.apply(
+            body, actor=actor, operation_id=operation_id,
+            mutation_id=f"concl-withdraw:{conclusion_id}")
+        return receipt
 
     def set_review_status(self, *, conclusion_id: str, status: str, actor: str,
                           operation_id: str | None = None) -> Receipt:
@@ -472,29 +542,160 @@ class MemoryRepo:
         evidence_a: Any = None,
         evidence_b: Any = None,
         operation_id: str | None = None,
+        evidence_basis_digest: str | None = None,
     ) -> tuple[str, Receipt]:
         disagreement_id = new_id("disag")
 
+        existing: dict[str, Any] = {}
+
         def body(m: Mutation) -> None:
+            # Reaching the same contradiction again is a recurrence, not a
+            # second dispute. Without this, auditing one conclusion twenty
+            # times turns one unresolved issue into twenty rows and the count
+            # stops describing anything. A partial unique index enforces it in
+            # the database as well; this is the path that makes the repeat
+            # useful rather than an error.
+            live = m.sql("SELECT disagreement_id, recurrences FROM disagreements"
+                         " WHERE subject_kind = ? AND subject_id = ?"
+                         "   AND status = 'open'",
+                         (subject_kind, subject_id)).fetchone()
+            if live is not None:
+                existing["disagreement_id"] = live["disagreement_id"]
+                m.sql("UPDATE disagreements SET recurrences = recurrences + 1"
+                      " WHERE disagreement_id = ?", (live["disagreement_id"],))
+                m.emit(EventKind.DISAGREEMENT_OPENED, {
+                    "disagreement_id": live["disagreement_id"],
+                    "subject_kind": subject_kind, "subject_id": subject_id,
+                    "actor_a": actor_a, "actor_b": actor_b, "recurrence": True,
+                    "recurrences": int(live["recurrences"]) + 1,
+                    "note": ("the same contradiction was reached again; it is "
+                             "recorded against the open dispute rather than "
+                             "opening a rival one")})
+                return
             m.sql(
                 "INSERT INTO disagreements(disagreement_id, subject_kind, subject_id, claim_a,"
-                " actor_a, claim_b, actor_b, evidence_a, evidence_b, status, created_at,"
-                " state_version) VALUES (?,?,?,?,?,?,?,?,?,?,?,?)",
+                " actor_a, claim_b, actor_b, evidence_a, evidence_b, status,"
+                " evidence_basis_digest, created_at,"
+                " state_version) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?)",
                 (disagreement_id, subject_kind, subject_id, claim_a, actor_a, claim_b, actor_b,
                  json.dumps(evidence_a) if evidence_a is not None else None,
                  json.dumps(evidence_b) if evidence_b is not None else None,
-                 "open", time.time(), m.prior_version + 1),
+                 "open", evidence_basis_digest, time.time(), m.prior_version + 1),
             )
             m.emit(EventKind.DISAGREEMENT_OPENED, {
                 "disagreement_id": disagreement_id, "subject_kind": subject_kind,
                 "subject_id": subject_id, "actor_a": actor_a, "actor_b": actor_b,
+                "evidence_basis_digest": evidence_basis_digest,
             })
 
         receipt, _ = self.writer.apply(
             body, actor=actor_b, operation_id=operation_id,
             mutation_id=f"disag:{disagreement_id}",
         )
+        if existing:
+            return existing["disagreement_id"], receipt
         return disagreement_id, receipt
+
+    #: How a dispute may end. Each is a fact the Harness can point at; none of
+    #: them is a component deciding it would rather the dispute went away.
+    RESOLUTIONS = ("superseded", "retracted", "resolved_supported",
+                   "closed_by_operator")
+
+    def _close_disputes_in(self, m: "Mutation", *, subject_kind: str,
+                           subject_id: str, resolution: str, actor: str,
+                           detail: str = "") -> None:
+        """Close the live dispute about a subject, inside the caller's mutation.
+
+        One transaction, deliberately. If the claim changed and the dispute
+        survived because a second write failed, the organism would hold an
+        open contradiction about a claim nobody is making -- a worse state
+        than either outcome on its own.
+        """
+        row = m.sql("SELECT disagreement_id FROM disagreements"
+                    " WHERE subject_kind = ? AND subject_id = ?"
+                    "   AND status = 'open'",
+                    (subject_kind, subject_id)).fetchone()
+        if row is None:
+            return
+        m.sql("UPDATE disagreements SET status = ?, resolution = ?,"
+              " resolved_at = ?, resolved_by = ? WHERE disagreement_id = ?",
+              (resolution, detail[:500] or resolution, time.time(), actor,
+               row["disagreement_id"]))
+        m.emit(EventKind.DISAGREEMENT_RESOLVED, {
+            "disagreement_id": row["disagreement_id"], "resolution": resolution,
+            "actor": actor, "detail": detail[:500],
+            "subject_kind": subject_kind, "subject_id": subject_id,
+            "note": ("the disputed record changed, so the dispute ended with "
+                     "it; the subject caused this by changing the claim, not "
+                     "by dismissing the finding")})
+
+    def resolve_disagreement(self, *, disagreement_id: str, resolution: str,
+                             actor: str, detail: str = "",
+                             operation_id: str | None = None) -> Receipt:
+        """Close a dispute because the record moved.
+
+        `actor` is who the closure is attributed to, not who authorised it:
+        authority is decided by the caller, and the callers are the four
+        mechanical conditions plus the operator. There is no verb through
+        which a component can close a dispute by asserting that it is over.
+        """
+        if resolution not in self.RESOLUTIONS:
+            raise InvalidInput("unknown resolution", resolution=resolution,
+                               allowed=list(self.RESOLUTIONS))
+
+        def body(m: Mutation) -> None:
+            row = m.sql("SELECT status, subject_kind, subject_id FROM disagreements"
+                        " WHERE disagreement_id = ?", (disagreement_id,)).fetchone()
+            if row is None:
+                raise NotFound("no such disagreement",
+                               disagreement_id=disagreement_id)
+            if row["status"] != "open":
+                raise InvalidInput("that disagreement is already closed",
+                                   disagreement_id=disagreement_id,
+                                   status=row["status"])
+            m.sql("UPDATE disagreements SET status = ?, resolution = ?,"
+                  " resolved_at = ?, resolved_by = ? WHERE disagreement_id = ?",
+                  (resolution, detail[:500] or resolution, time.time(), actor,
+                   disagreement_id))
+            m.emit(EventKind.DISAGREEMENT_RESOLVED, {
+                "disagreement_id": disagreement_id, "resolution": resolution,
+                "actor": actor, "detail": detail[:500],
+                "subject_kind": row["subject_kind"],
+                "subject_id": row["subject_id"],
+                "note": ("closed because the record moved, not because a "
+                         "component decided the dispute was over")})
+
+        receipt, _ = self.writer.apply(
+            body, actor=actor, operation_id=operation_id,
+            mutation_id=f"disagree-resolve:{disagreement_id}:{resolution}")
+        return receipt
+
+    def open_disagreement_for(self, *, subject_kind: str, subject_id: str
+                              ) -> dict[str, Any] | None:
+        """The live dispute about this thing, if there is one."""
+        row = self.conn.execute(
+            "SELECT * FROM disagreements WHERE subject_kind = ? AND subject_id = ?"
+            "   AND status = 'open'", (subject_kind, subject_id)).fetchone()
+        return dict(row) if row else None
+
+    def close_disagreements_about(self, *, subject_kind: str, subject_id: str,
+                                  resolution: str, actor: str, detail: str = ""
+                                  ) -> str | None:
+        """Close the live dispute about a thing whose record just changed.
+
+        Called by the mechanical conditions -- a conclusion withdrawn or
+        superseded -- rather than by anybody deciding. Returns the dispute it
+        closed, or None when there was nothing open, which is the ordinary
+        case and not an error.
+        """
+        live = self.open_disagreement_for(subject_kind=subject_kind,
+                                          subject_id=subject_id)
+        if live is None:
+            return None
+        self.resolve_disagreement(
+            disagreement_id=live["disagreement_id"], resolution=resolution,
+            actor=actor, detail=detail)
+        return live["disagreement_id"]
 
     def get_disagreements(self, *, status: str = "open", limit: int = 50) -> list[dict[str, Any]]:
         rows = self.conn.execute(
