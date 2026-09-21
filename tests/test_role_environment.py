@@ -70,11 +70,19 @@ class FakeSupervisor:
 
     `allowed` stands in for the scope table: a verb outside it raises, exactly
     as an RPC connection whose method table does not contain it would.
+
+    It also models `role_tool_invoke`, the turn-fenced entry point every role
+    capability now goes through. `open_turn` is the turn the Harness considers
+    current; a call carrying any other turn is refused, which is what stops a
+    turn that hung and was declared stale from acting after its inputs were
+    handed to a replacement.
     """
 
-    def __init__(self, manifest: dict, allowed: set[str]) -> None:
+    def __init__(self, manifest: dict, allowed: set[str],
+                 open_turn: str | None = "turn-1") -> None:
         self.manifest = manifest
         self.allowed = allowed
+        self.open_turn = open_turn
         self.calls: list[tuple[str, dict]] = []
 
     def call(self, method: str, **params):
@@ -84,6 +92,20 @@ class FakeSupervisor:
                     "text": role_env.render(self.manifest),
                     "environment_sha256": self.manifest["environment_sha256"],
                     "environment_blob": "blob-1"}
+        if method == "role_tool_invoke":
+            if params.get("turn_id") != self.open_turn:
+                return {"accepted": False, "result": None,
+                        "reason": (f"turn {params.get('turn_id')} is not "
+                                   "running; the organism has moved on")}
+            name = params["name"]
+            if name not in self.allowed:
+                return {"accepted": False, "result": None,
+                        "reason": f"unknown method {name!r}"}
+            # Recorded under its own name too, so tests can assert what was
+            # actually invoked rather than unpacking the envelope.
+            self.calls.append((name, params.get("arguments") or {}))
+            return {"accepted": True, "result": {"ok": True},
+                    "reason": None}
         if method not in self.allowed:
             raise InvalidInput(f"unknown method {method!r}")
         return {"ok": True, "echo": params}
@@ -113,6 +135,8 @@ def _role(cls, cfg, *, manifest, allowed, replies):
     role.sup = FakeSupervisor(manifest, allowed)
     role.session_id = "sess-1"
     role.incarnation = 1
+    # The turn the Harness considers current. Capabilities are fenced to it.
+    role.current_turn_id = "turn-1"
     role.profile_ref = f"{role.role}@1"
     role.profile = {"prompt_sha256": "p", "config_sha256": "c"}
     return role
@@ -360,6 +384,61 @@ def test_the_tool_loop_is_bounded_by_the_deadline(cfg):
     out = ego._turn("go", trigger="test", deadline=0.0)
     assert out["stop_reason"] == "deadline_reached"
     assert not [c for c in ego.sup.calls if c[0] == "recall"]
+
+
+def test_a_turn_that_is_no_longer_running_cannot_act(cfg):
+    """I75. An expired turn cannot act, not merely cannot commit.
+
+    The dangerous half of the stale-turn story. A turn that hangs, is declared
+    stale and has its inputs handed to a replacement *was* refused at commit --
+    `complete` rejects a turn that is no longer running -- but its side effects
+    were not fenced at all. It could still request work, post findings and
+    record conclusions into an organism that had moved on without it, because
+    a role's effector call carried no turn identity whatsoever.
+
+    Every capability now goes through `role_tool_invoke` carrying the turn it
+    belongs to, exactly as a neuocyte carries its fencing token.
+    """
+    man = _manifest("ego", [CAP_REQUEST_WORK])
+    ego = _role(EgoProcess, cfg, manifest=man, allowed={"ego_request_work"},
+                replies=[_tool_call("ego_request_work", objective="act anyway"),
+                         "done"])
+    # The Harness has moved on: the turn this role still thinks it holds was
+    # abandoned and a replacement is running.
+    ego.sup.open_turn = "turn-2"
+
+    out = ego._turn("go", trigger="test")
+
+    assert not [c for c in ego.sup.calls if c[0] == "ego_request_work"], \
+        "a turn that is no longer running reached an effector"
+    assert out["tool_calls"][0]["accepted"] is False
+    assert "not running" in out["tool_calls"][0]["reason"]
+
+
+def test_a_role_holding_no_turn_cannot_act(cfg):
+    """Belt and braces: the role refuses before it even asks."""
+    man = _manifest("ego", [CAP_REQUEST_WORK])
+    ego = _role(EgoProcess, cfg, manifest=man, allowed={"ego_request_work"},
+                replies=["unused"])
+    ego.environment = man          # the capability IS offered ...
+    ego.current_turn_id = None     # ... but no turn is running
+    res = ego._invoke("ego_request_work", {"objective": "no turn at all"})
+    assert res["accepted"] is False
+    assert "no turn is running" in res["reason"]
+    assert not [c for c in ego.sup.calls if c[0] == "ego_request_work"]
+
+
+def test_capabilities_reach_the_harness_through_the_fence(cfg):
+    """The fence is the only route, so it cannot be stepped around."""
+    import inspect
+
+    from amoeba.roles import RoleProcess
+
+    source = inspect.getsource(RoleProcess._invoke)
+    assert "role_tool_invoke" in source
+    assert "self.current_turn_id" in source
+    # The old unfenced shape must not come back.
+    assert "self.sup.call(name," not in source
 
 
 # ---------------------------------------------------------------------------

@@ -12,6 +12,7 @@ Two layers live here:
 
 from __future__ import annotations
 
+import re
 import time
 from typing import TYPE_CHECKING, Any, Sequence
 
@@ -27,6 +28,43 @@ if TYPE_CHECKING:
     from .supervisor import Supervisor
 
 SCHEMA_VERSION = "1.0.0"
+
+
+VERDICTS = ("supported", "contested", "unsupported", "inconclusive")
+_VERDICT_RE = re.compile(
+    r"\b(unsupported|inconclusive|contested|supported)\b")
+
+def _parse_audit(text: str) -> dict[str, Any]:
+    """Pull VERDICT / FINDING / UNRESOLVED out of an audit turn.
+
+    Matched on **whole words**. Substring matching read `unsupported` as
+    `supported` -- the word contains it -- so an adverse audit became a
+    favourable durable verdict, and the disagreement it should have opened
+    never was, because that branch tests for `unsupported`. An audit that
+    silently inverts is worse than no audit at all.
+
+    An answer naming more than one verdict is treated as unstated rather
+    than resolved by ordering: a model echoing the menu back
+    ("supported | contested | ...") has not reached a judgement, and
+    picking the first one would invent a finding out of formatting.
+
+    Whether a verdict was actually stated is reported separately, so an
+    unparsed reply stays distinguishable from a judged one.
+    """
+    verdict, finding, unresolved, stated = "inconclusive", "", "", False
+    for line in (text or "").splitlines():
+        upper = line.upper()
+        if upper.startswith("VERDICT:"):
+            candidate = line.split(":", 1)[1].strip().lower()
+            found = {m.group(1) for m in _VERDICT_RE.finditer(candidate)}
+            if len(found) == 1:
+                verdict, stated = found.pop(), True
+        elif upper.startswith("FINDING:"):
+            finding = line.split(":", 1)[1].strip()
+        elif upper.startswith("UNRESOLVED:"):
+            unresolved = line.split(":", 1)[1].strip()
+    return {"verdict": verdict, "finding": finding,
+            "unresolved": unresolved, "verdict_stated": stated}
 
 
 def build(sup: "Supervisor") -> dict[str, Any]:
@@ -716,31 +754,6 @@ def build(sup: "Supervisor") -> dict[str, Any]:
                                  "boundary and the answer is retrievable by "
                                  "trigger id")}
             time.sleep(0.1)
-
-    def _parse_audit(text: str) -> dict[str, Any]:
-        """Pull VERDICT / FINDING / UNRESOLVED out of an audit turn.
-
-        Reports whether a verdict was actually stated, so an unparsed reply is
-        distinguishable from a judged one. Defaulting silently to
-        "inconclusive" would let a formatting failure look like a considered
-        finding.
-        """
-        verdict, finding, unresolved, stated = "inconclusive", "", "", False
-        for line in (text or "").splitlines():
-            upper = line.upper()
-            if upper.startswith("VERDICT:"):
-                candidate = line.split(":", 1)[1].strip().lower()
-                for known in ("supported", "contested", "unsupported",
-                              "inconclusive"):
-                    if known in candidate:
-                        verdict, stated = known, True
-                        break
-            elif upper.startswith("FINDING:"):
-                finding = line.split(":", 1)[1].strip()
-            elif upper.startswith("UNRESOLVED:"):
-                unresolved = line.split(":", 1)[1].strip()
-        return {"verdict": verdict, "finding": finding,
-                "unresolved": unresolved, "verdict_stated": stated}
 
     def _label_simulation(result: dict[str, Any] | None,
                           limitations: list[str]) -> None:

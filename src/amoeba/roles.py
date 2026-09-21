@@ -299,10 +299,17 @@ class RoleProcess:
                                "only the capabilities declared there can be "
                                "invoked"),
                     "result": None, "error": None}
+        if not self.current_turn_id:
+            return {"accepted": False, "result": None, "error": None,
+                    "reason": ("no turn is running; a capability can only be "
+                               "invoked inside the turn that was claimed")}
         try:
-            result = self.sup.call(name, **self._sanitise(name, arguments))
-            return {"accepted": True, "result": result, "error": None,
-                    "reason": None}
+            out = self.sup.call(
+                "role_tool_invoke", turn_id=self.current_turn_id, name=name,
+                arguments=self._sanitise(name, arguments))
+            return {"accepted": bool(out.get("accepted")),
+                    "result": out.get("result"), "error": None,
+                    "reason": out.get("reason")}
         except Exception as exc:  # noqa: BLE001
             # Reported back to the model as a failed call rather than killing
             # the turn. A refusal the model never learns about leaves it

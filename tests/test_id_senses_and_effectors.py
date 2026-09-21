@@ -277,11 +277,11 @@ def test_id_can_invoke_every_authorised_effector(org):
     assert investigation["independent"] is True
     assert len(investigation["admitted"]) + len(investigation["refused"]) == 2
 
-    rejuv = org.id.call("id_request_rejuvenation", role="ego",
+    rejuv = org.id.call("id_request_rejuvenation", target_role="ego",
                         reason="context climbing", pulse_id=pid)
     assert "performed" in rejuv or "refused" in rejuv
 
-    prompt = org.id.call("id_propose_prompt", role="ego",
+    prompt = org.id.call("id_propose_prompt", target_role="ego",
                          prompt="You are Ego. Be brief.",
                          rationale="verbosity", pulse_id=pid)
     # A real Prompt Library candidate now, not a note: `ego@2` exists and is
@@ -344,7 +344,7 @@ def test_consequential_id_actions_are_receipted_and_attributed(org):
                 confidence=0.3, pulse_id=p["pulse_id"])
     org.id.call("id_escalate_to_operator", summary="attribution check",
                 severity="notice", pulse_id=p["pulse_id"])
-    org.id.call("id_propose_prompt", role="id", prompt="Be careful.",
+    org.id.call("id_propose_prompt", target_role="id", prompt="Be careful.",
                 rationale="attribution check", pulse_id=p["pulse_id"])
 
     events = org.call("history", limit=600)
@@ -368,7 +368,7 @@ def test_id_proposals_do_not_install_themselves(org):
     """A proposal is a proposal. Prompts especially."""
     p = org.id.call("system_pulse", max_age_seconds=0)
     before = p["resources"]["configured"]["prompt.ego"]["sha256"]
-    org.id.call("id_propose_prompt", role="ego", prompt="Completely different.",
+    org.id.call("id_propose_prompt", target_role="ego", prompt="Completely different.",
                 rationale="test", pulse_id=p["pulse_id"])
     after = org.id.call("system_pulse", max_age_seconds=0)
     assert after["resources"]["configured"]["prompt.ego"]["sha256"] == before, (

@@ -759,60 +759,85 @@ def test_id_wakes_at_startup_and_ego_stays_quiet(tmp_path: Path):
 
 
 def test_input_arriving_during_an_ego_turn_is_queued_not_injected(tmp_path: Path):
-    """The load-bearing runtime claim, against real processes.
+    """The load-bearing runtime claim, held open deterministically.
 
-    Before this, `ego_converse` called into the Ego process synchronously and
-    the role's RPC server is threaded -- two callers produced two concurrent
-    turns against one inference session. Now there is one ingestion path and
-    one turn at a time.
+    This originally polled `role_mailbox` hoping to catch Ego with a turn
+    open. That is a race the test always lost: against the deterministic
+    backend a turn is claimed, generated and closed faster than a 50ms sampler
+    can observe, so the first sample already showed it completed. Racing the
+    scheduler proves nothing when you lose the race every time.
 
-    The precondition matters: the second input has to arrive while a turn is
-    genuinely *running*. Two inputs submitted before Ego reaches a boundary
-    are correctly bundled into one turn, which is a different guarantee and is
-    covered separately.
+    So the test *holds a turn open itself*, through the same Harness verbs the
+    role uses. There is nothing artificial about the guarantee being tested:
+    bundling is the Harness's decision, and what is being asserted is that
+    while a turn is open, a newly queued input does not join it. The turn
+    being held by the test rather than by Ego's generation loop is exactly
+    what makes the window deterministic instead of a millisecond wide.
     """
     stack = start_stack(tmp_path)
     try:
-        first = stack.call("ego_converse", message="first message",
-                           wait=False)["result"]
+        # Take a turn for Ego and keep it. Ego's own loop polls, so it may win
+        # the first claim; wait for it to finish and try again.
+        held = None
+        for _ in range(40):
+            first = stack.call("ego_converse", message="first message",
+                               wait=False)["result"]
+            try:
+                claimed = stack.call(
+                    "role_claim_turn", role="ego", incarnation=1,
+                    profile_ref="ego@1")
+            except Exception:
+                claimed = {"turn": None}
+            if claimed.get("turn"):
+                held = claimed["turn"]
+                break
+            # Ego got there first; let it drain and retry.
+            _wait_for(lambda: stack.call("role_mailbox",
+                                         role="ego")["ego"]["queued"] == 0,
+                      timeout=30.0)
+        assert held, "could not hold a turn open for Ego"
+        assert first["trigger_id"] in {t["trigger_id"] for t in held["triggers"]}
 
-        # Wait until Ego has actually opened a turn for it.
-        running = _wait_for(
-            lambda: stack.call("role_mailbox", role="ego")["ego"]["current_turn"],
-            timeout=60.0, interval=0.02)
-        assert running, "Ego never opened a turn for the first input"
-        running_turn = running["turn_id"]
-
+        # === the turn is now open, and stays open ===
         second = stack.call("ego_converse", message="second message",
                             wait=False)["result"]
 
-        # While that turn is open, the new input is queued and unseen.
-        detail = stack.call("role_turn", turn_id=running_turn)
+        # It must not have joined the turn already running.
+        detail = stack.call("role_turn", turn_id=held["turn_id"])
+        assert detail["status"] == "running"
         assert second["trigger_id"] not in {t["trigger_id"]
                                             for t in detail["triggers"]}, \
             "an input arriving mid-turn was injected into it"
 
-        def second_consumed():
-            row = stack.call("role_turn", turn_id=running_turn)
-            turns = stack.call("role_turns", role="ego")["turns"]
-            for t in turns:
-                if t["turn_id"] == running_turn:
+        # And it is visibly waiting rather than lost.
+        mb = stack.call("role_mailbox", role="ego")["ego"]
+        assert mb["queued"] >= 1
+        assert second["trigger_id"] in {t["trigger_id"]
+                                        for t in mb["next_triggers"]}
+
+        # === release the turn ===
+        stack.call("role_complete_turn", turn_id=held["turn_id"],
+                   stop_reason="model_stop")
+
+        # Now it lands, in a different turn, that began after the first ended.
+        def consuming_turn():
+            for t in stack.call("role_turns", role="ego")["turns"]:
+                if t["turn_id"] == held["turn_id"]:
                     continue
                 d = stack.call("role_turn", turn_id=t["turn_id"])
-                if second["trigger_id"] in {x["trigger_id"] for x in d["triggers"]}:
-                    return t
+                if second["trigger_id"] in {x["trigger_id"]
+                                            for x in d["triggers"]}:
+                    return d
             return None
 
-        later = _wait_for(second_consumed, timeout=120.0)
+        later = _wait_for(consuming_turn, timeout=90.0)
         assert later, "the queued input was never given a turn"
-        assert later["turn_id"] != running_turn
+        assert later["turn_id"] != held["turn_id"]
 
-        # And the two turns did not overlap.
-        turns = {t["turn_id"]: t for t in
-                 stack.call("role_turns", role="ego")["turns"]}
-        a, b = turns[running_turn], turns[later["turn_id"]]
-        assert a["finished_at"] and b["started_at"] >= a["finished_at"], \
-            "the second turn began before the first ended"
+        closed = stack.call("role_turn", turn_id=held["turn_id"])
+        assert closed["finished_at"]
+        assert later["started_at"] >= closed["finished_at"], \
+            "the next turn began before the held one ended"
     finally:
         stack.stop()
 
@@ -930,5 +955,145 @@ def test_the_operator_can_see_the_mailbox(tmp_path: Path):
         assert _wait_for(
             lambda: stack.call("role_mailbox", role="ego")["ego"]["queued"]
             or [t for t in stack.call("role_turns", role="ego")["turns"]])
+    finally:
+        stack.stop()
+
+
+def test_an_adverse_audit_is_not_recorded_as_a_favourable_one():
+    """I77. `unsupported` must never be read as `supported`.
+
+    Substring matching did exactly that -- the word contains it -- so an
+    adverse audit became a favourable durable verdict, and the disagreement it
+    should have opened never was, because that branch tests for `unsupported`.
+    An audit that silently inverts is worse than no audit.
+
+    Driven through the real parser rather than a model, because a
+    deterministic backend never emits a verdict line and the bug hid behind
+    exactly that.
+    """
+    from amoeba.supervisor_api import _parse_audit
+
+    cases = {
+        "VERDICT: unsupported": "unsupported",
+        "VERDICT: supported": "supported",
+        "VERDICT: contested": "contested",
+        "VERDICT: inconclusive": "inconclusive",
+        "VERDICT: clearly UNSUPPORTED by the record": "unsupported",
+    }
+    for text, expected in cases.items():
+        got = _parse_audit(text)
+        assert got["verdict"] == expected, (text, got)
+        assert got["verdict_stated"] is True
+
+    # A model echoing the menu has not judged anything.
+    echoed = _parse_audit("VERDICT: supported | contested | unsupported | inconclusive")
+    assert echoed["verdict_stated"] is False
+    assert echoed["verdict"] == "inconclusive"
+
+
+def test_id_can_actually_call_the_effectors_that_name_a_target(tmp_path: Path):
+    """I78. An effector whose target is a role must still be callable.
+
+    `role` means "who is asking" everywhere in this system, so the tool loop
+    strips it -- which made two Id effectors permanently uncallable, because
+    for them `role` was the *target*. The collision was the defect; the
+    parameter is now `target_role`.
+    """
+    from amoeba.roles import AUTHORITY_ARGUMENTS
+
+    stack = start_stack(tmp_path)
+    try:
+        from amoeba.rpc import RpcClient, read_or_create_token
+
+        cfg = stack.cfg
+        idc = RpcClient(cfg.supervisor_host, cfg.supervisor_port,
+                        read_or_create_token(cfg.scope_token_path("id")),
+                        timeout=60)
+        idc.connect(retries=10, delay=0.2)
+
+        out = idc.call("id_propose_prompt", target_role="ego",
+                       prompt="Revised Ego doctrine.",
+                       rationale="observed overclaiming")
+        assert out["status"] == "candidate" and out["profile_ref"] == "ego@2"
+
+        rej = idc.call("id_request_rejuvenation", target_role="ego",
+                       reason="context climbing")
+        assert "performed" in rej or "refused" in rej
+
+        # And the argument the loop strips is not one either verb needs.
+        assert "target_role" not in AUTHORITY_ARGUMENTS
+        assert "role" in AUTHORITY_ARGUMENTS
+    finally:
+        stack.stop()
+
+
+def test_an_unanswered_interaction_is_not_reported_complete(tmp_path: Path):
+    """I79. "Complete" means answered.
+
+    An interaction whose answer never arrived used to be marked complete with
+    an empty one -- telling the client, permanently, that nothing was the
+    organism's reply.
+
+    Ego is stopped before the input is submitted, so no answer *can* arrive.
+    That removes the timing race: an earlier version of this test shortened
+    the patience instead, and against a fast deterministic backend the answer
+    sometimes beat it anyway, which made the distinction unobservable and the
+    test pass for the wrong reason.
+    """
+    stack = start_stack(tmp_path, scheduler={"turn_wall_seconds": 0.3,
+                                             "max_continuations": 0,
+                                             "submit_wait_seconds": 0.2})
+    try:
+        ego = _wait_child(stack, "ego")
+        subprocess.run(["taskkill", "/PID", str(ego["pid"]), "/T", "/F"],
+                       capture_output=True, check=False)
+
+        client = "test-client"
+        sub = stack.call("io_submit", text="nobody is listening",
+                         client_id=client)
+        interaction = sub["interaction_id"]
+
+        def settled():
+            st = stack.call("io_status", interaction_id=interaction,
+                            client_id=client)
+            return st if st["status"] in ("complete", "failed") else None
+
+        done = _wait_for(settled, timeout=60.0)
+        assert done, "the interaction never settled at all"
+
+        out = stack.call("io_output", interaction_id=interaction,
+                         client_id=client)
+        result = (out.get("output") or {}).get("result") or {}
+        answer = (result.get("answer") or result.get("claim") or "")
+
+        assert done["status"] == "failed", (
+            "an interaction nobody answered was reported "
+            f"{done['status']!r} with answer {answer!r}")
+        assert out.get("error"), "a failed interaction with no reason"
+        assert "queued" in out["error"] or "answer" in out["error"]
+    finally:
+        stack.stop()
+
+
+def test_an_answered_interaction_carries_its_answer(tmp_path: Path):
+    """The other half: given time, the answer does arrive and is returned."""
+    stack = start_stack(tmp_path)
+    try:
+        client = "test-client"
+        sub = stack.call("io_submit", text="say something", client_id=client)
+        interaction = sub["interaction_id"]
+
+        def settled():
+            st = stack.call("io_status", interaction_id=interaction,
+                            client_id=client)
+            return st if st["status"] in ("complete", "failed") else None
+
+        done = _wait_for(settled, timeout=120.0)
+        assert done and done["status"] == "complete", done
+
+        out = stack.call("io_output", interaction_id=interaction,
+                         client_id=client)
+        result = (out.get("output") or {}).get("result") or {}
+        assert (result.get("answer") or "").strip(), out.get("output")
     finally:
         stack.stop()

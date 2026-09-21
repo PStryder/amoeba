@@ -1006,8 +1006,8 @@ MUTATIONS: list[Mutation] = [
     Mutation(
         "I59", "A role can actually execute what its environment offers",
         "src/amoeba/roles.py",
-        "            result = self.sup.call(name, **self._sanitise(name, arguments))",
-        "            result = None  # MUTANT: parse the request, never run it",
+        '            out = self.sup.call(\n                "role_tool_invoke", turn_id=self.current_turn_id, name=name,\n                arguments=self._sanitise(name, arguments))',
+        '            out = {"accepted": False}  # MUTANT: never actually run it',
         ["test_ego_can_invoke_an_advertised_sense",
          "test_id_can_invoke_an_advertised_sense_and_effector"],
         layer="RoleProcess._invoke (the role tool loop's execution step)",
@@ -1148,6 +1148,78 @@ MUTATIONS: list[Mutation] = [
         note="Reintroduces the pattern that existed before the turn model: a "
              "verb making a role think outside a claimed turn, against the "
              "session a turn may already hold.",
+    ),
+    Mutation(
+        "I73", "A role is never wedged by a turn it did not close",
+        "src/amoeba/mailbox.py",
+        '    if role is not None:',
+        "    if False:  # MUTANT: recovery cannot target one role",
+        ["test_recovery_can_target_one_role",
+         "test_a_turn_nobody_closed_does_not_wedge_the_role"],
+        layer="mailbox.recover / expire_stale_turns",
+        also=[('    cutoff = time.time() - max(1.0, float(max_seconds))',
+               "    cutoff = 0.0  # MUTANT: no turn is ever stale")],
+        note="Two defences, because there are two ways to leave a turn "
+             "open: the process dies and is restarted, or it hangs and is "
+             "not. Both must go. The wedge this prevents presents as a "
+             "healthy role that never thinks again.",
+    ),
+    Mutation(
+        "I74", "A role cannot forge attribution in a mailbox",
+        "src/amoeba/scopes.py",
+        '    "role_claim_turn", "role_complete_turn", "role_abandon_turn",',
+        '    "role_claim_turn", "role_complete_turn", "role_abandon_turn",\n    "role_enqueue_trigger",  # MUTANT: a role picks its own source',
+        ["test_a_role_cannot_forge_attribution_in_a_mailbox"],
+        layer="scopes.ROLE_BASE (what a role credential resolves to)",
+        note="Ego holding this could queue an operator-attributed "
+             "instruction into Id's cognition.",
+    ),
+    Mutation(
+        "I75", "A turn that is no longer running cannot act",
+        "src/amoeba/turn_api.py",
+        '        if row["status"] != "running":',
+        "        if False:  # MUTANT: a swept turn may still act",
+        ["test_the_harness_refuses_a_capability_from_a_turn_that_is_not_running",
+         "test_a_turn_that_is_no_longer_running_cannot_act"],
+        layer="role_tool_invoke (the turn fence on every capability)",
+        note="Being refused at commit was never enough: the result could "
+             "not land, but the side effects could.",
+    ),
+    Mutation(
+        "I76", "A role reads the request, not a preview of it",
+        "src/amoeba/mailbox.py",
+        '        body = trigger_body(t, blobs)',
+        '        body = t.get("summary") or ""  # MUTANT: preview only',
+        ["test_a_turn_shows_the_request_not_a_preview",
+         "test_an_oversized_body_says_that_it_was_truncated"],
+        layer="mailbox.render_bundle (what the model is handed)",
+    ),
+    Mutation(
+        "I77", "An adverse audit is never recorded as a favourable one",
+        "src/amoeba/supervisor_api.py",
+        '            if len(found) == 1:',
+        "                found = {v for v in VERDICTS if v in candidate}\n                if found:  # MUTANT: substring match, first wins",
+        ["test_an_adverse_audit_is_not_recorded_as_a_favourable_one"],
+        layer="_parse_audit (how a verdict is read)",
+        note="`supported` is a substring of `unsupported`, so the adverse verdict inverts and the disagreement is never opened.",
+    ),
+    Mutation(
+        "I78", "An effector whose target is a role stays callable",
+        "src/amoeba/id_api.py",
+        '    def id_propose_prompt(*, target_role: str, prompt: str, rationale: str,',
+        "    def id_propose_prompt(*, role: str, prompt: str, rationale: str,"
+        "  # MUTANT: the target collides with the authority argument",
+        ["test_id_can_actually_call_the_effectors_that_name_a_target"],
+        layer="id_api (the parameter naming the target role)",
+    ),
+    Mutation(
+        "I79", "Complete means answered",
+        "src/amoeba/io_api.py",
+        '            settled = isinstance(result, dict) and result.get("status") == "completed"',
+        "            settled = True  # MUTANT: call it complete regardless",
+        ["test_an_unanswered_interaction_is_not_reported_complete",
+         "test_an_answered_interaction_carries_its_answer"],
+        layer="io_api._run (when an interaction is called complete)",
     ),
 ]
 

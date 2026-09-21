@@ -28,13 +28,15 @@ from typing import TYPE_CHECKING, Any
 
 from . import mailbox
 from .errors import InvalidInput, NotFound
+from .scopes import model_facing_verbs
 from .store.writer import Mutation
 
 if TYPE_CHECKING:
     from .supervisor import Supervisor
 
 # What the role process may call. Not model-facing.
-ROLE_TURN_VERBS = ("role_claim_turn", "role_complete_turn", "role_abandon_turn")
+ROLE_TURN_VERBS = ("role_claim_turn", "role_complete_turn",
+                   "role_abandon_turn", "role_tool_invoke")
 
 # What the Operator may look at.
 OPERATOR_TURN_VERBS = ("role_mailbox", "role_turns", "role_turn",
@@ -148,13 +150,7 @@ def build(sup: "Supervisor") -> dict[str, Any]:  # noqa: C901
             sup.log.warning("rejuvenation for %s failed: %s", role, exc)
             return {"performed": False, "reason": str(exc)[:200]}
         session = done.get("session_id") or done.get("new_session_id")
-        if session:
-            try:
-                sup.client(role).call("refresh_session", session_id=session,
-                                      reason="context pressure")
-            except Exception:  # noqa: BLE001
-                sup.log.debug("could not hand %s its new session", role,
-                              exc_info=True)
+        sup.hand_over_session(role, session, reason="context pressure")
         return {"performed": True, "role": role,
                 "session_id": session,
                 "note": ("identity, incarnation, profile binding and mailbox "
@@ -168,6 +164,60 @@ def build(sup: "Supervisor") -> dict[str, Any]:  # noqa: C901
             lambda m: mailbox.abandon(m, mind, turn_id=turn_id, reason=reason),
             actor="harness", bump_version=False)
         return {**out, "receipt_id": receipt.receipt_id}
+
+    def role_tool_invoke(*, turn_id: str, name: str,
+                         arguments: dict[str, Any] | None = None
+                         ) -> dict[str, Any]:
+        """Execute one capability on behalf of a role, fenced to its turn.
+
+        The fence the neuocytes always had and the roles did not. A role used
+        to call its effectors directly on its own credential, carrying no turn
+        identity at all -- so a turn that hung, was declared stale and had its
+        inputs handed to a replacement could still wake up and act. Its
+        *result* was refused, because `complete` rejects a turn that is no
+        longer running, but its side effects were not: it could still request
+        work, post findings and record conclusions into an organism that had
+        moved on without it.
+
+        `turn_id` is the capability, exactly as a neuocyte's fencing token is.
+        It is minted by the Harness, handed only to the role that claimed that
+        turn, and exposed nowhere a role can read -- the mailbox and turn
+        views are operator-only. So there is no `role` argument to forge:
+        which role is asking is derived from the turn, and a turn that is no
+        longer `running` buys nothing.
+
+        The verb must also still be one this role is offered, so the
+        capability boundary is unchanged: this narrows what a role may do, and
+        widens nothing.
+        """
+        row = mind.db.conn.execute(
+            "SELECT role, status FROM role_turns WHERE turn_id = ?",
+            (turn_id,)).fetchone()
+        if row is None:
+            return {"accepted": False, "result": None,
+                    "reason": "no such turn"}
+        if row["status"] != "running":
+            return {"accepted": False, "result": None,
+                    "reason": (f"turn {turn_id} is {row['status']}; the "
+                               "organism has moved on and this turn can no "
+                               "longer act")}
+        role = row["role"]
+        if name not in model_facing_verbs(role):
+            return {"accepted": False, "result": None,
+                    "reason": (f"{name!r} is not a capability offered to "
+                               f"{role}")}
+        handler = sup.methods().get(name)
+        if handler is None:
+            return {"accepted": False, "result": None,
+                    "reason": f"{name!r} is not a dispatchable verb"}
+        try:
+            result = handler(**(arguments or {}))
+        except Exception as exc:  # noqa: BLE001
+            # Reported back as a failed call rather than killing the turn: the
+            # model may well be able to proceed without it.
+            return {"accepted": False, "result": None,
+                    "reason": f"{type(exc).__name__}: {exc}"[:500]}
+        return {"accepted": True, "result": result, "reason": None}
 
     # ==================================================================
     # Queueing: the Harness noticing that something happened
@@ -297,6 +347,7 @@ def build(sup: "Supervisor") -> dict[str, Any]:  # noqa: C901
         "role_claim_turn": role_claim_turn,
         "role_complete_turn": role_complete_turn,
         "role_abandon_turn": role_abandon_turn,
+        "role_tool_invoke": role_tool_invoke,
         "role_enqueue_trigger": role_enqueue_trigger,
         "operator_message_role": operator_message_role,
         "role_mailbox": role_mailbox,

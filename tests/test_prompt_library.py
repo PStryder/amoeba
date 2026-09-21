@@ -290,7 +290,7 @@ def test_id_can_propose_root_doctrine_through_governance(mind, library):
     store, _ = library
     verbs = id_api.build(_Sup(mind))
     out = verbs["id_propose_prompt"](
-        role="ego", prompt="Ego doctrine, revised by Id.",
+        target_role="ego", prompt="Ego doctrine, revised by Id.",
         rationale="observed repeated overclaiming in conclusions")
 
     assert out["status"] == "candidate"

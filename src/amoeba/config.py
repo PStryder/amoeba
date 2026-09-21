@@ -331,7 +331,7 @@ def _reject_retired_prompt(section: dict[str, Any], role: str) -> None:
         "approves it. Configuration cannot change how the organism thinks.\n"
         f"  To keep this text, propose it as a new version of the {role!r} "
         "root and have the Operator approve it:\n"
-        f"    id_propose_prompt(role={role!r}, prompt=..., rationale=...)\n"
+        f"    id_propose_prompt(target_role={role!r}, prompt=..., rationale=...)\n"
         f"    operator_prompt_author(namespace={role!r}, prompt_mode='replace', "
         "prompt_text=...)\n"
         f"  then operator_prompt_state(...) and operator_prompt_select(...).\n"

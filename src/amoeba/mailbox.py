@@ -95,6 +95,21 @@ visible rather than silent: the bundle reports what it left behind.
 """
 
 MAX_SUMMARY = 400
+"""The bounded one-line description carried on the trigger row.
+
+This is what an operator sees in a queue listing. It is deliberately NOT what
+the model reads: a request truncated to a preview loses its own constraints,
+and Ego would answer a question it was never fully asked."""
+
+MAX_BODY_CHARS = 8000
+"""How much of a trigger's full body is rendered into a turn.
+
+The body lives in the content store, in full, whatever this is set to. What
+this bounds is how much of it is spent on context, and when it does truncate
+the rendering says so rather than quietly handing over a fragment."""
+
+BODY_FIELDS = ("message", "body", "question", "text", "summary")
+"""Payload keys that carry what a sender actually said, in preference order."""
 MAX_DELIVERIES = 3
 """After this many failed deliveries a trigger is expired rather than retried
 forever. A trigger that reliably kills the role that reads it would otherwise
@@ -174,8 +189,40 @@ def open_turn(conn, role: str) -> dict[str, Any] | None:
 # ---------------------------------------------------------------------------
 # bundling
 # ---------------------------------------------------------------------------
+def trigger_body(trigger: dict[str, Any], blobs: Any = None) -> str:
+    """What this trigger actually says, not the preview of it.
+
+    The summary is a bounded label for operator listings. The body is the
+    request, and a role that only ever saw the label would answer questions it
+    was never fully asked -- constraints, in particular, live at the end of a
+    message rather than in its first 400 characters.
+
+    Falls back to the summary when there is no stored payload, which is the
+    normal case for triggers the Harness synthesises (a heartbeat, a work
+    completion) where the summary *is* the whole content.
+    """
+    digest = trigger.get("payload_sha256")
+    if not digest or blobs is None:
+        return trigger.get("summary") or ""
+    try:
+        payload = blobs.get_json(digest)
+    except Exception:                      # unreadable content is reportable
+        return (trigger.get("summary") or "") + "\n  (full body unavailable)"
+    if not isinstance(payload, dict):
+        return trigger.get("summary") or ""
+    for field in BODY_FIELDS:
+        value = payload.get(field)
+        if isinstance(value, str) and value.strip():
+            if len(value) > MAX_BODY_CHARS:
+                return (value[:MAX_BODY_CHARS]
+                        + f"\n  [truncated at {MAX_BODY_CHARS} characters; "
+                          f"{len(value) - MAX_BODY_CHARS} more in {digest[:12]}]")
+            return value
+    return trigger.get("summary") or ""
+
+
 def render_bundle(triggers: Sequence[dict[str, Any]], *, role: str,
-                  left_behind: int = 0) -> str:
+                  left_behind: int = 0, blobs: Any = None) -> str:
     """The bundle as the text a role actually reads.
 
     Causal type is preserved per trigger rather than flattened into anonymous
@@ -192,8 +239,9 @@ def render_bundle(triggers: Sequence[dict[str, Any]], *, role: str,
     for i, t in enumerate(triggers, start=1):
         ref = f" ref={t['source_ref']}" if t.get("source_ref") else ""
         lines.append(f"{i}. [{t['kind']}] from {t['source']}{ref}")
-        if t.get("summary"):
-            lines.append(f"   {t['summary']}")
+        body = trigger_body(t, blobs)
+        if body:
+            lines.extend("   " + line for line in body.splitlines())
     lines.append("</turn_input>")
     return "\n".join(lines)
 
@@ -230,7 +278,8 @@ def claim(m: Mutation, mind: "Mind", *, role: str, incarnation: int | None,
 
     turn_id = new_id("turn")
     bundle_id = new_id("bnd")
-    text = render_bundle(admitted, role=role, left_behind=left_behind)
+    text = render_bundle(admitted, role=role, left_behind=left_behind,
+                         blobs=mind.blobs)
     members = [{"trigger_id": t["trigger_id"], "kind": t["kind"],
                 "source": t["source"], "source_ref": t["source_ref"],
                 "summary": t["summary"], "payload_sha256": t["payload_sha256"],
@@ -431,16 +480,53 @@ def abandon(m: Mutation, mind: "Mind", *, turn_id: str, reason: str
     return {"turn_id": turn_id, "requeued": requeued, "expired": expired}
 
 
-def recover(m: Mutation, mind: "Mind") -> dict[str, Any]:
-    """Re-open every turn left running by a process that is gone.
+def recover(m: Mutation, mind: "Mind", *, role: str | None = None,
+            reason: str = "process did not survive the turn") -> dict[str, Any]:
+    """Re-open turns left running by a process that is gone.
 
-    Called during supervisor recovery. Without it, a crash mid-turn would
-    leave the role unable to start another (the unique index forbids a second
-    open turn) and its triggers claimed forever.
+    Called at supervisor start for every role, and again for a single role
+    whenever supervision restarts it. Both matter: one open turn per role is a
+    database constraint, so a turn its owner never closed does not merely lose
+    that thought -- it blocks *every* future turn for that role. The role goes
+    on heartbeating, reports healthy, and never thinks again.
+
+    That was a real outage shape before this took a ``role`` argument: recovery
+    ran only when the whole supervisor started, while supervision restarts
+    individual roles all the time.
     """
+    sql = "SELECT turn_id FROM role_turns WHERE status = 'running'"
+    params: tuple[Any, ...] = ()
+    if role is not None:
+        if role not in ROLES:
+            raise InvalidInput("unknown role", role=role, allowed=list(ROLES))
+        sql += " AND role = ?"
+        params = (role,)
+    out = []
+    for row in mind.db.conn.execute(sql, params):
+        out.append(abandon(m, mind, turn_id=row["turn_id"], reason=reason))
+    return {"recovered_turns": out}
+
+
+def expire_stale_turns(m: Mutation, mind: "Mind", *, max_seconds: float
+                       ) -> dict[str, Any]:
+    """Re-open turns that have been running impossibly long.
+
+    The backstop for a role that is alive but stuck -- wedged inference, a
+    handler that never returns -- where nothing dies and so nothing is
+    restarted. A crash is recoverable because the process is visibly gone; a
+    hang is not, and it wedges the role exactly the same way.
+
+    ``max_seconds`` is the role's own per-turn deadline plus a grace period,
+    so a turn that reaches this has already ignored the bound it enforces on
+    itself.
+    """
+    cutoff = time.time() - max(1.0, float(max_seconds))
     out = []
     for row in mind.db.conn.execute(
-            "SELECT turn_id FROM role_turns WHERE status = 'running'"):
-        out.append(abandon(m, mind, turn_id=row["turn_id"],
-                           reason="process did not survive the turn"))
-    return {"recovered_turns": out}
+            "SELECT turn_id, role, started_at FROM role_turns"
+            " WHERE status = 'running' AND started_at < ?", (cutoff,)):
+        out.append(abandon(
+            m, mind, turn_id=row["turn_id"],
+            reason=(f"still running {time.time() - row['started_at']:.0f}s "
+                    "after it began; the role never closed it")))
+    return {"expired_turns": out}

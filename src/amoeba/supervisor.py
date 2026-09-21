@@ -41,6 +41,11 @@ from .store.writer import Mutation
 
 SERVICE_NAME = "supervisor"
 CHILDREN = ("inference", "ego", "id")
+STALE_TURN_GRACE_SECONDS = 120.0
+"""Extra time beyond a role's own per-turn deadline before the Harness
+treats an open turn as abandoned. A turn that reaches this has already
+ignored the bound it enforces on itself."""
+
 CHILD_GRACE_SECONDS = 8.0
 PROBE_TIMEOUT_SECONDS = 2.0
 """A liveness probe must fail fast; see Supervisor.client."""
@@ -155,7 +160,10 @@ class Supervisor:
         self._role_activity: dict[str, str] = {"ego": "idle", "id": "idle"}
         self._next_heartbeat: dict[str, float] = {}
         self._heartbeat_interval: dict[str, float] = {}
-        self._sched_lock = threading.RLock()
+        # NB: guarded by the existing `_sched_lock` above, which is also held
+        # across the whole scheduler tick. Sharing it keeps the ordering
+        # obvious; it also means a trigger enqueue can wait behind a neuocyte
+        # spawn, which is why the stale-turn sweep runs outside that lock.
         self.homeostasis = ContextHomeostasis(
             HomeostasisConfig(**{k: getattr(cfg.homeostasis, k)
                                  for k in HomeostasisConfig.__slots__}),
@@ -489,12 +497,17 @@ class Supervisor:
                 self.log.warning("could not queue %s startup turn", role,
                                  exc_info=True)
 
-    def _recover_role_turns(self) -> None:
+    def _recover_role_turns(self, role: str | None = None,
+                            reason: str = "process did not survive the turn"
+                            ) -> None:
         """Re-open turns left running by a process that did not survive.
 
-        Without this, a crash mid-turn leaves the role unable to start another
-        -- one open turn per role is a database constraint -- and its triggers
-        claimed by a mind that no longer exists.
+        Called at startup for every role, and for a single role whenever
+        supervision restarts it. The second case is the one that matters
+        operationally: one open turn per role is a database constraint, so a
+        turn its owner never closed blocks every future turn for that role.
+        The role keeps heartbeating and reporting healthy while its mailbox
+        fills and nothing runs.
         """
         from . import mailbox
 
@@ -502,16 +515,64 @@ class Supervisor:
             return
         try:
             _, out = self.mind.writer.apply(
-                lambda m: mailbox.recover(m, self.mind), actor="supervisor",
-                bump_version=False)
+                lambda m: mailbox.recover(m, self.mind, role=role,
+                                          reason=reason),
+                actor="supervisor", bump_version=False)
         except Exception:  # noqa: BLE001
             self.log.exception("role turn recovery failed")
             return
         recovered = out.get("recovered_turns") or []
         if recovered:
             self.log.warning(
-                "recovered %d interrupted role turn(s); %d trigger(s) requeued",
-                len(recovered), sum(len(r["requeued"]) for r in recovered))
+                "recovered %d interrupted %s turn(s); %d trigger(s) requeued",
+                len(recovered), role or "role",
+                sum(len(r["requeued"]) for r in recovered))
+
+    def hand_over_session(self, role: str, session_id: str | None, *,
+                          reason: str = "") -> bool:
+        """Tell a role which inference session it now has.
+
+        Called after anything replaces a role's session. Identity survives --
+        incarnation, profile binding and mailbox are untouched, and a
+        replacement session is not a new mind -- but the role holds the handle
+        in memory, so nobody else can update it for it.
+        """
+        if not session_id or role not in ("ego", "id"):
+            return False
+        try:
+            self.client(role).call("refresh_session", session_id=session_id,
+                                   reason=reason[:200])
+            return True
+        except Exception:  # noqa: BLE001
+            # Supervision will restart it if it is genuinely unreachable; a
+            # role that missed the handover fails its next turn and recovers.
+            self.log.warning("could not hand %s its new session %s", role,
+                             session_id, exc_info=True)
+            return False
+
+    def _expire_stale_turns(self) -> None:
+        """Backstop for a role that is alive but stuck.
+
+        A crash is recoverable because the process is visibly gone. A hang is
+        not: nothing dies, nothing is restarted, and the open turn wedges the
+        role just as thoroughly.
+        """
+        from . import mailbox
+
+        if self.mind is None:
+            return
+        grace = self.cfg.scheduler.turn_wall_seconds + STALE_TURN_GRACE_SECONDS
+        try:
+            _, out = self.mind.writer.apply(
+                lambda m: mailbox.expire_stale_turns(m, self.mind,
+                                                     max_seconds=grace),
+                actor="supervisor", bump_version=False)
+        except Exception:  # noqa: BLE001
+            self.log.exception("stale turn sweep failed")
+            return
+        for entry in out.get("expired_turns") or []:
+            self.log.warning("expired stale turn %s; %d trigger(s) requeued",
+                             entry["turn_id"], len(entry["requeued"]))
 
     def stop(self) -> None:
         self._stop.set()
@@ -594,6 +655,10 @@ class Supervisor:
                 self._dispatch_neuocyte(work_class)
             self._reclaim_snapshots()
             self._homeostasis_tick()
+        # Outside the dispatch critical section on purpose: this takes the
+        # writer lock, and holding the scheduler lock across it would make
+        # every trigger enqueue wait behind a neuocyte spawn.
+        self._expire_stale_turns()
 
     def _homeostasis_tick(self) -> None:
         """Context pressure is checked on a slow cadence, not every second."""
@@ -605,6 +670,12 @@ class Supervisor:
             out = self.homeostasis.tick()
             if out and out.get("performed"):
                 self.log.warning("auto-rejuvenated %s: %s", out["role"], out["reason"])
+                # Rejuvenation replaces the inference session and closes the
+                # old one. Without telling the role, it keeps a dead handle
+                # and every subsequent turn fails against a session that is
+                # gone -- alive, heartbeating, and unable to think.
+                self.hand_over_session(out["role"], out.get("new_session_id"),
+                                       reason=out.get("reason", ""))
         except Exception:  # noqa: BLE001
             self.log.exception("homeostasis tick failed")
 
@@ -832,6 +903,15 @@ class Supervisor:
             self.mind.work.retire_agent(agent_id=name, reason=reason, crashed=True)
         except MindError:
             pass
+        if name in ("ego", "id"):
+            # Whatever turn it was in the middle of, it is not going to close
+            # it. One open turn per role is a database constraint, so leaving
+            # the row behind would block every future turn for this role: it
+            # would come back, heartbeat, report healthy, and never think
+            # again while its mailbox filled. Its unconsumed triggers go back
+            # on the queue for the incarnation that replaces it.
+            self._recover_role_turns(
+                name, reason=f"{name} was restarted mid-turn: {reason}"[:200])
         if name == "inference":
             # Every KV handle the old process hosted is gone. Snapshot rows
             # survive because they record exact tokens.

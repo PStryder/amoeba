@@ -44,7 +44,8 @@ import threading
 import time
 from typing import TYPE_CHECKING, Any, Sequence
 
-from .errors import InvalidInput, NotFound, ResourceExhausted
+from .errors import (DeadlineExceeded, InvalidInput, NotFound,
+                     ResourceExhausted)
 from .ids import new_id, sha256_hex
 from .store.events import EventKind
 from .store.writer import Mutation
@@ -235,16 +236,44 @@ def build(sup: "Supervisor") -> dict[str, Any]:  # noqa: C901
         """Cognition, on Amoeba's authority rather than the caller's."""
         _set_status(interaction_id, "running")
         try:
+            # `submit_wait_seconds` bounds how long a *synchronous caller*
+            # blocks. This is not one: the external surface is asynchronous by
+            # construction -- `io_submit` returns an id and the client polls.
+            # So it waits for the answer to actually exist, across however
+            # many continuation turns the thought needs, rather than giving up
+            # on the caller's behalf and reporting an empty result.
+            sched = sup.cfg.scheduler
+            patience = (sched.turn_wall_seconds
+                        * (max(1, sched.max_continuations) + 2))
             if kind == "investigate":
-                out = sup.methods()["ego_investigate"](question=text)
+                out = sup.methods()["ego_investigate"](
+                    question=text, wait_seconds=patience)
             else:
                 out = sup.methods()["ego_converse"](
-                    message=text, conversation_id=conversation_id)
+                    message=text, conversation_id=conversation_id,
+                    wait_seconds=patience)
             result = out.get("result") if isinstance(out, dict) else None
             answer = ""
             if isinstance(result, dict):
                 answer = (result.get("answer") or result.get("claim")
                           or result.get("plan") or "")
+            # "Complete" has to mean answered. Ego's input is queued and
+            # answered at a turn boundary, so a caller that waited longer than
+            # the turn took gets `queued` back with no answer -- and marking
+            # that complete would tell the client, permanently, that an empty
+            # response was the organism's reply. It stays in progress, and the
+            # trigger id is how the answer is collected later.
+            # "Complete" has to mean answered. Reporting an empty answer as a
+            # completed interaction tells the client, permanently, that
+            # nothing was the organism's reply.
+            settled = isinstance(result, dict) and result.get("status") == "completed"
+            if not settled:
+                raise DeadlineExceeded(
+                    "Ego did not answer within this interaction's patience; "
+                    "the input remains queued and will still be processed, "
+                    "but this interaction carries no answer",
+                    interaction_id=interaction_id,
+                    trigger_id=(result or {}).get("trigger_id"))
             payload = {"result": result, "operation_id": out.get("operation_id")
                        if isinstance(out, dict) else None}
             digest = mind.blobs.put_json(payload)

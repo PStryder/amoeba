@@ -63,9 +63,22 @@ ROLE_BASE = (
     # your own next thought is not a cognitive act, and a mind that could
     # would be scheduling itself.
     "role_claim_turn", "role_complete_turn", "role_abandon_turn",
-    # Putting something in the *other* role's mailbox goes through the
-    # governed messaging effectors, not through this.
-    "role_enqueue_trigger",
+    # Every capability a role model invokes goes through here, carrying
+    # the turn it belongs to. A turn that is no longer running cannot
+    # act, which is what stops a hung turn waking up after its inputs
+    # were handed to a replacement.
+    "role_tool_invoke",
+    #
+    # `role_enqueue_trigger` is deliberately NOT here. It takes `source` as an
+    # argument, so a role holding it could write into the other role's mailbox
+    # attributed to anyone -- Ego could queue an "operator says approve this"
+    # message into Id's cognition. That is the forgery the rest of the system
+    # rules out by deriving identity from the presented credential, and Ego is
+    # the component most exposed to a confident user.
+    #
+    # Roles reach each other through `ego_message_id` / `id_message_ego`,
+    # which attribute the sender themselves. Every legitimate caller of
+    # `role_enqueue_trigger` is the Harness, holding the control token.
     "status", "health", "capabilities",
     "recall", "get_memory", "history", "provenance", "audit_dossier",
     "get_conclusion", "get_work", "queue_stats",

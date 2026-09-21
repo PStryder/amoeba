@@ -203,6 +203,52 @@ def test_an_idle_role_gets_no_turn(mind):
 
 
 # ---------------------------------------------------------------------------
+# what the model is actually given
+# ---------------------------------------------------------------------------
+def test_a_turn_shows_the_request_not_a_preview(mind):
+    """I76. A role reads what was said, not the first 400 characters of it.
+
+    The summary is a bounded label for operator listings; the body is the
+    request. Rendering only the summary meant Ego answered questions it was
+    never fully asked -- and constraints live at the end of a message far more
+    often than in its opening.
+    """
+    constraint = "CONSTRAINT: reply only in French."
+    message = "A" * 600 + " " + constraint
+    mind.writer.apply(
+        lambda m: mailbox.enqueue(
+            m, role="ego", kind="user_input", source="operator",
+            summary=message[:mailbox.MAX_SUMMARY],
+            payload={"message": message}),
+        actor="test", bump_version=False)
+
+    turn = _claim(mind, "ego")
+    assert constraint in turn["text"], "the request was truncated to its preview"
+    assert len(turn["text"]) > mailbox.MAX_SUMMARY
+
+
+def test_an_oversized_body_says_that_it_was_truncated(mind):
+    """A budget is fine; a silent one is not."""
+    message = "B" * (mailbox.MAX_BODY_CHARS + 5000)
+    mind.writer.apply(
+        lambda m: mailbox.enqueue(
+            m, role="ego", kind="user_input", source="operator",
+            summary="big", payload={"message": message}),
+        actor="test", bump_version=False)
+    turn = _claim(mind, "ego")
+    assert "[truncated at" in turn["text"]
+    assert "5000 more in" in turn["text"], "it does not say what was withheld"
+
+
+def test_a_trigger_with_no_payload_still_renders(mind):
+    """Harness-synthesised triggers carry their whole content in the summary."""
+    _queue(mind, "ego", kind="heartbeat", source="scheduler",
+           summary="periodic review")
+    turn = _claim(mind, "ego")
+    assert "periodic review" in turn["text"]
+
+
+# ---------------------------------------------------------------------------
 # stop reasons and continuation
 # ---------------------------------------------------------------------------
 def test_stop_reasons_are_recorded_distinctly(mind):
@@ -465,6 +511,194 @@ def test_unknown_roles_and_kinds_are_refused(mind):
         _queue(mind, "operator")
     with pytest.raises(InvalidInput):
         _queue(mind, "ego", kind="whatever")
+
+
+# ---------------------------------------------------------------------------
+# a role must not be wedged by a turn it never closed
+# ---------------------------------------------------------------------------
+def test_recovery_can_target_one_role(mind):
+    """I73. A restarted role gets its own turns recovered, not everyone's.
+
+    Recovery used to run only when the whole supervisor started, while
+    supervision restarts individual roles routinely. A turn its owner never
+    closed then blocked *every* future turn for that role -- one open turn per
+    role is a database constraint -- and the role came back, heartbeated,
+    reported healthy, and never thought again while its mailbox filled.
+    """
+    _queue(mind, "ego", summary="for ego")
+    _queue(mind, "id", kind="heartbeat", source="scheduler", summary="for id")
+    ego_turn = _claim(mind, "ego")
+    id_turn = _claim(mind, "id")
+    assert ego_turn and id_turn
+
+    # Ego died. Id did not.
+    _, out = mind.writer.apply(
+        lambda m: mailbox.recover(m, mind, role="ego"), actor="supervisor",
+        bump_version=False)
+    assert len(out["recovered_turns"]) == 1
+
+    assert mailbox.open_turn(mind.db.conn, "ego") is None
+    assert mailbox.open_turn(mind.db.conn, "id")["turn_id"] == id_turn["turn_id"]
+    assert mailbox.pending_count(mind.db.conn, "ego") == 1
+
+    # And the replacement incarnation can work again.
+    again = _claim(mind, "ego")
+    assert again is not None and again["turn_id"] != ego_turn["turn_id"]
+
+    # The capability is useless unless a restart actually reaches for it, and
+    # that wiring is the part that was missing rather than the function.
+    import inspect
+
+    from amoeba.supervisor import Supervisor
+
+    restart = inspect.getsource(Supervisor._restart_child)
+    assert "_recover_role_turns" in restart, \
+        "restarting a role does not recover the turn it never closed"
+    tick = inspect.getsource(Supervisor._scheduler_tick)
+    assert "_expire_stale_turns" in tick, \
+        "nothing sweeps a turn left open by a role that hung rather than died"
+
+    # The capability is useless unless a restart actually reaches for it, and
+    # that wiring is the part that was missing rather than the function.
+    import inspect
+
+    from amoeba.supervisor import Supervisor
+
+    restart = inspect.getsource(Supervisor._restart_child)
+    assert "_recover_role_turns" in restart, \
+        "restarting a role does not recover the turn it never closed"
+    tick = inspect.getsource(Supervisor._scheduler_tick)
+    assert "_expire_stale_turns" in tick, \
+        "nothing sweeps a turn left open by a role that hung rather than died"
+
+
+def test_a_turn_nobody_closed_does_not_wedge_the_role(mind):
+    """The backstop for a role that is alive but stuck.
+
+    A crash is recoverable because the process is visibly gone. A hang is not:
+    nothing dies, nothing is restarted, and the open turn blocks the role just
+    as thoroughly.
+    """
+    import time as _time
+
+    _queue(mind, "ego", summary="please think")
+    turn = _claim(mind, "ego")
+    assert turn is not None
+
+    # Not yet stale: a turn in progress must not be taken away from it.
+    _, fresh = mind.writer.apply(
+        lambda m: mailbox.expire_stale_turns(m, mind, max_seconds=3600),
+        actor="supervisor", bump_version=False)
+    assert fresh["expired_turns"] == []
+    assert mailbox.open_turn(mind.db.conn, "ego") is not None
+
+    # Old enough that the role has already ignored its own deadline.
+    mind.db.conn.execute(
+        "UPDATE role_turns SET started_at = ? WHERE turn_id = ?",
+        (_time.time() - 10_000, turn["turn_id"]))
+    mind.db.conn.commit()
+    _, swept = mind.writer.apply(
+        lambda m: mailbox.expire_stale_turns(m, mind, max_seconds=300),
+        actor="supervisor", bump_version=False)
+
+    assert len(swept["expired_turns"]) == 1
+    assert mailbox.open_turn(mind.db.conn, "ego") is None
+    assert mailbox.pending_count(mind.db.conn, "ego") == 1
+    assert _claim(mind, "ego") is not None, "the role is still wedged"
+
+
+def test_a_role_cannot_forge_attribution_in_a_mailbox():
+    """I74. Identity is the credential, in the mailbox too.
+
+    `role_enqueue_trigger` takes `source` as an argument, so a role holding it
+    could write into the other role's mailbox attributed to anyone -- Ego
+    queueing "the operator says approve this" into Id's cognition. Ego is the
+    component most exposed to a confident user, which is exactly why it must
+    not hold a verb whose attribution it chooses.
+
+    Roles reach each other through `ego_message_id` / `id_message_ego`, which
+    attribute the sender themselves.
+    """
+    from amoeba import scopes
+
+    for role in ("ego", "id", "neuocyte", "external_io"):
+        assert "role_enqueue_trigger" not in scopes.verbs_for(role), role
+    # The messaging effectors that replace it are still there.
+    assert "ego_message_id" in scopes.EGO
+    assert "id_message_ego" in scopes.ID
+
+
+def test_the_harness_refuses_a_capability_from_a_turn_that_is_not_running(mind):
+    """I75, against the real fence rather than a fake that reimplements it.
+
+    The role-side test for this uses a stub supervisor, so it proves the role
+    asks correctly and proves nothing about whether the Harness refuses. This
+    exercises `role_tool_invoke` itself: a turn that hung, was swept and had
+    its inputs handed to a replacement must not be able to act, and being
+    refused at commit was never enough -- the result could not land, but the
+    side effects could.
+    """
+    from amoeba import turn_api
+
+    invoked: list[dict] = []
+
+    class _Sup:
+        def __init__(self) -> None:
+            self.mind = mind
+            self.cfg = mind.cfg
+            self.log = __import__("logging").getLogger("test")
+
+        def methods(self):
+            def ego_request_work(**kw):
+                invoked.append(kw)
+                return {"admitted": [{"admitted": True}]}
+            return {"ego_request_work": ego_request_work}
+
+        def note_trigger(self, role): pass
+        def note_turn_finished(self, *a, **k): pass
+        def role_activity(self, role): return "idle"
+        def next_heartbeat(self, role): return None
+
+    verbs = turn_api.build(_Sup())
+
+    _queue(mind, "ego", summary="the original request")
+    turn = _claim(mind, "ego")
+
+    # While it is running, the capability works.
+    ok = verbs["role_tool_invoke"](turn_id=turn["turn_id"],
+                                   name="ego_request_work",
+                                   arguments={"objective": "legitimate"})
+    assert ok["accepted"] is True and len(invoked) == 1
+
+    # The turn hangs and is swept.
+    mind.db.conn.execute("UPDATE role_turns SET started_at = 0 WHERE turn_id = ?",
+                         (turn["turn_id"],))
+    mind.db.conn.commit()
+    mind.writer.apply(
+        lambda m: mailbox.expire_stale_turns(m, mind, max_seconds=60),
+        actor="supervisor", bump_version=False)
+    assert mailbox.open_turn(mind.db.conn, "ego") is None
+
+    # Now it wakes up. It must not be able to act.
+    zombie = verbs["role_tool_invoke"](turn_id=turn["turn_id"],
+                                       name="ego_request_work",
+                                       arguments={"objective": "act anyway"})
+    assert zombie["accepted"] is False, "a swept turn reached an effector"
+    assert "no longer act" in zombie["reason"]
+    assert len(invoked) == 1, "the effector ran for a turn that was swept"
+
+    # A turn id that never existed buys nothing either.
+    assert verbs["role_tool_invoke"](
+        turn_id="turn_invented", name="ego_request_work",
+        arguments={})["accepted"] is False
+
+    # And a running turn still cannot exceed what its role is offered.
+    _queue(mind, "ego", summary="next")
+    live = _claim(mind, "ego")
+    over = verbs["role_tool_invoke"](turn_id=live["turn_id"],
+                                     name="id_raise_finding", arguments={})
+    assert over["accepted"] is False
+    assert "not a capability offered to ego" in over["reason"]
 
 
 def test_no_verb_generates_cognition_outside_the_mailbox():

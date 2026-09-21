@@ -91,6 +91,14 @@ The kind survives into what the model reads. A mind should know *why* it woke:
 "a work item you asked for failed" is a different thought from "someone sent
 you a message", and flattening both into anonymous prose loses that.
 
+**Summary is not body.** `summary` is a bounded label for operator listings;
+the **body** is what was actually said, stored in full and rendered into the
+turn up to `MAX_BODY_CHARS`. Rendering only the summary meant Ego answered
+questions it had only seen the first 400 characters of — and a request's
+constraints sit at its end far more often than in its opening. When the budget
+does truncate, the rendering says so and names the digest holding the rest
+(I76).
+
 ## 5. Bundling
 
 Multiple things accumulate while a role is busy. At the next boundary they
@@ -180,6 +188,14 @@ the trigger is durable and ordered the moment it is queued, and whether anyone
 is blocked on it changes nothing about when Ego sees it.
 
 A caller that gives up gets `queued` back and the cognition happens anyway.
+
+**An interaction is complete only when it is answered.** The external worker
+is asynchronous by construction — `io_submit` returns an id and the client
+polls — so it waits for the answer across however many continuation turns the
+thought needs, rather than giving up on the caller's behalf. If the answer
+never arrives it **fails**, saying so and noting that the input is still
+queued. Reporting an empty answer as a completed interaction would tell the
+client, permanently, that nothing was the organism's reply (I79).
 There is deliberately **no** path where an idle Ego is called directly while a
 busy one goes through the mailbox — that would make conversational ordering a
 race between whoever called while Ego happened to be free.
@@ -257,6 +273,18 @@ increments, so a replay is *visible* rather than looking like a new event.
 Without this a crash would also wedge the role permanently, since one open
 turn per role is a database constraint.
 
+**Recovery runs whenever a role is restarted, not only at supervisor start.**
+This matters more than it sounds: one open turn per role is a database
+constraint, so a turn its owner never closed blocks *every* future turn for
+that role. The role comes back, heartbeats, reports healthy, and never thinks
+again while its mailbox fills. Recovery used to run only in
+`Supervisor.start()`, while supervision restarts individual roles routinely.
+
+**A hung role is swept, too.** A crash is recoverable because the process is
+visibly gone; a hang is not, and it wedges the role identically. Any turn still
+open `turn_wall_seconds + STALE_TURN_GRACE_SECONDS` after it began has already
+ignored the deadline the role enforces on itself, and is abandoned.
+
 A trigger that has been delivered `MAX_DELIVERIES` (3) times without a turn
 surviving is `expired`. An undying poison message would be worse than a lost
 one, and the expiry is recorded.
@@ -308,6 +336,59 @@ The Operator can put a message in a role's mailbox. That is **input, not
 authority**: it wakes the role and is attributable, and the role acts only
 through its own effectors.
 
+## 16a. An expired turn cannot act
+
+Abandoning a turn releases its inputs to a replacement. That would be
+dangerous on its own: the original turn may still be alive and about to wake
+up, and two live turns from one lineage could both act.
+
+`mailbox.complete` already refused a turn that is not `running`, so a late
+turn could never commit its *result*. Its **side effects** were a different
+matter — a role's effector call carried no turn identity whatsoever, so a
+swept turn could still request work and record conclusions.
+
+Every capability a role invokes now goes through `role_tool_invoke`, carrying
+the turn it belongs to. The turn id is the fencing capability, exactly as a
+neuocyte's fencing token is:
+
+* it is minted by the Harness and handed only to the role that claimed it;
+* it is readable nowhere a role can reach — the mailbox and turn views are
+  operator-only — so there is no `role` argument to forge, and which role is
+  asking is derived from the turn;
+* a turn that is not `running` buys nothing;
+* the verb must still be one that role is offered, so the capability boundary
+  is unchanged.
+
+## 16b. A role cannot forge attribution
+
+`role_enqueue_trigger` takes `source` as an argument, so any holder can write
+into a mailbox attributed to anyone. It is therefore **absent from every role
+scope** — Ego holding it could queue "the operator says approve this" into Id's
+cognition, and Ego is the component most exposed to a confident user.
+
+Every legitimate caller is the Harness, holding the control token. Roles reach
+each other through `ego_message_id` / `id_message_ego`, which attribute the
+sender themselves.
+
+## 16c. What lineage is, and is not
+
+Lineage scopes what enters a **turn**. A continuation reads its own delegated
+work, its own artifacts and messages about its own thought; another
+interaction's evidence waits for a turn of its own, unless it is explicitly
+ambient.
+
+It is **not** a confidentiality boundary, and nothing here should be read as
+one. Ego holds a persistent context and maintained state across interactions,
+so information that entered its context in an earlier turn is still there in a
+later one whoever asked. Lineage removes the sharp edge — one client's
+evidence sitting in the same prompt as another client's question — and does
+not, and cannot, make one persistent mind into several.
+
+> One Amoeba is one cognitive trust domain. Two workloads that need real
+> isolation get two Amoebas.
+
+See `ARCHITECTURE.md`, "One Amoeba is one cognitive trust domain".
+
 ## 17. The substrate is not a cognitive component
 
 Supervisor, scheduler, Arbiter, mailbox, bundling, wake policy and turn
@@ -346,6 +427,13 @@ submit_wait_seconds = 120.0     # how long a caller blocks, not how long work ta
   push would need a second channel into the role process; the poll is one
   cheap query and was not worth the complexity yet.
 * **At-least-once, not exactly-once.** Stated in §13 rather than claimed away.
+* **One answer per turn, not per request.** `_await_turn` returns the *turn's*
+  result to every waiter whose trigger that turn consumed, so two requests
+  bundled into one turn receive the same answer, and a thought continued
+  across turns returns only the first turn's text. Answers are a property of
+  turns here and ought to be a property of requests; fixing it properly means
+  Ego recording which trigger each answer addresses, which is a design change
+  rather than a patch.
 * **Resource pressure does not yet gate heartbeat cognition.** The Arbiter
   knows about pressure and the heartbeat does not consult it. An event-driven
   Id turn must never be prevented indefinitely, and today nothing prevents

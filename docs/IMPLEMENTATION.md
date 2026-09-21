@@ -71,6 +71,14 @@ Read this before trusting anything below it.
 | Stop reasons and bounded deterministic continuation | **Implemented, tested** | ten distinct reasons; non-terminal stops earn a continuation with `parent_turn` recorded, bounded at `max_continuations` |
 | Turn provenance: profile + environment + trigger bundle | **Implemented, tested** | bundle and environment content-addressed before the turn runs and read back rather than recomputed |
 | Artifact and blackboard wake triggers | **Not implemented** | the trigger kinds exist and nothing emits them; a relevance rule that avoided waking Ego on unrelated board traffic was not worth inventing as a heuristic — see [TURNS §7](TURNS.md#7-ego-event-driven-never-autonomous) |
+| Role turns render the full request, not a preview | **Implemented, tested** | the body is read from the content store with a stated budget; truncation names the digest holding the rest |
+| Audit verdicts parsed as whole words | **Implemented, tested** | `unsupported` was read as `supported`, inverting an adverse audit and suppressing the disagreement it should have opened |
+| Role-targeting effectors callable through the tool loop | **Implemented, tested** | `role` names the asker, so a target parameter is `target_role` |
+| An interaction is complete only when answered | **Implemented, tested** | the async worker waits across continuation turns and fails truthfully rather than reporting an empty answer |
+| One answer per *request* rather than per turn | **Not implemented** | bundled requests share a turn's answer, and a continued thought returns only its first turn — see [TURNS §19](TURNS.md#19-residual-limits) |
+| Specialist neuocyte profiles dispatched | **Not implemented** | `ego.neuocyte.research` can be authored, approved, selected and advertised; worker birth still binds the two base namespaces |
+| Batched inference on the live path | **Not implemented** | `generate_batched` exists and is benchmarked; roles and neuocytes call the serialized `generate` |
+| External attachments and surfaced results wired end to end | **Not implemented** | attachments never reach a turn bundle and `surface_result` has no production caller |
 | Cognitive blackboard: posts, threads, relations, receipts | **Implemented, tested** | `tests/test_blackboard.py` |
 | Independent replication vs socially propagated agreement | **Implemented, tested** | every read recorded; `board_corroboration` splits the two |
 | Board-naive neuocytes (`board_access="none"`) | **Implemented, tested** | `test_a_naive_worker_posts_without_having_read_the_board` |

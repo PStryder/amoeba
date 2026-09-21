@@ -158,6 +158,20 @@ Changing how the organism thinks from a dashboard click, with no moment at
 which anyone chose to, is precisely the failure that separation exists to
 prevent.
 
+## Many clients, one mind
+
+Every authenticated client gets its own identity, its own interactions, and a
+stream scoped to them. None of that makes them separate minds.
+
+Ego and Id are persistent identities with a context that spans turns and
+maintained state that spans interactions. Two clients sharing one Amoeba share
+that. Their requests are routed separately and answered separately, and an
+answer is never handed to the wrong caller — but the organism that answers
+them both remembers them both.
+
+> One Amoeba is one cognitive trust domain. Run separate instances for
+> workloads that must not share a mind.
+
 ## Residual limits
 
 The credentials are files in the state directory, readable by the Amoeba

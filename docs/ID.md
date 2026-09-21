@@ -170,3 +170,19 @@ Id executes them through the same bounded Harness-mediated tool loop Ego uses
 
 Id may propose a new version of the `id` or `ego` root through the Prompt
 Library and cannot approve one (I49b).
+
+## Naming a target role
+
+`role` means *who is asking* everywhere in this system, and the role tool loop
+strips it from model-supplied arguments for exactly that reason. Two Id
+effectors used `role` for the opposite purpose — the role being *acted on* —
+which made them permanently uncallable through the loop.
+
+They now take `target_role`:
+
+```
+id_propose_prompt(target_role="ego", prompt=..., rationale=...)
+id_request_rejuvenation(target_role="ego", reason=...)
+```
+
+The authority strip is unchanged. The collision was the defect (I78).

@@ -59,7 +59,7 @@ CONTROL_ATTEMPTS = [
     ("system_pulse", {}),
     ("id_health", {}),
     ("id_raise_finding", {"claim": "x"}),
-    ("id_propose_prompt", {"role": "ego", "prompt": "x", "rationale": "x"}),
+    ("id_propose_prompt", {"target_role": "ego", "prompt": "x", "rationale": "x"}),
     ("id_request_investigation", {"objective": "x"}),
     # maintained state
     ("remember", {"kind": "belief", "claim": "x", "confidence": 1.0,
@@ -382,7 +382,7 @@ def test_operator_governance_actions_are_receipted(net):
     idc = RpcClient(net.cfg.supervisor_host, net.cfg.supervisor_port, token,
                     timeout=60)
     idc.connect(retries=10, delay=0.3)
-    proposal = idc.call("id_propose_prompt", role="ego",
+    proposal = idc.call("id_propose_prompt", target_role="ego",
                         prompt="Be concise.", rationale="verbosity")
 
     _s, decided = call(net.base, "operator_prompt_decide",
@@ -404,7 +404,7 @@ def test_accepting_a_prompt_does_not_silently_change_cognition(net):
                     timeout=60)
     idc.connect(retries=10, delay=0.3)
     before = idc.call("system_pulse", max_age_seconds=0)["resources"]
-    proposal = idc.call("id_propose_prompt", role="ego", prompt="Totally new.",
+    proposal = idc.call("id_propose_prompt", target_role="ego", prompt="Totally new.",
                         rationale="test")
     call(net.base, "operator_prompt_decide",
          {"proposal_id": proposal["proposal_id"], "decision": "accept"},

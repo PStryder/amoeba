@@ -538,6 +538,43 @@ identity-shaped arguments, or by re-presenting a different token mid-connection.
 `test_id_cannot_invoke_an_ego_only_verb`,
 `test_the_three_scopes_are_disjoint_where_it_matters`
 
+### One Amoeba is one cognitive trust domain
+
+> **Interaction lineage provides routing, provenance, and reduction of
+> accidental cross-talk. It is not a confidentiality boundary.**
+>
+> **If two workloads require true zero-trust cognitive isolation, run them in
+> separate Amoeba instances.**
+
+Ego and Id are *persistent identities*. They hold a context across turns and
+maintained state across interactions — that is the whole point of them, and it
+is what makes the organism able to notice a contradiction between something it
+was told on Tuesday and something it concluded on Friday.
+
+That same persistence is why lineage cannot be a security boundary. Lineage
+decides what enters a **turn**: a continuation reads its own delegated work
+rather than a stranger's, and one interaction's evidence does not arrive in
+the same bundle as another's question. It does nothing about what Ego already
+saw three turns ago, because a persistent mind does not forget between
+requests.
+
+So lineage buys three real things, and one it does not:
+
+| | |
+|---|---|
+| routing | an answer reaches the request that asked for it |
+| provenance | what a turn was given is recorded and reconstructable |
+| reduced cross-talk | unrelated evidence does not pollute an unrelated answer |
+| **confidentiality** | **no** |
+
+The alternative — per-client amnesia compartments inside one Ego — would mean
+a persistent identity that is required to forget selectively, which is both
+far harder to get right and a worse thing to depend on. A boundary you can
+point at is worth more than a maze you have to trust.
+
+Multiple API and MCP clients sharing one Amoeba share a mind. That is a
+deployment decision, and the honest way to make it is knowingly.
+
 ### External interfaces
 
 Full reference: `INTERFACES.md` (authority classes, the JSON-RPC protocol and endpoints, the MCP adapter, the operator console, and why an I/O client has no route to protected state).
@@ -774,6 +811,107 @@ poison message.
 `test_a_trigger_that_keeps_killing_the_role_expires`,
 `test_a_completed_turn_does_not_reconsume_its_triggers`
 
+**I76. A role reads the request, not a preview of it.** The trigger summary
+is a bounded label for operator listings; the body is what was actually said.
+Rendering only the summary meant Ego answered questions it was never fully
+asked — and a request's constraints sit at its end far more often than in its
+first 400 characters. The body is rendered from the content store with a
+stated budget, and when that budget truncates, the rendering says so and names
+the digest holding the rest.
+→ `test_a_turn_shows_the_request_not_a_preview`,
+`test_an_oversized_body_says_that_it_was_truncated`,
+`test_a_trigger_with_no_payload_still_renders`
+
+**I77. An adverse audit is never recorded as a favourable one.** Verdicts are
+matched as whole words. Substring matching read `unsupported` as `supported` —
+the word contains it — so an adverse audit became a favourable durable verdict
+*and* suppressed the disagreement it should have opened, because that branch
+tests for `unsupported`. An answer naming more than one verdict is treated as
+unstated rather than resolved by ordering: a model echoing the menu back has
+not reached a judgement.
+→ `test_an_adverse_audit_is_not_recorded_as_a_favourable_one`
+
+**I78. An effector whose target is a role stays callable.** `role` means "who
+is asking" everywhere here, so the tool loop strips it — which made two Id
+effectors permanently uncallable, because for them `role` named the *target*.
+The collision was the defect; the parameter is `target_role`, and the
+authority strip is unchanged.
+→ `test_id_can_actually_call_the_effectors_that_name_a_target`
+
+**I79. "Complete" means answered.** External input is queued and answered at a
+turn boundary. An interaction whose wait elapsed used to be marked complete
+with an empty answer — telling the client, permanently, that nothing was the
+organism's reply. The worker is asynchronous by construction, so it waits for
+the answer across however many continuation turns the thought needs, and fails
+truthfully if it never arrives rather than reporting silence as a result.
+→ `test_an_unanswered_interaction_is_not_reported_complete`
+
+**I76. A role reads the request, not a preview of it.** The trigger summary
+is a bounded label for operator listings; the body is what was actually said.
+Rendering only the summary meant Ego answered questions it was never fully
+asked — and a request's constraints sit at its end far more often than in its
+first 400 characters. The body is rendered from the content store with a
+stated budget, and when that budget truncates, the rendering says so and names
+the digest holding the rest.
+→ `test_a_turn_shows_the_request_not_a_preview`,
+`test_an_oversized_body_says_that_it_was_truncated`,
+`test_a_trigger_with_no_payload_still_renders`
+
+**I77. An adverse audit is never recorded as a favourable one.** Verdicts are
+matched as whole words. Substring matching read `unsupported` as `supported` —
+the word contains it — so an adverse audit became a favourable durable verdict
+*and* suppressed the disagreement it should have opened, because that branch
+tests for `unsupported`. An answer naming more than one verdict is treated as
+unstated rather than resolved by ordering: a model echoing the menu back has
+not reached a judgement.
+→ `test_an_adverse_audit_is_not_recorded_as_a_favourable_one`
+
+**I78. An effector whose target is a role stays callable.** `role` means "who
+is asking" everywhere here, so the tool loop strips it — which made two Id
+effectors permanently uncallable, because for them `role` named the *target*.
+The collision was the defect; the parameter is `target_role`, and the
+authority strip is unchanged.
+→ `test_id_can_actually_call_the_effectors_that_name_a_target`
+
+**I79. "Complete" means answered.** External input is queued and answered at a
+turn boundary. An interaction whose wait elapsed used to be marked complete
+with an empty answer — telling the client, permanently, that nothing was the
+organism's reply. The worker is asynchronous by construction, so it waits for
+the answer across however many continuation turns the thought needs, and fails
+truthfully if it never arrives rather than reporting silence as a result.
+→ `test_an_unanswered_interaction_is_not_reported_complete`
+
+**I73. A role is never wedged by a turn it did not close.** One open turn per
+role is a database constraint, so a turn left running blocks every future turn
+for that role — the role heartbeats, reports healthy, and never thinks again
+while its mailbox fills. Recovery therefore runs whenever supervision restarts
+a role, not only at supervisor start, and a turn still open long past the
+role's own deadline is swept as abandoned.
+→ `test_recovery_can_target_one_role`,
+`test_a_turn_nobody_closed_does_not_wedge_the_role`
+
+**I75. A turn that is no longer running cannot act.** Being refused at
+commit is not enough. A turn that hung, was swept as stale and had its inputs
+handed to a replacement could still *act* — requesting work, posting findings,
+recording conclusions into an organism that had moved on — because a role's
+effector call carried no turn identity at all. Every capability now goes
+through `role_tool_invoke` carrying the turn it belongs to, exactly as a
+neuocyte carries its fencing token. The turn id is the capability: minted by
+the Harness, given only to the role that claimed that turn, and readable
+nowhere a role can reach, so there is no `role` argument to forge. A turn that
+is not `running` buys nothing, and the verb must still be one that role is
+offered — this narrows what a role may do and widens nothing.
+→ `test_a_turn_that_is_no_longer_running_cannot_act`,
+`test_a_role_holding_no_turn_cannot_act`,
+`test_capabilities_reach_the_harness_through_the_fence`
+
+**I74. A role cannot forge attribution in a mailbox.** `role_enqueue_trigger`
+takes `source` as an argument, so it is absent from every role scope: Ego
+holding it could queue an operator-attributed instruction into Id's cognition.
+Identity is the credential here as everywhere else, and roles message each
+other through effectors that attribute the sender themselves.
+→ `test_a_role_cannot_forge_attribution_in_a_mailbox`
+
 **I70. A turn records exactly what caused it.** Role, incarnation, profile
 reference and digest, environment digest and blob, the bundle digest and blob,
 trigger kinds, stop reason, model generation and `parent_turn`. The bundle and
@@ -804,20 +942,20 @@ deliberately no fast lane for an idle role: that would make conversational
 ordering a race between whoever called while the role happened to be free.
 Status, health and snapshot calls into a role are allowed, because they read
 rather than generate.
-&rarr; `test_no_verb_generates_cognition_outside_the_mailbox`
+→ `test_no_verb_generates_cognition_outside_the_mailbox`
 
 **Cognitive results never lose their labelling.** A simulated backend is
 declared as a limitation on every cognitive verb, and `is_simulated` is carried
 out through the turn result. This was briefly lost when conversation moved onto
 the turn model, which is why it is asserted rather than assumed.
-&rarr; `test_simulated_backend_is_labelled_on_every_cognitive_result`,
+→ `test_simulated_backend_is_labelled_on_every_cognitive_result`,
 `test_a_simulated_answer_is_always_labelled`
 
 **Rejuvenation stays Harness-initiated.** `context_rejuvenate` is in no role
 scope. A role reports `context_pressure` and the Harness reclaims context
 between turns, then hands over the replacement session; identity, incarnation,
 profile binding and mailbox all survive.
-&rarr; `test_ego_cannot_reach_a_prohibited_power`
+→ `test_ego_cannot_reach_a_prohibited_power`
 
 **Ego wakes because something relevant happened.** Never because its process
 exists. Relevance comes from a recorded relationship — `origin_actor` on the

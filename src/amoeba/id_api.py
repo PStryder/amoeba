@@ -238,7 +238,7 @@ def build(sup: "Supervisor") -> dict[str, Any]:  # noqa: C901
     # ==================================================================
     # Homeostasis
     # ==================================================================
-    def id_request_rejuvenation(*, role: str, reason: str, mode: str = "trim",
+    def id_request_rejuvenation(*, target_role: str, reason: str, mode: str = "trim",
                                 pulse_id: str | None = None,
                                 operation_id: str | None = None) -> dict[str, Any]:
         """Request that a role's context be rejuvenated.
@@ -247,18 +247,18 @@ def build(sup: "Supervisor") -> dict[str, Any]:  # noqa: C901
         decides whether to act, applies its own rate limits, and performs the
         operation. A refusal is recorded as readily as an action.
         """
-        if role not in ("ego", "id"):
-            raise InvalidInput("rejuvenation targets ego or id", role=role)
-        prov = _provenance(pulse_id, f"rejuvenate {role}: {reason[:60]}")
+        if target_role not in ("ego", "id"):
+            raise InvalidInput("rejuvenation targets ego or id", target_role=target_role)
+        prov = _provenance(pulse_id, f"rejuvenate {target_role}: {reason[:60]}")
         out = sup.methods()["request_rejuvenation"](
-            role=role, reason=_text(reason, "reason", limit=1000),
+            role=target_role, reason=_text(reason, "reason", limit=1000),
             requested_by="id", mode=mode, operation_id=operation_id)
         return {**out, "provenance": prov}
 
     # ==================================================================
     # Proposing a change to cognition itself
     # ==================================================================
-    def id_propose_prompt(*, role: str, prompt: str, rationale: str,
+    def id_propose_prompt(*, target_role: str, prompt: str, rationale: str,
                           model_vars: dict[str, Any] | None = None,
                           evidence: Sequence[dict[str, Any]] = (),
                           pulse_id: str | None = None,
@@ -279,22 +279,22 @@ def build(sup: "Supervisor") -> dict[str, Any]:  # noqa: C901
         one and reaches any namespace, roots included. Both go through the same
         store, so there is one creation path, not two governance schemes.
         """
-        if role not in ("ego", "id"):
-            raise InvalidInput("prompt proposals target ego or id", role=role)
+        if target_role not in ("ego", "id"):
+            raise InvalidInput("prompt proposals target ego or id", target_role=target_role)
         text = _text(prompt, "prompt", limit=20000)
         proposal_id = new_id("ppr")
-        prov = _provenance(pulse_id, f"prompt proposal for {role}")
+        prov = _provenance(pulse_id, f"prompt proposal for {target_role}")
         from .promptlib.store import PromptStore
         from .resources import prompt_version
 
         store = PromptStore(mind)
-        current = prompt_version(role, sup.cfg, mind)
+        current = prompt_version(target_role, sup.cfg, mind)
 
         def body(m: Mutation) -> dict[str, Any]:
             # A root replaces rather than composes: it has no parent whose
             # text it could extend.
             created = store.create_runtime_version(
-                m, namespace=role, prompt_mode="replace", prompt_text=text,
+                m, namespace=target_role, prompt_mode="replace", prompt_text=text,
                 model_vars=model_vars or {}, origin="id", created_by="id",
                 rationale=_text(rationale, "rationale", limit=4000),
                 state="candidate")
@@ -302,8 +302,8 @@ def build(sup: "Supervisor") -> dict[str, Any]:  # noqa: C901
             # console reads it and because a proposal is a distinct act from
             # the version write that carried it.
             m.emit(EventKind.PROMPT_PROPOSED, {
-                "proposal_id": proposal_id, "role": role,
-                "namespace": role, "version_id": created["version_id"],
+                "proposal_id": proposal_id, "role": target_role,
+                "namespace": target_role, "version_id": created["version_id"],
                 "local_version": created["local_version"],
                 "candidate_sha256": created["local_sha256"],
                 "current_sha256": current.sha256,
@@ -317,10 +317,10 @@ def build(sup: "Supervisor") -> dict[str, Any]:  # noqa: C901
 
         receipt, created = mind.writer.apply(body, actor="id",
                                              operation_id=operation_id)
-        return {"proposal_id": proposal_id, "role": role,
-                "namespace": role, "version_id": created["version_id"],
+        return {"proposal_id": proposal_id, "role": target_role,
+                "namespace": target_role, "version_id": created["version_id"],
                 "local_version": created["local_version"],
-                "profile_ref": str(store.ref_for(role, created["local_version"])),
+                "profile_ref": str(store.ref_for(target_role, created["local_version"])),
                 "candidate_sha256": created["local_sha256"],
                 "current_sha256": current.sha256,
                 "receipt_id": receipt.receipt_id, "provenance": prov,
