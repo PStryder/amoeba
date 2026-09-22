@@ -266,8 +266,23 @@ class RpcClient:
                 self.connect(retries=3)
             self._next_id += 1
             req_id = self._next_id
-            self._write({"id": req_id, "method": method, "params": params})
-            resp = self._read()
+            try:
+                self._write({"id": req_id, "method": method, "params": params})
+                resp = self._read()
+            except BaseException:
+                # A call that fails mid-flight -- a timeout, above all -- leaves
+                # its reply on the way. Reusing the connection let the *next*
+                # call read that reply as its own: a probe of a wedged child
+                # came back "reachable" off a stale answer, and health lied.
+                # The connection is unusable, so it is dropped.
+                self.close()
+                raise
+            if resp.get("id") not in (None, req_id):
+                # The reply to some other request. Believing it is the whole
+                # failure; refusing it, and the connection, is the fix.
+                self.close()
+                raise RpcError("reply belongs to a different request",
+                               expected=req_id, got=resp.get("id"))
             if not resp.get("ok"):
                 err = resp.get("error") or {}
                 raise RpcError(err.get("message", "rpc failed"),

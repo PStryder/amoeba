@@ -1595,6 +1595,33 @@ turn records which it received.
 `test_a_new_session_or_a_changed_declaration_gets_the_whole_thing`,
 `test_a_second_turn_does_not_pay_for_the_declaration_again`
 
+**I119. A role's arguments are checked before the verb sees them.** Live, Ego
+passed `evidence` to `record_conclusion` as a string, and the Harness replied
+`AttributeError: 'str' object has no attribute 'get'` -- an internal failure,
+told to the model as the reason, and harmless only because the crash came
+before anything was written. Arguments are now held to the verb's own
+annotations, the same ones its declaration renders kinds from, and a mismatch
+is refused in words ("argument 'evidence' must be a list of objects, got a
+string") with the verb never called. What the Harness binds itself
+(`operation_id`, `turn_id`) is not checked, and an annotation the checker
+cannot read is let through: refusing a correct call because the checker was
+unsure would be worse than the crash it prevents, so every argument of every
+role-facing verb is shown to accept a plainly correct value.
+→ `test_the_live_mistakes_are_refused_in_words`,
+`test_a_wrong_type_is_refused_before_the_verb_runs`,
+`test_no_correct_call_on_the_role_surface_is_refused`,
+`test_an_annotation_the_checker_cannot_read_is_let_through`
+
+**I120. A call that fails leaves nothing behind for the next one.** An
+`RpcClient` kept its connection after a call failed mid-flight. A timed-out
+call's reply still arrives, and the next call on that connection read it as
+its own -- so a probe of a wedged child could come back "reachable" off a
+stale answer, and health lied. A call that fails while writing or reading
+now drops its connection, and a reply whose id is not the request's is
+refused and drops it too.
+→ `test_a_late_reply_is_never_read_as_the_next_calls`,
+`test_a_reply_to_another_request_is_refused`
+
 **I73. A role is never wedged by a turn it did not close.** One open turn per
 role is a database constraint, so a turn left running blocks every future turn
 for that role — the role heartbeats, reports healthy, and never thinks again

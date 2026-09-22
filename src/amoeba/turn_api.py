@@ -27,6 +27,7 @@ import json
 import time
 from typing import TYPE_CHECKING, Any
 
+from .argcheck import argument_problem
 from . import mailbox
 from .errors import InvalidInput, NotFound
 from .scopes import model_facing_verbs
@@ -280,6 +281,15 @@ def build(sup: "Supervisor") -> dict[str, Any]:  # noqa: C901
         # stripped before this.
         if "turn_id" in accepts:
             args["turn_id"] = turn_id
+        # Held to the same annotations the declaration renders, before the
+        # verb sees anything. A model's wrong type used to arrive at internal
+        # code and come back as a Python exception.
+        problem = argument_problem(handler, args,
+                                   skip=frozenset({"operation_id", "turn_id"}))
+        if problem:
+            return _recorded({"accepted": False, "result": None,
+                              "reason": f"InvalidInput: {problem}"},
+                             role_name=role)
         try:
             result = handler(**args)
         except Exception as exc:  # noqa: BLE001
