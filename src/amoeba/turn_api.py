@@ -126,6 +126,15 @@ def build(sup: "Supervisor") -> dict[str, Any]:  # noqa: C901
         receipt, out = mind.writer.apply(body, actor="harness",
                                          bump_version=False)
         sup.note_turn_finished(out.get("stop_reason"), turn_id=turn_id)
+        # An audit nobody waited for gets its verdict committed now that Id
+        # answered it. Best effort per request: one malformed verdict must not
+        # stop the turn from closing, and it is logged rather than swallowed.
+        for answered in out.get("answered") or []:
+            try:
+                sup.methods()["harness_commit_audit"](trigger_id=answered)
+            except Exception:  # noqa: BLE001
+                sup.log.exception("could not commit the audit answered by %s",
+                                  answered)
         if stop_reason == "context_pressure":
             out["rejuvenation"] = _rejuvenate(turn_id)
         return {**out, "receipt_id": receipt.receipt_id}
@@ -291,6 +300,18 @@ def build(sup: "Supervisor") -> dict[str, Any]:  # noqa: C901
                 actor=role, bump_version=False)
             return digest
 
+        # Ego putting a claim into the auditable record is what wakes Id to
+        # audit it -- the claim is intentional now, so this is signal rather
+        # than one wake per reply. Never allowed to fail the call that made
+        # the claim: the conclusion is recorded either way.
+        if role == "ego" and name == "record_conclusion" and isinstance(result, dict) \
+                and result.get("conclusion_id"):
+            try:
+                sup.methods()["harness_request_audit"](
+                    conclusion_id=result["conclusion_id"])
+            except Exception:  # noqa: BLE001
+                sup.log.exception("could not wake Id to audit %s",
+                                  result.get("conclusion_id"))
         bounded = bounded_tool_result(result, store=_store)
         return _recorded({"accepted": True, "result": result, "reason": None,
                 "result_text": bounded["text"],

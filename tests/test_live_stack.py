@@ -244,7 +244,14 @@ def test_second_supervisor_refuses_the_same_state_dir(stack: LiveStack):
 def test_id_audits_ego_conclusion_without_asking_ego(stack: LiveStack):
     turn = stack.call("ego_converse", message="State one fact about this mind.",
                       idempotency_key="audit-subject-1")
-    conclusion_id = turn["result"]["conclusion_id"]
+    # Answering records no conclusion; Ego records one when it means to. Here
+    # the claim is recorded against the operation that asked, as Ego's
+    # `record_conclusion` call during that turn would be.
+    assert turn["result"]["conclusion_ids"] == []
+    conclusion_id = stack.call(
+        "record_conclusion", claim=turn["result"]["answer"] or "one fact",
+        produced_by="ego", operation_id=turn["operation_id"],
+        model_identity="gen_test")["conclusion_id"]
 
     audit = stack.call("id_audit", conclusion_id=conclusion_id,
                        focus="is the claim supported by recorded evidence?")

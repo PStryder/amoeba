@@ -251,8 +251,8 @@ telling the model its output is appended directly to what it already said
 order, once, assembled along the parent links (I107). Only a thought the model
 ended is `answered`; one stopped by the continuation limit, a deadline or a
 failure is `incomplete`, with everything it said and why it stopped (I108).
-Ego's conclusion is recorded from the whole finished answer, once -- never
-from a fragment (I112).
+An answer records no conclusion at all; Ego records one on purpose with
+`record_conclusion`, and doing so wakes Id to audit it (I112, I116).
 
 ## 12. Context homeostasis
 

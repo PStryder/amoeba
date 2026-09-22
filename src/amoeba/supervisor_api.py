@@ -126,6 +126,65 @@ def _parse_audit(text: str) -> dict[str, Any]:
             "unresolved": unresolved, "verdict_stated": stated}
 
 
+AUDIT_FRAMING = ("Use audit_dossier to resolve the recorded evidence, and judge "
+                 "only from what the record shows. Finish with exactly three "
+                 "lines:\n"
+                 "VERDICT: supported | contested | unsupported | inconclusive\n"
+                 "FINDING: <one sentence>\n"
+                 "UNRESOLVED: <what the record does not establish>")
+
+
+def commit_audit(mind: Any, dossier: dict[str, Any], *, conclusion_id: str | None,
+                 operation_id: str | None, focus: str, text: str,
+                 op_id: str) -> dict[str, Any]:
+    """Record what Id concluded about a conclusion, and what follows from it.
+
+    The one place an audit verdict becomes durable: the audit itself, a
+    disagreement when it is contested, and settlement when a supporting audit
+    stands on changed ground (I102). It used to live inside `id_audit`'s
+    waiter, which meant an audit nobody waited for -- the only kind a wake
+    can produce -- had its verdict produced and then discarded. Now the
+    waiter and the completion hook both call this, so there is one
+    definition of what an audit does.
+    """
+    target = conclusion_id or operation_id
+    parsed = _parse_audit(text)
+    findings = [parsed["finding"]] if parsed["finding"] else []
+    out: dict[str, Any] = {
+        "verdict": parsed["verdict"], "findings": findings,
+        "unresolved": parsed["unresolved"],
+        "finding": parsed["finding"] or text,
+        "verdict_stated": parsed["verdict_stated"],
+    }
+    audit_id, _ = mind.memory.record_audit(
+        target_kind="conclusion" if conclusion_id else "operation",
+        target_id=target, verdict=out["verdict"], focus=focus or None,
+        findings=findings, unresolved=out["unresolved"],
+        evidence={"hash_chain_ok": dossier.get("hash_chain_ok"),
+                  "event_count": len(dossier.get("events", [])),
+                  "unresolved_content": dossier.get("unresolved_content", [])},
+        operation_id=op_id)
+    out["audit_id"] = audit_id
+    basis = _evidence_basis_digest(dossier)
+    out["evidence_basis_digest"] = basis
+    # A contested audit of an Ego conclusion is a real disagreement, and it is
+    # recorded as one rather than quietly overwriting the claim.
+    if conclusion_id and out["verdict"] in ("contested", "unsupported"):
+        concl = mind.memory.get_conclusion(conclusion_id)
+        did, _ = mind.memory.open_disagreement(
+            subject_kind="conclusion", subject_id=conclusion_id,
+            claim_a=concl["claim"], actor_a=concl["produced_by"],
+            claim_b="; ".join(findings or ["contested"]), actor_b="id",
+            evidence_a={"conclusion_evidence": concl.get("evidence", [])},
+            evidence_b={"audit_id": audit_id},
+            evidence_basis_digest=basis, operation_id=op_id)
+        out["disagreement_id"] = did
+    elif conclusion_id and out["verdict"] == "supported":
+        out.update(_settle_if_the_ground_moved(
+            mind, conclusion_id, basis, audit_id, op_id))
+    return out
+
+
 def build(sup: "Supervisor") -> dict[str, Any]:
     mind = sup.mind
     assert mind is not None
@@ -997,6 +1056,7 @@ def build(sup: "Supervisor") -> dict[str, Any]:
                 # So does its conclusion: recorded with the whole answer, not
                 # by the turn that happened to finish it.
                 result["conclusion_id"] = record.get("conclusion_id")
+                result["conclusion_ids"] = record.get("conclusion_ids") or []
                 # Terminal either way, and only one of them is finished.
                 # "completed" is reserved for a thought that concluded; one
                 # that was stopped -- by the continuation limit, a deadline, a
@@ -1143,6 +1203,7 @@ def build(sup: "Supervisor") -> dict[str, Any]:
             out["tool_requests"] = result.get("tool_requests", [])
             out["answer"] = result.get("answer", "")
             out["conclusion_id"] = result.get("conclusion_id")
+            out["conclusion_ids"] = result.get("conclusion_ids") or []
             out["tool_calls"] = result.get("tool_calls", [])
             if settled["status"] == "incomplete":
                 # Terminal, with everything said so far, and plainly not
@@ -1211,6 +1272,7 @@ def build(sup: "Supervisor") -> dict[str, Any]:
             out["is_simulated"] = bool(result.get("is_simulated"))
             out["claim"] = result.get("answer", "")
             out["conclusion_id"] = result.get("conclusion_id")
+            out["conclusion_ids"] = result.get("conclusion_ids") or []
             if settled["status"] == "incomplete":
                 # Terminal, with everything said so far, and plainly not
                 # a finished answer.
@@ -1365,27 +1427,29 @@ def build(sup: "Supervisor") -> dict[str, Any]:
         target = conclusion_id or operation_id
 
         def run(op_id: str, limitations: list[str]) -> dict[str, Any]:
+            # Measured first. A target the record cannot resolve is refused
+            # here, before anyone is woken: queueing first cost Id a turn on an
+            # audit whose verdict could never be committed.
+            dossier = sup.methods()["audit_dossier"](
+                conclusion_id=conclusion_id, operation_id=operation_id)
             framing = (f"audit conclusion {target}"
                        + (f" (focus: {focus})" if focus.strip() else "")
-                       + ". Use audit_dossier to resolve the recorded evidence, "
-                         "and judge only from what the record shows. Finish "
-                         "with exactly three lines:\n"
-                         "VERDICT: supported | contested | unsupported | "
-                         "inconclusive\n"
-                         "FINDING: <one sentence>\n"
-                         "UNRESOLVED: <what the record does not establish>")
+                       + ". " + AUDIT_FRAMING)
             queued = sup.methods()["role_enqueue_trigger"](
                 role="id", kind="operator_message", source="operator",
                 expects_answer=True,
                 source_ref=target, summary=framing[:400],
                 payload={"conclusion_id": conclusion_id,
                          "operation_id_target": operation_id,
-                         "focus": focus[:2000], "intent": "audit"},
+                         "focus": focus[:2000], "intent": "audit",
+                         # Who records the verdict. A caller that waits does;
+                         # one that does not leaves it to the Harness when Id
+                         # answers -- otherwise the verdict is produced and
+                         # dropped, which is what every unwaited audit did.
+                         "commit": "waiter" if wait else "on_completion"},
                 operation_id=op_id, lineage=op_id)
 
-            # Measured, by the Harness, regardless of what Id says.
-            dossier = sup.methods()["audit_dossier"](
-                conclusion_id=conclusion_id, operation_id=operation_id)
+            # Measured, by the Harness, regardless of what Id says -- above.
             reviewed = {
                 "ego_consulted": False,
                 "resolved_from": "durable record only",
@@ -1405,7 +1469,8 @@ def build(sup: "Supervisor") -> dict[str, Any]:
                 "verdict": "inconclusive", "findings": [], "unresolved": "",
             }
             if not wait:
-                limitations.append("queued only; no verdict yet")
+                limitations.append("queued; the verdict is recorded when Id "
+                                   "answers")
                 return out
 
             settled = _await_turn(
@@ -1419,72 +1484,96 @@ def build(sup: "Supervisor") -> dict[str, Any]:
             _label_simulation(result, limitations)
             out["is_simulated"] = bool(result.get("is_simulated"))
 
+            # Not yet answered: the verdict is owed to this waiter, and a
+            # waiter that stops waiting records nothing. Said plainly.
+            if settled["status"] not in ("completed", "incomplete"):
+                limitations.append("Id had not reached this before the wait "
+                                   "elapsed; it remains queued, and this call "
+                                   "will not record its verdict")
+                return out
+            if settled["status"] == "incomplete":
+                limitations.append(
+                    "the answer is incomplete: it stopped before finishing "
+                    f"({settled.get('ended_because')}); everything said so far "
+                    "is included")
             # The structured verdict survived the move onto the turn model. It
             # used to be parsed inside the role; the turn is generic, so it is
-            # parsed here. Losing it because the transport changed would be a
-            # capability quietly disappearing.
-            parsed = _parse_audit(result.get("text", ""))
-            out["verdict"] = parsed["verdict"]
-            out["findings"] = [parsed["finding"]] if parsed["finding"] else []
-            out["unresolved"] = parsed["unresolved"]
-            out["finding"] = parsed["finding"] or result.get("text", "")
-            if not parsed["verdict_stated"]:
+            # parsed where it is committed. Losing it because the transport
+            # changed would be a capability quietly disappearing.
+            out.update(commit_audit(
+                mind, dossier, conclusion_id=conclusion_id,
+                operation_id=operation_id, focus=focus,
+                text=result.get("text") or result.get("answer") or "",
+                op_id=op_id))
+            if not out.pop("verdict_stated"):
                 limitations.append(
                     "Id did not state a verdict in the expected form; "
                     "'inconclusive' here means unparsed, not judged")
-            if settled["status"] == "incomplete":
-                # Terminal, with everything said so far, and plainly not
-                # a finished answer.
-                limitations.append(
-                    "the answer is incomplete: it stopped before "
-                    f"finishing ({settled.get('ended_because')}); "
-                    "everything said so far is included")
-            elif settled["status"] != "completed":
-                limitations.append("Id had not reached this before the wait "
-                                   "elapsed; it remains queued")
-                return out
-
-            audit_id, _ = mind.memory.record_audit(
-                target_kind=out["target_kind"], target_id=out["target_id"],
-                verdict=out["verdict"], focus=focus or None,
-                findings=out["findings"], unresolved=out["unresolved"],
-                evidence={"hash_chain_ok": reviewed.get("hash_chain_ok"),
-                          "event_count": len(reviewed.get("events", [])),
-                          "unresolved_content":
-                              reviewed.get("unresolved_content", [])},
-                operation_id=op_id,
-            )
-            out["audit_id"] = audit_id
             if reviewed.get("unresolved_content"):
                 limitations.append("some referenced content could not be "
                                    "resolved; the audit is incomplete")
-            # A contested audit of an Ego conclusion is a real disagreement,
-            # and it is recorded as one rather than quietly overwriting the
-            # claim.
-            basis = _evidence_basis_digest(dossier)
-            out["evidence_basis_digest"] = basis
-            if conclusion_id and out["verdict"] in ("contested", "unsupported"):
-                concl = mind.memory.get_conclusion(conclusion_id)
-                did, _ = mind.memory.open_disagreement(
-                    subject_kind="conclusion", subject_id=conclusion_id,
-                    claim_a=concl["claim"], actor_a=concl["produced_by"],
-                    claim_b="; ".join(out["findings"] or ["contested"]),
-                    actor_b="id",
-                    evidence_a={"conclusion_evidence": concl.get("evidence", [])},
-                    evidence_b={"audit_id": audit_id},
-                    evidence_basis_digest=basis,
-                    operation_id=op_id,
-                )
-                out["disagreement_id"] = did
-            elif conclusion_id and out["verdict"] == "supported":
-                out.update(_settle_if_the_ground_moved(
-                    mind, conclusion_id, basis, audit_id, op_id))
             return out
 
         return _run_operation("id_audit", "id",
                               {"conclusion_id": conclusion_id,
                                "operation_id": operation_id, "focus": focus},
                               idempotency_key, run)
+
+    def harness_request_audit(*, conclusion_id: str) -> dict[str, Any]:
+        """Ego put a claim into the auditable record, so Id is woken to audit it.
+
+        Not the operator asking, and it does not say it is: the trigger is a
+        `conclusion_recorded` event from the Harness. Id reads the dossier and
+        states a verdict like any other audit, and the verdict is committed
+        when Id answers -- nobody is waiting on it, which is exactly the case
+        that used to lose it. Only intentional conclusions reach here, because
+        answering no longer records one (I116), so this wakes Id for things
+        worth auditing rather than for every reply.
+        """
+        def run(op_id: str, limitations: list[str]) -> dict[str, Any]:
+            sup.methods()["audit_dossier"](conclusion_id=conclusion_id)
+            queued = sup.methods()["role_enqueue_trigger"](
+                role="id", kind="conclusion_recorded", source="harness",
+                expects_answer=True, source_ref=conclusion_id,
+                summary=(f"Ego recorded conclusion {conclusion_id}. Audit it. "
+                         + AUDIT_FRAMING)[:400],
+                payload={"conclusion_id": conclusion_id, "focus": "",
+                         "intent": "audit", "commit": "on_completion"},
+                operation_id=op_id, lineage=op_id)
+            limitations.append("queued; the verdict is recorded when Id answers")
+            return {"trigger_id": queued["trigger_id"], "status": "queued",
+                    "conclusion_id": conclusion_id}
+
+        return _run_operation("id_audit", "harness",
+                              {"conclusion_id": conclusion_id,
+                               "requested_by": "harness"}, None, run)
+
+    def harness_commit_audit(*, trigger_id: str) -> dict[str, Any] | None:
+        """Commit the verdict of an audit nobody waited for, now that Id answered.
+
+        Called by the Harness when a turn closes, for each request it
+        answered. Anything but an unwaited audit is left alone, so a waiter's
+        audit is still committed exactly once, by the waiter.
+        """
+        row = mind.db.conn.execute(
+            "SELECT payload_sha256, operation_id, answer_status, answer_sha256"
+            " FROM role_triggers WHERE trigger_id = ?", (trigger_id,)).fetchone()
+        if row is None or not row["payload_sha256"]:
+            return None
+        payload = mind.blobs.get_json(row["payload_sha256"]) or {}
+        if payload.get("intent") != "audit" or payload.get("commit") != "on_completion":
+            return None
+        text = ""
+        if row["answer_sha256"]:
+            text = (mind.blobs.get_json(row["answer_sha256"]) or {}).get("answer", "")
+        conclusion_id = payload.get("conclusion_id")
+        target_op = payload.get("operation_id_target")
+        dossier = sup.methods()["audit_dossier"](
+            conclusion_id=conclusion_id, operation_id=target_op)
+        return commit_audit(mind, dossier, conclusion_id=conclusion_id,
+                            operation_id=target_op,
+                            focus=payload.get("focus") or "", text=text,
+                            op_id=row["operation_id"])
 
     def id_disagreements(*, scope: str = "open", limit: int = 20) -> dict[str, Any]:
         items = mind.memory.get_disagreements(status=scope, limit=limit)
@@ -1732,6 +1821,8 @@ def build(sup: "Supervisor") -> dict[str, Any]:
         "ego_recall": ego_recall, "ego_status": ego_status,
         "role_answer": role_answer,
         "id_introspect": id_introspect, "id_health": id_health, "id_audit": id_audit,
+        "harness_request_audit": harness_request_audit,
+        "harness_commit_audit": harness_commit_audit,
         "id_disagreements": id_disagreements, "id_maintenance": id_maintenance,
         # misc
         "cancel_operation": cancel_operation,

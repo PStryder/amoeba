@@ -45,6 +45,9 @@ OPERATOR_VERBS = (
     # cognition and history
     "recall", "get_memory", "history", "provenance", "audit_dossier",
     "get_conclusion", "disagreements",
+    # Asking Id to audit a conclusion. It was reachable only through the
+    # control token, so in live operation nothing ever started an audit.
+    "id_audit",
     # work
     "queue_stats", "get_work", "ego_work_view", "cancel_work",
     # blackboard

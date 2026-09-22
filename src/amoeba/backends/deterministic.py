@@ -259,7 +259,9 @@ class DeterministicBackend:
         """
         delay = 0.0
         with self._lock:
-            head = self._scripted[0] if self._scripted else None
+            role = self._sessions[session_id].role if session_id in self._sessions else None
+            at = self._next_scripted(role)
+            head = self._scripted[at] if at is not None else None
             if isinstance(head, dict):
                 delay = float(head.get("delay_seconds") or 0.0)
         if delay > 0:
@@ -274,11 +276,12 @@ class DeterministicBackend:
                     completion_tokens=0, time_to_first_token=0.0,
                     total_seconds=0.0)
             t0 = time.perf_counter()
-            if self._scripted:
+            at = self._next_scripted(sess.role)
+            if at is not None:
                 # Still labelled as simulated: a scripted reply is no more
                 # model inference than a hashed one, and the label is what
                 # stops either being mistaken for it.
-                entry = self._scripted.pop(0)
+                entry = self._scripted.pop(at)
                 if isinstance(entry, dict):
                     # A scripted *truncation*: the only way a test can make a
                     # known answer span several bounded turns and then check
@@ -332,6 +335,19 @@ class DeterministicBackend:
                 time_to_first_token=elapsed, total_seconds=elapsed,
                 first_token_logprob_top=self.top_logits(session_id, 3),
             )
+
+    def _next_scripted(self, role: str | None) -> int | None:
+        """The next scripted reply this session may take, if any.
+
+        A reply may name the role it is for. Without that, one global queue
+        let whichever role generated next take the next reply -- so a test
+        in which Ego's action wakes Id raced two minds for one script.
+        """
+        for i, entry in enumerate(self._scripted):
+            wanted = entry.get("role") if isinstance(entry, dict) else None
+            if wanted is None or wanted == role:
+                return i
+        return None
 
     def script_responses(self, responses: Sequence[str]) -> int:
         """Queue exact replies for the next generations.

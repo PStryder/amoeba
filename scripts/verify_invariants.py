@@ -1598,22 +1598,31 @@ MUTATIONS: list[Mutation] = [
                "        if False:  # MUTANT: clamp silently")],
     ),
     Mutation(
-        "I112", "A fragment is not a conclusion",
-        "src/amoeba/roles.py",
-        '        answered = list(turn.get("answering") or [])',
-        '        answered = list(turn.get("answering") or [])\n'
-        '        if text and answered:  # MUTANT: every bounded turn concludes\n'
-        '            self.sup.call("record_conclusion", claim=text,\n'
-        '                          produced_by="ego",\n'
-        '                          evidence=[{"note": f"turn {turn[\'turn_id\']}"}],\n'
-        '                          operation_id=turn.get("operation_id"))',
-        ["test_the_live_three_turn_answer_is_one_conclusion",
-         "test_an_incomplete_answer_is_not_a_conclusion"],
-        layer="EgoProcess.on_turn / mailbox.complete (when an answer becomes a claim)",
-        note="The primary mutant is the old mechanism exactly: each bounded turn records its own text as a conclusion, which live left four conclusions for one question. The second anchor concludes an incomplete answer, which is a thought the continuation limit stopped rather than a claim Ego made.",
-        also=[("src/amoeba/mailbox.py",
-               '                if finished and row["role"] == "ego":',
-               '                if row["role"] == "ego":  # MUTANT: conclude the unfinished too')],
+        "I112", "A conclusion is a claim Ego chooses to make",
+        "src/amoeba/mailbox.py",
+        "                conclusion_id = conclusion_ids[-1] if conclusion_ids else None",
+        "                conclusion_id = conclusion_ids[-1] if conclusion_ids else None\n"
+        "                if finished and row['role'] == 'ego':  # MUTANT: answering concludes\n"
+        "                    mind.memory.write_conclusion(m, conclusion_id=new_id('concl'),\n"
+        "                        claim=text, produced_by='ego')",
+        ["test_answering_is_not_concluding",
+         "test_neither_a_fragment_nor_a_whole_answer_is_a_conclusion"],
+        layer="mailbox.complete (what an answer does and does not record)",
+        note="The mutant restores the rule a live run showed to be noise: a finished Ego answer becomes an auditable claim. It is what made a tooling complaint and a memory self-report into conclusions.",
+    ),
+    Mutation(
+        "I116", "An audit can actually happen, and its verdict lands",
+        "src/amoeba/supervisor_api.py",
+        '        if payload.get("intent") != "audit" or payload.get("commit") != "on_completion":\n'
+        "            return None",
+        "        return None  # MUTANT: an unwaited verdict is dropped",
+        ["test_a_conclusion_ego_records_wakes_id_and_the_verdict_lands",
+         "test_the_operator_can_ask_for_an_audit_and_its_verdict_is_recorded"],
+        layer="harness_commit_audit / role_tool_invoke (reaching an audit, and keeping its verdict)",
+        note="The primary mutant is the old behaviour: a verdict nobody waits for is never recorded. The second anchor removes the wake, so a recorded conclusion no longer reaches Id at all. Separately verified to die for a wake that claims to be the operator, a target measured after waking Id, and id_audit missing from the operator surface.",
+        also=[("src/amoeba/turn_api.py",
+               '        if role == "ego" and name == "record_conclusion" and isinstance(result, dict) \\',
+               '        if False and isinstance(result, dict) \\')],
     ),
     Mutation(
         "I113", "A role is taught the call syntax its parser accepts",

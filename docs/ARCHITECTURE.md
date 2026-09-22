@@ -1489,21 +1489,40 @@ turn rather than after the overrun. For Ego that places the wall at 13312 of
 16384; for Id at 7168 of 8192.
 → `test_a_generation_is_admitted_only_if_its_allowance_fits`
 
-**I112. A fragment is not a conclusion.** Ego used to record a conclusion for
-every turn that owed an answer, so each bounded piece of a long reply became
-its own auditable claim. Live, one question left four conclusions -- three of
-them sentences cut off mid-word -- and Id auditing half-thoughts. A turn
-ending is not Ego concluding anything.
+**I112. A conclusion is a claim Ego chooses to make -- never a side effect of
+answering.** Ego used to record a conclusion for every turn that owed an
+answer, so each bounded piece of a long reply became its own auditable claim;
+live, one question left four, three of them cut off mid-word. Moving the
+recording to the whole answer fixed the fragments and kept the deeper
+mistake: every finished reply was still a "conclusion", including a
+complaint that a tool had refused and a self-report about memory, and one run
+left seven, none reviewed and the wrong ones never superseded.
 
-The conclusion is recorded once, by the Harness, in the same transaction that
-records the interaction's whole answer, and only when that answer is
-finished: an incomplete answer is not a claim Ego made. It cites every turn
-that produced it, and its event belongs to the operation that asked, so an
-audit still finds it and still resolves it to exactly the turns that wrote it.
-→ `test_a_fragment_is_not_a_conclusion_and_the_whole_answer_is`,
+Answering is not concluding. A conclusion is something Ego puts into the
+organism's auditable state on purpose, with `record_conclusion`, bound by the
+Harness to the operation that asked. The answer names the conclusions Ego
+recorded while giving it, and nothing else.
+→ `test_answering_is_not_concluding`,
+`test_neither_a_fragment_nor_a_whole_answer_is_a_conclusion`,
 `test_an_incomplete_answer_is_not_a_conclusion`,
-`test_the_live_three_turn_answer_is_one_conclusion`,
-`test_id_audits_ego_conclusion_without_asking_ego`
+`test_the_answer_reports_the_conclusion_ego_chose_to_record`,
+`test_a_live_three_turn_answer_records_no_conclusion`
+
+**I116. An audit can actually happen, and its verdict lands.** The audit and
+disagreement machinery (I100-I102) was unreachable in operation: `id_audit`
+sat behind the control token, so neither Id nor the operator could start one,
+and even then a verdict was committed only by a caller that waited for it --
+an unwaited audit produced its verdict and dropped it. Now Ego recording a
+conclusion wakes Id with a `conclusion_recorded` trigger from the Harness,
+which says it is the Harness; the operator can ask for an audit; and a
+verdict nobody waits for is committed when Id answers, through the same
+function the waiting path uses, so there is one definition of what an audit
+does. A target the record cannot resolve is refused before anyone is woken.
+→ `test_a_conclusion_ego_records_wakes_id_and_the_verdict_lands`,
+`test_the_operator_can_ask_for_an_audit_and_its_verdict_is_recorded`,
+`test_an_unauditable_target_is_refused_without_waking_id`,
+`test_a_contested_verdict_opens_a_disagreement`,
+`test_an_unstated_verdict_is_recorded_as_unparsed_not_judged`
 
 **I113. A role is taught the call syntax its parser accepts.** The role tool
 loop parses exactly `<tool_call>{"name": ..., "arguments": ...}</tool_call>`,

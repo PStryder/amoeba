@@ -86,6 +86,7 @@ TRIGGER_KINDS = (
     "continuation",        # the Harness deciding a turn was not finished
     "heartbeat",           # Id's periodic homeostatic review
     "startup",             # the organism came up
+    "conclusion_recorded", # Ego put a claim into the auditable record
 )
 
 # Why a bounded turn ended. Not collapsed into "it ended", because these drive
@@ -817,7 +818,7 @@ def complete(m: Mutation, mind: "Mind", *, turn_id: str, stop_reason: str,
             text, segments = assemble_answer(
                 mind.db.conn, mind.blobs, admitting_turn=req["turn_id"],
                 turn_id=turn_id, result=result)
-            conclusion_id = None
+            conclusion_id, conclusion_ids = None, []
             withheld = [s["withheld"] for s in segments if s.get("withheld")]
             if not text:
                 # Nothing was said at all. Saying so lets a caller stop
@@ -834,29 +835,28 @@ def complete(m: Mutation, mind: "Mind", *, turn_id: str, stop_reason: str,
                     schema="amoeba.trigger_answer/2") if withheld else None
             else:
                 state = "answered" if finished else "incomplete"
-                if finished and row["role"] == "ego":
-                    # Ego's answer becomes an auditable claim here, once, when
-                    # it is the whole answer -- not at each bounded turn,
-                    # which made four fragments of one unfinished reply into
-                    # four conclusions and had Id auditing half-sentences. An
-                    # incomplete answer is not a conclusion at all. Every
-                    # producing turn is cited, so the claim still resolves to
-                    # exactly the turns that wrote it.
-                    conclusion_id = new_id("concl")
-                    mind.memory.write_conclusion(
-                        m, conclusion_id=conclusion_id, claim=text,
-                        produced_by="ego",
-                        evidence=([{"note": f"turn {piece['turn_id']}"}
-                                   for piece in segments]
-                                  + [{"note": f"trigger {req['trigger_id']}"}]),
-                        operation_id=req.get("operation_id") or row["operation_id"],
-                        model_identity=(result or {}).get("model_generation")
-                        if isinstance(result, dict) else None)
+                # Not a conclusion. Answering is not concluding: every finished
+                # answer used to be recorded as an auditable claim, including a
+                # complaint that a tool had refused and a self-report about
+                # memory, so the audit queue filled with things that were not
+                # claims at all. A conclusion is now something Ego chooses to
+                # put into the organism's auditable state, with
+                # `record_conclusion`, during the turn. What it chose is found
+                # here, under the operation that asked, so the answer still
+                # says which claims it carried.
+                conclusion_ids = [r["conclusion_id"] for r in mind.db.conn.execute(
+                    "SELECT conclusion_id FROM conclusions"
+                    " WHERE operation_id = ? AND produced_by = 'ego'"
+                    " ORDER BY created_at",
+                    (req.get("operation_id") or row["operation_id"],))
+                    ] if (req.get("operation_id") or row["operation_id"]) else []
+                conclusion_id = conclusion_ids[-1] if conclusion_ids else None
                 sha = m.put_json(
                     {"answer": text, "complete": finished,
                      "ended_because": ended_because, "turn_id": turn_id,
                      "stop_reason": stop_reason, "role": row["role"],
-                     "conclusion_id": conclusion_id, "withheld": withheld,
+                     "conclusion_id": conclusion_id,
+                     "conclusion_ids": conclusion_ids, "withheld": withheld,
                      # Which turns the answer came from, in order. The text
                      # lives in each turn's own result; this is the index,
                      # so provenance points back at the producing turns

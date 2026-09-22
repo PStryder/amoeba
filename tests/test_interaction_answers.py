@@ -706,12 +706,12 @@ def _evidence_notes(mind, conclusion_id):
         " ORDER BY id", (conclusion_id,))]
 
 
-def test_a_fragment_is_not_a_conclusion_and_the_whole_answer_is(mind):
+def test_neither_a_fragment_nor_a_whole_answer_is_a_conclusion(mind):
     """Live, one question left four conclusions -- three of them half-sentences.
 
-    A bounded turn ending is not Ego concluding anything. The conclusion is
-    recorded once, when the interaction's answer is whole and finished, and it
-    cites every turn that produced it.
+    A bounded turn ending is not Ego concluding anything, and neither is a
+    whole answer: answering is not the same act as putting a claim into the
+    auditable record. That is Ego's to do, with `record_conclusion`.
     """
     req = _request(mind)
     t1 = _claim(mind, "ego")
@@ -724,16 +724,11 @@ def test_a_fragment_is_not_a_conclusion_and_the_whole_answer_is(mind):
     _complete(mind, t3["turn_id"], stop_reason="model_stop",
               result=_piece(CHARLIE, resumed=True), max_continuations=3)
 
-    concluded = _conclusions(mind)
-    assert len(concluded) == 1
-    assert concluded[0]["claim"] == (ALPHA + BRAVO + CHARLIE).strip()
-    assert concluded[0]["produced_by"] == "ego"
-    notes = _evidence_notes(mind, concluded[0]["conclusion_id"])
-    assert notes == [f"turn {t1['turn_id']}", f"turn {t2['turn_id']}",
-                     f"turn {t3['turn_id']}", f"trigger {req['trigger_id']}"]
-    # And the answer knows which conclusion it became.
-    assert _answer_record(mind, req["trigger_id"])[1]["conclusion_id"] == \
-        concluded[0]["conclusion_id"]
+    assert _conclusions(mind) == [], "a whole answer was concluded"
+    status, record = _answer_record(mind, req["trigger_id"])
+    assert status == "answered"
+    assert record["answer"] == (ALPHA + BRAVO + CHARLIE).strip()
+    assert record["conclusion_ids"] == []
 
 
 def test_an_incomplete_answer_is_not_a_conclusion(mind):
@@ -872,10 +867,10 @@ def test_startup_says_aloud_when_a_selected_profile_states_no_ceiling(mind, libr
 
 
 # ===========================================================================
-# the live answer is one conclusion
+# a live answer is not a conclusion
 # ===========================================================================
 @live
-def test_the_live_three_turn_answer_is_one_conclusion(answering):
+def test_a_live_three_turn_answer_records_no_conclusion(answering):
     _inference(answering).call("script_responses", responses=[
         {"text": ALPHA, "finish_reason": "length"},
         {"text": BRAVO, "finish_reason": "length", "continues": True},
@@ -887,9 +882,5 @@ def test_the_live_three_turn_answer_is_one_conclusion(answering):
     assert state["status"] == "completed"
     recorded = answering.call("history", operation_id=env["operation_id"],
                               kinds=["conclusion.recorded"], limit=50)
-    assert len(recorded) == 1, "one answer became several conclusions"
-    payload = json.loads(recorded[0]["payload_inline"])
-    concl = answering.call("get_conclusion",
-                           conclusion_id=payload["conclusion_id"])
-    assert concl["claim"] == state["answer"]
-    assert sum(n["note"].startswith("turn ") for n in concl["evidence"]) == 3
+    assert recorded == [], "answering recorded a conclusion Ego never made"
+    assert state["answer"]
