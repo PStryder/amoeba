@@ -830,6 +830,19 @@ def complete(m: Mutation, mind: "Mind", *, turn_id: str, stop_reason: str,
         "profile_ref": row["profile_ref"], "result_sha256": result_sha})
     m.emit(EventKind.ROLE_TRIGGER_CONSUMED, {
         "turn_id": turn_id, "role": row["role"], "trigger_ids": consumed})
+    # A generation that tried to author a role boundary and was stopped before
+    # the token entered the session. Recorded so the ledger can tell an
+    # attempt that was refused from a boundary the Harness wrote itself: the
+    # model can hallucinate the Harness, and the record has to know it was
+    # not there.
+    for attempt in (result or {}).get("structural_attempts") or []:
+        m.emit(EventKind.ROLE_STRUCTURE_REFUSED, {
+            "turn_id": turn_id, "role": row["role"],
+            "token": attempt.get("token"), "piece": attempt.get("piece"),
+            "tool_turn": attempt.get("turn"), "admitted": False,
+            "note": ("the model sampled a chat-template control token; "
+                     "generation stopped and the token never entered the "
+                     "session or the KV")})
 
     # --- is the thought over? --------------------------------------------
     # A turn closing is not the interaction ending. This turn is finished

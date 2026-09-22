@@ -16,6 +16,7 @@ It is NOT a language model and must never be presented as one:
 from __future__ import annotations
 
 import hashlib
+import re
 import threading
 import time
 from dataclasses import dataclass
@@ -24,6 +25,21 @@ from typing import Any, Callable, Sequence
 from ..errors import CapabilityUnsupported, InvalidInput, ResourceExhausted
 from ..ids import new_id
 from .base import SIMULATED_BANNER
+from .structure import (STRUCTURAL_FINISH, cut_at_structural,
+                        structural_from_text)
+
+# The shape of a rendered conversation here: one marker per message, and the
+# roles this simulator ever writes. `structural()` turns these into ids.
+CHAT_MARKER = "<|{role}|>"
+CHAT_MARKERS = tuple(CHAT_MARKER.format(role=r)
+                     for r in ("system", "user", "assistant", "tool"))
+MARKER_RE = re.compile(r"(<\|[a-z_]+\|>)")
+# Reserved ids, so a hashed word can never land on a marker's id. A real
+# vocabulary gives its control tokens their own ids; without the same here,
+# "is this token structural?" would be true of ordinary words by collision --
+# which is how a 2400-word answer first ran into this.
+MARKER_IDS = {m: i + 1 for i, m in enumerate(CHAT_MARKERS)}
+FIRST_TEXT_ID = len(MARKER_IDS) + 1
 from .llama_engine import GenerationResult, SessionState
 
 SIM_PREFIX = "[SIMULATED]"
@@ -47,6 +63,11 @@ class DeterministicBackend:
         self._free_seq: list[int] = []
         self._loaded = False
         self._used_cells = 0
+        # The same rule as the real engine: a generation may not author the
+        # shape of the conversation. This vocabulary is its own invention, so
+        # the markers are tokenized to find their ids.
+        self.structural_tokens = structural_from_text(
+            CHAT_MARKERS, lambda text: self.tokenize(text))
         self._scripted: list[str] = []
 
     # -- lifecycle ------------------------------------------------------
@@ -89,19 +110,54 @@ class DeterministicBackend:
     # -- tokenisation ---------------------------------------------------
     def tokenize(self, text: str, *, add_special: bool = False,
                  parse_special: bool = True) -> list[int]:
-        # Deterministic, reversible-enough: one token per whitespace word.
-        words = text.split()
-        return [int(hashlib.sha256(w.encode()).hexdigest()[:6], 16) % self.vocab_size
-                for w in words] or [0]
+        # Deterministic, reversible-enough: one token per whitespace word --
+        # and one per template marker, whatever it is glued to. A real
+        # tokenizer gives a control token its own id; without that here, the
+        # rule that generated tokens may not author structure would be
+        # checking ids that depend on the text beside the marker.
+        words: list[str] = []
+        for part in MARKER_RE.split(text):
+            if not part:
+                continue
+            words.extend([part] if MARKER_RE.fullmatch(part) else part.split())
+        span = max(1, self.vocab_size - FIRST_TEXT_ID)
+        return [MARKER_IDS[w] if w in MARKER_IDS else
+                int(hashlib.sha256(w.encode()).hexdigest()[:6], 16) % span + FIRST_TEXT_ID
+                for w in words] or [FIRST_TEXT_ID]
 
     def detokenize(self, tokens: Sequence[int], *, special: bool = False) -> str:
         return " ".join(f"t{t}" for t in tokens)
 
+    def _generated(self, text: str) -> tuple[str, list[int], int | None]:
+        """What a generation may keep: text and tokens cut at the same place.
+
+        A generation may not author the shape of the conversation, so this
+        stops at the first template marker. Both are cut, because text and
+        token stream disagreeing about where messages begin is the very thing
+        that hid this in the real engine.
+        """
+        tokens, forged = cut_at_structural(self.tokenize(text),
+                                           self.structural_tokens)
+        if forged is not None:
+            cuts = [i for i in (text.find(m) for m in CHAT_MARKERS) if i >= 0]
+            text = text[:min(cuts)] if cuts else text
+        return text, tokens, forged
+
+    def _piece_of(self, token: int | None) -> str:
+        if token is None:
+            return ""
+        return next((m for m in CHAT_MARKERS if self.tokenize(m) == [token]), "")
+
+    def structural(self) -> frozenset[int]:
+        """The marker ids, by the same rule the real engine uses."""
+        return structural_from_text(CHAT_MARKERS, lambda t: self.tokenize(t))
+
     def apply_chat_template(self, messages: Sequence[dict[str, str]], *,
                             add_assistant: bool = True) -> str:
-        parts = [f"<|{m['role']}|>{m['content']}" for m in messages]
+        parts = [f"{CHAT_MARKER.format(role=m['role'])}{m['content']}"
+                 for m in messages]
         if add_assistant:
-            parts.append("<|assistant|>")
+            parts.append(CHAT_MARKER.format(role="assistant"))
         return "\n".join(parts)
 
     def chat_template(self) -> str | None:
@@ -293,7 +349,9 @@ class DeterministicBackend:
                     text = body if entry.get("continues") else f"{SIM_PREFIX} {body}"
                 else:
                     finish, text = "scripted", f"{SIM_PREFIX} {entry}"
-                out_tokens = self.tokenize(text)
+                text, out_tokens, forged = self._generated(text)
+                if forged is not None:
+                    finish = STRUCTURAL_FINISH
                 sess.tokens.extend(out_tokens)
                 self._used_cells += len(out_tokens)
                 sess.tokens_generated += len(out_tokens)
@@ -301,6 +359,8 @@ class DeterministicBackend:
                 if on_token is not None:
                     on_token(text)
                 return GenerationResult(
+                    structural_attempt=forged,
+                    structural_piece=self._piece_of(forged),
                     session_id=session_id, text=text, tokens=out_tokens,
                     finish_reason=finish,
                     prompt_tokens=sess.n_past - len(out_tokens),
@@ -321,7 +381,9 @@ class DeterministicBackend:
             text = f"{SIM_PREFIX} {sess.role}:{' '.join(words)}"
             if self.latency_per_token:
                 time.sleep(self.latency_per_token * n_words)
-            out_tokens = self.tokenize(text)
+            text, out_tokens, forged = self._generated(text)
+            if forged is not None:
+                finish = STRUCTURAL_FINISH
             sess.tokens.extend(out_tokens)
             self._used_cells += len(out_tokens)
             sess.tokens_generated += len(out_tokens)
@@ -329,6 +391,7 @@ class DeterministicBackend:
             if on_token is not None:
                 on_token(text)
             return GenerationResult(
+                structural_attempt=forged, structural_piece=self._piece_of(forged),
                 session_id=session_id, text=text, tokens=out_tokens,
                 finish_reason=finish, prompt_tokens=sess.n_past - len(out_tokens),
                 completion_tokens=len(out_tokens),

@@ -1691,6 +1691,53 @@ per binding, and `prompt_resolve` gives the doctrine only when asked.
 `test_a_reference_opens_only_for_the_role_it_was_issued_to`,
 `test_the_compact_views_answer_the_usual_question`
 
+**I124. Generated tokens may never introduce chat-template structural tokens
+into session state. Only Harness-controlled context construction may append
+role and control tokens.** Live on 2026-09-22 at 11:50, Id emitted a real tool
+call and kept generating: `<|im_start|>user` followed by a `<tool_result>`
+block copied from a result ten minutes old. The Harness appended the true
+result underneath, so the session held a stale reading above the fresh one, in
+a message the model had authored and the record attributes to nobody. It was
+invisible downstream because `token_to_piece(special=False)` renders a control
+token as the empty string: the decoded text carried no marker while the token
+entered the session and the KV. What exposed it was the ledger disagreeing
+with the context -- five recorded tool calls, seven results.
+
+Three classes of sampled token, kept apart, and decided **on the token id
+before the token is appended** -- never by looking for markers in decoded
+text, which is the surface the defect hides from:
+
+* ordinary content: appended to the session, rendered to the caller;
+* a legitimate terminal (`is_eog`): generation stops, nothing is appended,
+  and it is not an attempt at anything -- a model ending its message is
+  ordinary;
+* a chat-template control token: generation stops, nothing is appended, and
+  the attempt is recorded.
+
+Which tokens those are is read from the vocabulary rather than assumed from
+documentation: a control token is one the vocabulary renders as nothing in
+plain text and as something in the special form. On the running model (Qwen3
+4B, 151936 tokens) that is 21 tokens, scanned in 0.37s at load; the active
+template writes exactly two of them, `<|im_start|>` and `<|im_end|>`; six are
+end-of-generation, including `<|im_end|>`, which is why the terminal case is
+checked first. The rest -- vision, box, quad and FIM markers -- are structure
+this model can emit and this organism never writes.
+
+The refusal is recorded as `role.structure_refused` carrying the token and
+its rendered form, so the causal ledger can prove who authored a boundary:
+an attempt that was refused is distinguishable from the thousands of
+boundaries the Harness writes legitimately.
+→ `test_a_generated_structural_token_never_enters_the_session`,
+`test_the_vocabulary_says_which_tokens_carry_structure`,
+`test_end_of_generation_is_a_terminal_not_a_forgery`,
+`test_a_generation_that_opens_a_message_is_stopped_before_the_token_lands`,
+`test_the_forged_message_never_becomes_context`,
+`test_text_and_token_stream_agree_about_boundaries`,
+`test_a_checkpointed_session_carries_no_model_authored_boundary`,
+`test_an_ordinary_tool_call_is_untouched`,
+`test_a_refused_attempt_is_recorded_and_a_harness_boundary_is_not`,
+`test_structure_is_what_the_transcript_cannot_show`
+
 **I73. A role is never wedged by a turn it did not close.** One open turn per
 role is a database constraint, so a turn left running blocks every future turn
 for that role — the role heartbeats, reports healthy, and never thinks again

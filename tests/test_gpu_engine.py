@@ -420,3 +420,81 @@ def test_sampling_without_current_logits_is_refused_not_guessed(engine):
     with pytest.raises(BackendUnavailable):
         engine.top_logits(s.session_id)
     engine.close_session(s.session_id)
+
+
+# ---------------------------------------------------------------------------
+# Only the Harness writes structure: the rule, against the real vocabulary
+# ---------------------------------------------------------------------------
+def test_the_vocabulary_says_which_tokens_carry_structure(engine):
+    """Read from the model, not from documentation about the model."""
+    from amoeba.backends.structure import scan_structural
+
+    marks = {engine.token_to_piece(t, special=True) for t in engine.structural_tokens}
+    assert {"<|im_start|>", "<|im_end|>"} <= marks, "the template's own markers"
+    # Every one of them is invisible in plain text -- which is what made the
+    # live forgery undetectable downstream.
+    assert all(engine.token_to_piece(t, special=False) == ""
+               for t in engine.structural_tokens)
+    assert engine.structural_tokens == scan_structural(
+        engine.n_vocab, lambda t, special: engine.token_to_piece(t, special=special))
+    # Qwen ships more than the chat pair: vision, box, quad and FIM markers.
+    assert len(engine.structural_tokens) >= 10
+    # The template writes exactly these, and nothing else structural.
+    rendered = engine.apply_chat_template([{"role": "user", "content": "hi"}],
+                                          add_assistant=True)
+    used = {t for t in engine.tokenize(rendered, add_special=False, parse_special=True)
+            if t in engine.structural_tokens}
+    assert {engine.token_to_piece(t, special=True) for t in used} == {
+        "<|im_start|>", "<|im_end|>"}
+
+
+def test_end_of_generation_is_a_terminal_not_a_forgery(engine):
+    """Three classes, kept apart. `<|im_end|>` is both, and EOG wins.
+
+    A model ending its message is ordinary and must not be recorded as an
+    attempt to author structure -- only as the end of what it was saying.
+    """
+    end = engine.tokenize("<|im_end|>", add_special=False, parse_special=True)[0]
+    assert engine.is_eog(end) and end in engine.structural_tokens
+
+    sess = engine.open_session(role="ego")
+    engine.ingest(sess.session_id, engine.tokenize(PROMPT))
+    held = len(engine.get_session(sess.session_id).tokens)
+    engine._sample = lambda *a, **k: end
+    out = engine.generate(session_id=sess.session_id, max_tokens=8)
+    assert out.finish_reason == "stop_token"
+    assert out.structural_attempt is None, "a normal ending reported as a forgery"
+    assert len(engine.get_session(sess.session_id).tokens) == held
+
+
+@pytest.mark.parametrize("batched", [False, True])
+def test_a_generated_structural_token_never_enters_the_session(engine, batched):
+    """The live defect, forced: both decode paths, one rule.
+
+    Sampling is replaced so the model emits `<|im_start|>` -- what Id really
+    did at 11:50 on 2026-09-22 before writing a tool result of its own.
+    """
+    from amoeba.backends.structure import STRUCTURAL_FINISH
+
+    start = engine.tokenize("<|im_start|>", add_special=False, parse_special=True)[0]
+    assert not engine.is_eog(start), "the marker must not be a legitimate terminal"
+
+    sess = engine.open_session(role="ego")
+    engine.ingest(sess.session_id, engine.tokenize(PROMPT))
+    before = list(engine.get_session(sess.session_id).tokens)
+    engine._sample = lambda *a, **k: start
+    if batched:
+        out = engine.generate_batched(
+            [{"session_id": sess.session_id, "max_tokens": 16,
+              "stop_strings": (), "prompt_tokens": len(before)}],
+            temperature=0.0, seed=7)[sess.session_id]
+    else:
+        out = engine.generate(session_id=sess.session_id, max_tokens=16)
+
+    assert out.finish_reason == STRUCTURAL_FINISH
+    assert out.structural_attempt == start
+    assert out.structural_piece == "<|im_start|>"
+    assert out.tokens == [], "the forged token was returned as content"
+    after = engine.get_session(sess.session_id).tokens
+    assert after == before, "a model-authored boundary entered the session"
+    assert start not in after

@@ -36,6 +36,7 @@ import numpy as np
 
 from ..errors import BackendUnavailable, CapabilityUnsupported, InvalidInput, ResourceExhausted
 from ..ids import new_id, sha256_hex
+from .structure import STRUCTURAL_FINISH, scan_structural
 from . import llama_ffi as F
 
 
@@ -150,6 +151,12 @@ class GenerationResult:
     time_to_first_token: float
     total_seconds: float
     first_token_logprob_top: list[tuple[int, float]] = field(default_factory=list)
+    # Set when a generation tried to author chat structure: the token it
+    # sampled, and how that token renders. Neither reached the session -- the
+    # record exists so the ledger can tell "the model attempted this boundary
+    # and was refused" from "the Harness appended this boundary".
+    structural_attempt: int | None = None
+    structural_piece: str = ""
 
     def to_dict(self) -> dict[str, Any]:
         return {k: getattr(self, k) for k in self.__slots__}
@@ -275,6 +282,13 @@ class LlamaEngine:
         vram_after = self.ggml.device_memory(0)[0] if gpus else 0
         self._free_seq = list(range(self.n_seq_max))
         self.model_generation = self._compute_model_generation()
+        # Which tokens carry structure rather than text. Read from this
+        # vocabulary, so the rule covers every control token this model has
+        # and not only the markers one template happens to use.
+        t_scan = time.perf_counter()
+        self.structural_tokens = scan_structural(
+            self.n_vocab, lambda t, special: self.token_to_piece(t, special=special))
+        self.structural_scan_seconds = time.perf_counter() - t_scan
         self._loaded = True
 
         self.load_report = {
@@ -288,6 +302,8 @@ class LlamaEngine:
             "n_ctx_train": int(self.ffi.lib.llama_model_n_ctx_train(model)),
             "n_seq_max": self.n_seq_max,
             "n_vocab": self.n_vocab,
+            "structural_tokens": len(self.structural_tokens),
+            "structural_scan_seconds": round(self.structural_scan_seconds, 3),
             "kv_unified": self.kv_unified,
             "n_kv_streams": 1 if self.kv_unified else self.n_seq_max,
             "gpu_offload_supported": bool(self.ffi.lib.llama_supports_gpu_offload()),
@@ -811,6 +827,7 @@ class LlamaEngine:
     ) -> GenerationResult:
         """Run one session to completion. Bounded by tokens and wall clock."""
         self._require()
+        attempted: int | None = None
         with self._lock:
             sess = self.get_session(session_id)
             if sess.cancel_requested:
@@ -852,6 +869,14 @@ class LlamaEngine:
                 if self.is_eog(tok):
                     finish = "stop_token"
                     break
+                if tok in self.structural_tokens:
+                    # Decided on the id, before anything is appended: the
+                    # decoded text renders a control token as "", so a check
+                    # on text cannot see this at all. Nothing of this token
+                    # reaches `out_tokens`, `sess.tokens` or the KV.
+                    finish = STRUCTURAL_FINISH
+                    attempted = tok
+                    break
                 out_tokens.append(tok)
                 piece = self.token_to_piece(tok, special=False)
                 text += piece
@@ -873,6 +898,9 @@ class LlamaEngine:
 
             sess.last_used = time.time()
             return GenerationResult(
+                structural_attempt=attempted,
+                structural_piece=(self.token_to_piece(attempted, special=True)
+                                  if attempted is not None else ""),
                 session_id=session_id, text=text, tokens=out_tokens,
                 finish_reason=finish, prompt_tokens=prompt_tokens,
                 completion_tokens=len(out_tokens), time_to_first_token=ttft,
@@ -945,6 +973,11 @@ class LlamaEngine:
                         a["finish"] = "stop_token" if self.is_eog(tok) else "length"
                         a["done"] = True
                         continue
+                    if tok in self.structural_tokens:
+                        a["finish"] = STRUCTURAL_FINISH
+                        a["structural_attempt"] = tok
+                        a["done"] = True
+                        continue
                     a["tokens"].append(tok)
                     piece = self.token_to_piece(tok, special=False)
                     a["text"] += piece
@@ -988,7 +1021,11 @@ class LlamaEngine:
             out: dict[str, GenerationResult] = {}
             for a in active:
                 sid = a["sess"].session_id
+                tried = a.get("structural_attempt")
                 out[sid] = GenerationResult(
+                    structural_attempt=tried,
+                    structural_piece=(self.token_to_piece(tried, special=True)
+                                      if tried is not None else ""),
                     session_id=sid, text=a["text"], tokens=a["tokens"],
                     finish_reason=a["finish"], prompt_tokens=a["prompt_tokens"],
                     completion_tokens=len(a["tokens"]), time_to_first_token=a["ttft"],

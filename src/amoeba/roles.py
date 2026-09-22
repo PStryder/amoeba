@@ -534,6 +534,10 @@ class RoleProcess:
         out: dict[str, Any] = {}
         stop_reason = "answered"
         malformed: str | None = None
+        # Generations that tried to author a role boundary and were stopped
+        # before the token entered the session. Reported so the record can
+        # show who attempted the structure, not merely who wrote it.
+        forged: list[dict[str, Any]] = []
         first = env_block + user_text if env_block else user_text
 
         for turn in range(max(1, max_tool_turns)):
@@ -549,6 +553,9 @@ class RoleProcess:
                                   (self.environment or {}).get("environment_sha256"))
             # A tool call the ceiling cut in half is finished by the resumed
             # generation, so the two halves are read together.
+            if out.get("structural_attempt") is not None:
+                forged.append({"turn": turn, "token": out["structural_attempt"],
+                               "piece": out.get("structural_piece") or ""})
             said = carry + out["text"] if turn == 0 and resumed else out["text"]
             requests = parse_tool_calls(said, limit=1)
             # A request in the wrong form is still a request, not a reply.
@@ -589,6 +596,8 @@ class RoleProcess:
                 # attempt: that text is not a reply, and must not be shown as
                 # one.
                 "malformed_call": malformed,
+                # Refused attempts to author chat structure, in order.
+                "structural_attempts": forged,
                 "environment_sha256": (self.environment or {}).get(
                     "environment_sha256"),
                 "environment_blob": self.environment_blob,
