@@ -499,6 +499,32 @@ def owed_lineages(conn, role: str) -> set[Any]:
         "   AND answer_status IS NULL", (role,))}
 
 
+def active_turns(conn, role: str, *, depth: int = 32) -> set[str]:
+    """Turns whose thought is still being continued.
+
+    A heartbeat expects no answer, so nothing is ever *owed* on its lineage --
+    but a heartbeat cut off by pressure has a continuation queued, and that
+    continuation is told to carry on from exactly where the turn stopped. The
+    turn it continues, and every earlier piece of the same thought, are active
+    work however little anyone is waiting for them.
+    """
+    out: set[str] = set()
+    for row in conn.execute(
+            "SELECT causal_parent FROM role_triggers"
+            " WHERE target_role = ? AND kind = 'continuation'"
+            "   AND status IN ('queued', 'claimed') AND causal_parent IS NOT NULL",
+            (role,)):
+        turn = row["causal_parent"]
+        for _ in range(depth):
+            if not turn or turn in out:
+                break
+            out.add(turn)
+            parent = conn.execute("SELECT parent_turn FROM role_turns WHERE turn_id = ?",
+                                  (turn,)).fetchone()
+            turn = parent["parent_turn"] if parent else None
+    return out
+
+
 def session_spans(conn, role: str, session_handle: str | None
                   ) -> list[dict[str, Any]]:
     """Every closed turn's position in this session, measured or carried.

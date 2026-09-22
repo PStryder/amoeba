@@ -1647,7 +1647,10 @@ from the binding and held to its frozen digest. Every environment block,
 declaration or reference, is removed, because a new session's next turn is
 given the current declaration in full (I118) immediately before it is used,
 so nothing kept can point at text that is gone. Settled turns are removed
-whole; owed turns lose nothing, and an oversized result in one is re-rendered
+whole; owed turns lose nothing -- owed meaning an interaction still waiting
+for its answer, or a thought still being continued: a heartbeat awaits no
+answer, but one cut off by pressure has a continuation told to carry on from
+where it stopped -- and an oversized result in one is re-rendered
 as the bounded projection a live call would get, from its exact stored copy --
 "I called X, here is what it returned, the rest is retrievable" -- rather than
 deleted. Where a turn sits in the new session is recorded against the new
@@ -1658,6 +1661,7 @@ that cannot reach its target says so and cuts nothing.
 `test_no_environment_block_or_reference_survives_a_rebuild`,
 `test_the_governed_prompt_is_rendered_fresh`,
 `test_an_owed_result_is_projected_never_deleted_and_its_exact_copy_is_there`,
+`test_a_turn_being_continued_is_active_even_when_nobody_awaits_an_answer`,
 `test_a_second_rebuild_can_still_remove_carried_settled_turns`,
 `test_spans_of_a_closed_session_never_place_a_turn_in_its_successor`,
 `test_an_empty_generation_prompt_is_not_carried`,

@@ -419,8 +419,10 @@ class ContextHomeostasis:
         rest = messages[1:] if system else messages
 
         units = rc.group_units(rest)
-        rc.attribute(units, mailbox.session_spans(self.mind.db.conn, role, session_id),
-                     mailbox.owed_lineages(self.mind.db.conn, role))
+        conn = self.mind.db.conn
+        rc.attribute(units, mailbox.session_spans(conn, role, session_id),
+                     mailbox.owed_lineages(conn, role),
+                     mailbox.active_turns(conn, role))
         # An assistant header nothing was generated into: a generation the
         # Harness refused. It carries nothing, and keeping it would leave the
         # next message nested inside an unopened reply. Removed after the

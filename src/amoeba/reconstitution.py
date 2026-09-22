@@ -158,8 +158,13 @@ def group_units(messages: Sequence[Message]) -> list[Unit]:
 
 
 def attribute(units: Sequence[Unit], spans: Sequence[dict[str, Any]],
-              owed: set[Any]) -> None:
+              owed: set[Any], active: set[str] = frozenset()) -> None:
     """Which recorded turns each unit holds, and whether any is still owed.
+
+    Owed means an interaction is still waiting for its answer, or a turn's
+    thought is still being continued (`active`) -- a heartbeat waits on no
+    answer, but a continuation told to carry on from where it stopped needs
+    what it stopped in.
 
     A turn's span lies inside exactly one unit when the coordinates are
     current. A span that fits no unit is ignored rather than stretched to fit:
@@ -174,7 +179,7 @@ def attribute(units: Sequence[Unit], spans: Sequence[dict[str, Any]],
         u.turn_ids = [s["turn_id"] for s in held]
         if not held:
             u.status = "unknown"
-        elif any(s.get("lineage") in owed or s.get("open") for s in held):
+        elif any(s.get("lineage") in owed or s["turn_id"] in active for s in held):
             u.status = "owed"
         else:
             u.status = "settled"

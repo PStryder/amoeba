@@ -167,6 +167,38 @@ def test_a_turn_still_owed_an_answer_is_never_removed(mind):
         text.index('<tool_result name="history">', text.index("the live question"))
 
 
+def test_a_turn_being_continued_is_active_even_when_nobody_awaits_an_answer(mind):
+    """Measured live: a heartbeat cut off by pressure, with its continuation queued.
+
+    A heartbeat expects no answer, so its lineage is never owed -- and the
+    rebuild reported `units_owed: 0` for the very turn its continuation was
+    about to carry on from. It survived only because it was newest.
+    """
+    c = _eight()
+    c.turn("the heartbeat review", pad=10, calls=[("history", _history(3))])
+    h = _homeo(mind, c, fraction=0.05)
+    last = c.turns[-1]
+    mind.writer.apply(
+        lambda m: mailbox.enqueue(m, role="ego", kind="heartbeat", source="scheduler",
+                                  summary="review", expects_answer=False),
+        actor="test", bump_version=False)
+    _, turn = mind.writer.apply(
+        lambda m: mailbox.claim(m, mind, role="ego", incarnation=1, profile_ref="ego@1",
+                                profile_sha256="p", environment_sha256="e",
+                                environment_blob="eb"),
+        actor="ego", bump_version=False)
+    mind.writer.apply(
+        lambda m: mailbox.complete(m, mind, turn_id=turn["turn_id"],
+                                   stop_reason="max_output_tokens",
+                                   session_handle="sess_a", token_start=last["start"],
+                                   token_end=last["end"]),
+        actor="harness", bump_version=False)
+    assert turn["turn_id"] in mailbox.active_turns(mind.db.conn, "ego")
+    out = h.rejuvenate(role="ego", reason="t")
+    assert out["units_owed"] == 1
+    assert "the heartbeat review" in detokenize(_rebuilt(h, out))
+
+
 def test_an_owed_result_is_projected_never_deleted_and_its_exact_copy_is_there(mind):
     """I called X, here is a bounded view of what it returned, the rest is retrievable."""
     big = {"items": [{"n": j, "note": "y" * 60} for j in range(60)]}
