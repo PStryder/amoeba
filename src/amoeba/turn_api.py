@@ -228,7 +228,12 @@ def build(sup: "Supervisor") -> dict[str, Any]:  # noqa: C901
                         "tool": name, "accepted": bool(outcome.get("accepted")),
                         "reason": outcome.get("reason"),
                         "arguments": _redact(arguments or {}),
-                    }),
+                    # The turn's operation, so an operation's history shows
+                    # what its roles reached for -- untagged, every tool call
+                    # was invisible to the one query that asks what an
+                    # operation did.
+                    }, operation_id=(row["operation_id"] if row is not None
+                                     else None)),
                     actor=role_name or "harness", bump_version=False)
             except Exception:  # noqa: BLE001
                 sup.log.debug("could not record the role tool invocation",
@@ -237,7 +242,7 @@ def build(sup: "Supervisor") -> dict[str, Any]:  # noqa: C901
 
         row = mind.db.conn.execute(
             "SELECT role, status, operation_id FROM role_turns"
-            " WHERE turn_id = ?", (turn_id,)).fetchone()
+            " WHERE turn_id = ?", (turn_id,)).fetchone()  # read by _recorded
         if row is None:
             return _recorded({"accepted": False, "result": None,
                               "reason": "no such turn"})

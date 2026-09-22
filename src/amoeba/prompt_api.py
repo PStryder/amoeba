@@ -223,7 +223,8 @@ def build(sup: "Supervisor") -> dict[str, Any]:  # noqa: C901
         """
         sql = ("SELECT binding_id, actor_id, actor_kind, incarnation, work_id,"
                " namespace, profile_ref, prompt_sha256, config_sha256,"
-               " profile_sha256, model_generation, effective_settings, created_at"
+               " profile_sha256, model_generation, effective_settings,"
+               " harness_constraints, created_at"
                " FROM incarnation_profiles")
         params: tuple[Any, ...] = ()
         if namespace:

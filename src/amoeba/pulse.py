@@ -174,21 +174,38 @@ class PulseCollector:
                 "backend_kind": caps.get("backend_kind"),
                 "is_simulated": caps.get("is_simulated"),
                 "kv_mode": caps.get("kv_mode"),
-                "n_ctx": caps.get("n_ctx"),
-                "kv_cells_used": caps.get("used_cells"),
-                "kv_cells_total": caps.get("total_cells") or caps.get("n_ctx"),
+                "n_ctx": None, "kv_tokens_used": None, "kv_tokens_total": None,
             }
         except Exception as exc:  # noqa: BLE001
             facts["inference"] = {"reachable": False, "error": type(exc).__name__}
+        # Occupancy is measured by the inference service, and only there. These
+        # fields used to be read off `health` and a role's `health`, neither of
+        # which carries them, so the overview and `context_pressure` -- what Id
+        # watches -- were null on every pulse while looking informed.
+        by_session: dict[str, dict[str, Any]] = {}
+        if facts["inference"].get("reachable"):
+            try:
+                ctx = self.sup.client("inference", probe=True).call("context_report")
+                facts["inference"].update({
+                    "n_ctx": ctx.get("pool_capacity"),
+                    "kv_tokens_used": ctx.get("pool_tokens_used"),
+                    "kv_tokens_total": ctx.get("pool_capacity"),
+                })
+                by_session = {s.get("session_id"): s for s in ctx.get("sessions") or []}
+            except Exception:  # noqa: BLE001
+                pass
         for role in ("ego", "id"):
             try:
                 r = self.sup.client(role, probe=True).call("health")
+                # Measured the way the session's allowance is written, which is
+                # how homeostasis judges it.
+                held = by_session.get(r.get("session_id")) or {}
                 facts["roles"][role] = {
                     "reachable": True,
                     "incarnation": r.get("incarnation"),
                     "session_id": r.get("session_id"),
-                    "context_tokens": r.get("context_tokens"),
-                    "max_context_tokens": r.get("max_context_tokens"),
+                    "context_tokens": held.get("budgeted_tokens"),
+                    "max_context_tokens": held.get("budget_tokens"),
                     "pending_signals": r.get("pending_signals"),
                     "prompt_sha256": self.sup.role_prompt_digest.get(role),
                 }

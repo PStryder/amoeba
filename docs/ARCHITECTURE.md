@@ -1622,6 +1622,21 @@ refused and drops it too.
 → `test_a_late_reply_is_never_read_as_the_next_calls`,
 `test_a_reply_to_another_request_is_refused`
 
+**I121. What the operator is shown is measured, and attributed.** Three views
+from the second pressure run looked informed and were not. Every
+`role.tool_invoked` event carried no operation, so an operation's history
+never showed what its roles reached for; it now carries the turn's. The
+overview's role context and inference KV were null on every pulse, read off
+`health` replies that do not carry them -- and the same nulls fed
+`context_pressure`, which Id watches. They are now read from the inference
+service's own `context_report`, the one place occupancy is measured, with
+each role's session matched by id and judged the way its allowance is
+written. And `prompt_incarnations` omitted `harness_constraints`, so a
+ceiling the Harness supplied looked like one the profile stated.
+→ `test_a_role_tool_call_is_on_its_operations_history`,
+`test_the_overview_shows_measured_context`,
+`test_a_binding_shows_what_the_harness_supplied`
+
 **I73. A role is never wedged by a turn it did not close.** One open turn per
 role is a database constraint, so a turn left running blocks every future turn
 for that role — the role heartbeats, reports healthy, and never thinks again
