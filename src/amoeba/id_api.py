@@ -32,6 +32,9 @@ from .ids import new_id
 from .store.events import EventKind
 from .store.writer import Mutation
 
+SEVERITIES = ("notice", "concern", "urgent")
+TARGET_ROLES = ("ego", "id")
+
 if TYPE_CHECKING:
     from .supervisor import Supervisor
 
@@ -247,7 +250,7 @@ def build(sup: "Supervisor") -> dict[str, Any]:  # noqa: C901
         decides whether to act, applies its own rate limits, and performs the
         operation. A refusal is recorded as readily as an action.
         """
-        if target_role not in ("ego", "id"):
+        if target_role not in TARGET_ROLES:
             raise InvalidInput("rejuvenation targets ego or id", target_role=target_role)
         prov = _provenance(pulse_id, f"rejuvenate {target_role}: {reason[:60]}")
         out = sup.methods()["request_rejuvenation"](
@@ -279,7 +282,7 @@ def build(sup: "Supervisor") -> dict[str, Any]:  # noqa: C901
         one and reaches any namespace, roots included. Both go through the same
         store, so there is one creation path, not two governance schemes.
         """
-        if target_role not in ("ego", "id"):
+        if target_role not in TARGET_ROLES:
             raise InvalidInput("prompt proposals target ego or id", target_role=target_role)
         text = _text(prompt, "prompt", limit=20000)
         proposal_id = new_id("ppr")
@@ -366,9 +369,9 @@ def build(sup: "Supervisor") -> dict[str, Any]:  # noqa: C901
         operator will find it, rather than leaving Id to either overstep or
         stay silent.
         """
-        if severity not in ("notice", "concern", "urgent"):
+        if severity not in SEVERITIES:
             raise InvalidInput("unknown severity", severity=severity,
-                               allowed=["notice", "concern", "urgent"])
+                               allowed=list(SEVERITIES))
         escalation_id = new_id("esc")
         prov = _provenance(pulse_id, f"escalation: {summary[:80]}")
 

@@ -284,10 +284,16 @@ def build(sup: "Supervisor") -> dict[str, Any]:  # noqa: C901
             result = handler(**args)
         except Exception as exc:  # noqa: BLE001
             # Reported back as a failed call rather than killing the turn: the
-            # model may well be able to proceed without it.
+            # model may well be able to proceed without it. A refusal that
+            # knows what it would have accepted says so -- the check carried
+            # `allowed`, and it used to be dropped here, so the model was told
+            # "unknown post type" and never shown the list.
+            reason = f"{type(exc).__name__}: {exc}"
+            details = getattr(exc, "details", None) or {}
+            if isinstance(details, dict) and details.get("allowed"):
+                reason += f" (allowed: {', '.join(map(str, details['allowed']))})"
             return _recorded({"accepted": False, "result": None,
-                              "reason": f"{type(exc).__name__}: {exc}"[:500]},
-                             role_name=role)
+                              "reason": reason[:500]}, role_name=role)
         # Bounded here rather than in the role process: this is the side
         # that can store what does not fit, and a digest named by a notice has
         # to be a digest something actually holds.

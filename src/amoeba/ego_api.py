@@ -49,7 +49,10 @@ from typing import TYPE_CHECKING, Any, Sequence
 from .errors import InvalidInput, NotFound
 from .ids import new_id
 from .store.events import EventKind
+from .store.work_repo import BOARD_ACCESS, WORK_CLASSES
 from .store.writer import Mutation
+
+REVIEW_SUBJECTS = ("conclusion", "work", "memory", "artifact", "general")
 
 if TYPE_CHECKING:
     from .supervisor import Supervisor
@@ -211,7 +214,12 @@ def build(sup: "Supervisor") -> dict[str, Any]:  # noqa: C901
                          # library decides whether that profile exists.
                          specialisation: str | None = None,
                          operation_id: str | None = None) -> dict[str, Any]:
-        """Introduce an objective into the productive-work system.
+        """Delegate a bounded objective to one or more disposable neuocytes; use replicas and independent when independent investigation is useful.
+
+        It used to be described as "introduce an objective into the
+        productive-work system", which is true and says nothing about what
+        it gets you: another mind working on something. Nothing here says
+        when to use it -- only what it is.
 
         Ego states *intent* at whatever level of abstraction fits -- "answer
         this", "investigate that", "have several independent workers look at
@@ -227,9 +235,9 @@ def build(sup: "Supervisor") -> dict[str, Any]:  # noqa: C901
         ``independent=True`` admits each replica board-naive, so later
         agreement between them is replication rather than an echo.
         """
-        if work_class not in ("user", "maintenance"):
+        if work_class not in WORK_CLASSES:
             raise InvalidInput("unknown work class", work_class=work_class,
-                               allowed=["user", "maintenance"])
+                               allowed=list(WORK_CLASSES))
         if not 1 <= int(replicas) <= 8:
             raise InvalidInput("replicas must be between 1 and 8",
                                replicas=replicas)
@@ -239,7 +247,7 @@ def build(sup: "Supervisor") -> dict[str, Any]:  # noqa: C901
                 board_access=board_access,
                 hint="omit board_access, or pass 'none'")
         access = "none" if independent else (board_access or "read_write")
-        if access not in ("none", "read", "read_write"):
+        if access not in BOARD_ACCESS:
             raise InvalidInput("unknown board access", board_access=access)
 
         # A specialisation is a leaf name under this role's neuocyte
@@ -427,10 +435,9 @@ def build(sup: "Supervisor") -> dict[str, Any]:  # noqa: C901
         is the weakest possible review -- so this is how the outward half asks
         the inward one for a second opinion. Id decides whether to act.
         """
-        if subject not in ("conclusion", "work", "memory", "artifact", "general"):
+        if subject not in REVIEW_SUBJECTS:
             raise InvalidInput("unknown review subject", subject=subject,
-                               allowed=["conclusion", "work", "memory",
-                                        "artifact", "general"])
+                               allowed=list(REVIEW_SUBJECTS))
         request_id = new_id("rev")
 
         def body(m: Mutation) -> None:

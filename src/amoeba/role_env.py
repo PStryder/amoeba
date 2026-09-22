@@ -42,6 +42,7 @@ from typing import TYPE_CHECKING, Any
 from .errors import InvalidInput
 from .ids import sha256_hex
 from .scopes import model_facing_verbs
+from .vocabularies import allowed
 
 if TYPE_CHECKING:
     from .supervisor import Supervisor
@@ -68,8 +69,25 @@ def _summary(fn: Any) -> str:
     return first[:MAX_DESCRIPTION_CHARS] or "(no description)"
 
 
-def _schema(fn: Any) -> dict[str, Any]:
-    """Argument names, requiredness and defaults, from the real signature."""
+def _kind_of(annotation: str) -> str | None:
+    """A compact JSON kind for a non-string argument, from its annotation.
+
+    Shown because the model otherwise guesses: live, Ego passed `evidence` as
+    a string where a list was wanted and `confidence` as "high" where a number
+    was, and both calls were refused. Plain strings stay unmarked, which is
+    most arguments, so the declaration grows only where it was wrong.
+    """
+    a = annotation.replace("typing.", "").replace(" ", "")
+    for token, kind in (("Sequence", "list"), ("list", "list"), ("tuple", "list"),
+                        ("dict", "object"), ("Mapping", "object"),
+                        ("bool", "boolean"), ("float", "number"), ("int", "integer")):
+        if a.startswith(token) or f"|{token}" in a or a.startswith(f"{token}|"):
+            return kind
+    return None
+
+
+def _schema(fn: Any, verb: str = "") -> dict[str, Any]:
+    """Argument names, requiredness, defaults, kinds and accepted values."""
     try:
         sig = inspect.signature(fn)
     except (TypeError, ValueError):       # builtins and partials
@@ -93,6 +111,12 @@ def _schema(fn: Any) -> dict[str, Any]:
         if param.default is not param.empty and param.default is not None:
             if isinstance(param.default, (str, int, float, bool)):
                 entry["default"] = param.default
+        values = allowed(verb, name)
+        if values:
+            entry["allowed"] = list(values)
+        kind = _kind_of(str(entry.get("type", "")))
+        if kind:
+            entry["kind"] = kind
         args.append(entry)
     return {"arguments": args}
 
@@ -114,7 +138,7 @@ def capability_manifest(sup: "Supervisor", role: str) -> list[dict[str, Any]]:
                 verb=name, role=role,
                 hint="scopes.MODEL_FACING and the supervisor method table "
                      "have drifted apart")
-        out.append({"verb": name, "summary": _summary(fn), **_schema(fn)})
+        out.append({"verb": name, "summary": _summary(fn), **_schema(fn, name)})
     return out
 
 
@@ -213,6 +237,16 @@ def build(sup: "Supervisor", role: str, *, incarnation: int | None = None,
     return manifest
 
 
+def _render_argument(a: dict[str, Any]) -> str:
+    """`name`, `name?`, `name:list?`, or `name:{a|b|c}` -- what it takes, tersely."""
+    text = a["name"]
+    if a.get("allowed"):
+        text += ":{" + "|".join(a["allowed"]) + "}"
+    elif a.get("kind"):
+        text += ":" + a["kind"]
+    return text + ("" if a["required"] else "?")
+
+
 def render(manifest: dict[str, Any]) -> str:
     """The manifest as the compact text a role actually reads.
 
@@ -242,9 +276,7 @@ def render(manifest: dict[str, Any]) -> str:
     lines.append("")
     lines.append(f"capabilities you may invoke now ({len(manifest['capabilities'])}):")
     for cap in manifest["capabilities"]:
-        args = ", ".join(
-            a["name"] + ("" if a["required"] else "?")
-            for a in cap.get("arguments", []))
+        args = ", ".join(_render_argument(a) for a in cap.get("arguments", []))
         lines.append(f"  {cap['verb']}({args}) - {cap['summary']}")
 
     lines.append("")

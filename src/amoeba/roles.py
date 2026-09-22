@@ -121,6 +121,20 @@ refuses it, and returns the outcome to you. Anything not in that form is read
 as your reply.
 """
 
+# What a turn reads when its session already holds this exact declaration.
+# The digest was identical on every turn measured live, and the full block was
+# re-ingested anyway: 1071 tokens a turn for Id, accumulating as duplicates in
+# one session until it hit its budget -- two of Id's five turns in the first
+# pressure run ended in context pressure, and its one heartbeat went on its own
+# context instead of on anything worth auditing. The call form is repeated
+# because it is cheap and it is the part that must never be missing.
+ENVIRONMENT_UNCHANGED = """<role_environment unchanged: {sha}>
+The capability declaration given earlier in this conversation still applies,
+unchanged, for this turn. To use a capability, emit
+<tool_call>{{"name": "<verb>", "arguments": {{"<argument>": <value>}}}}</tool_call>
+and wait for the Harness result before continuing.
+"""
+
 TOOL_RESULT_BLOCK = """<tool_result name="{name}">
 {result}
 </tool_result>
@@ -486,6 +500,7 @@ class RoleProcess:
         """
         resumed = environment is not None and self._can_resume(resume)
         carry = str((resume or {}).get("carry") or "") if resumed else ""
+        rendered = "full"
         if environment is not None:
             # Built by the Harness when it claimed this turn, in the same
             # transaction that froze the trigger bundle. Reusing it is what
@@ -493,7 +508,16 @@ class RoleProcess:
             # the same instant.
             self.environment = environment["manifest"]
             self.environment_blob = environment.get("environment_blob")
-            env_block = ENVIRONMENT_BLOCK.format(environment=environment["text"])
+            sha = (self.environment or {}).get("environment_sha256") or ""
+            held = getattr(self, "_declared", None)
+            if sha and held == (self.session_id, sha):
+                # This session already read exactly this declaration. A new
+                # session -- every rejuvenation makes one -- or any change to
+                # the digest gets the whole thing again.
+                env_block = ENVIRONMENT_UNCHANGED.format(sha=sha[:12])
+                rendered = "reference"
+            else:
+                env_block = ENVIRONMENT_BLOCK.format(environment=environment["text"])
         else:
             env_block = self._begin_turn(trigger or user_text[:200])
         max_tool_turns = (self.cfg.arbiter.max_tool_turns
@@ -514,6 +538,10 @@ class RoleProcess:
             out = self._infer(first if turn == 0 and not resumed else "",
                               max_tokens=max_tokens, temperature=temperature,
                               skip_input=turn > 0 or resumed)
+            if turn == 0 and not resumed and environment is not None:
+                # It is in the session now; the next turn can refer to it.
+                self._declared = (self.session_id,
+                                  (self.environment or {}).get("environment_sha256"))
             # A tool call the ceiling cut in half is finished by the resumed
             # generation, so the two halves are read together.
             said = carry + out["text"] if turn == 0 and resumed else out["text"]
@@ -563,7 +591,11 @@ class RoleProcess:
                 # Whether this turn continued its parent's message in place.
                 # On the record because it decides how the answer is joined:
                 # a resumed piece is the same message, byte for byte.
-                "resumed": resumed}
+                "resumed": resumed,
+                # Whether the declaration was ingested in full or referred to.
+                # The recorded environment is the authority either way; this
+                # says what text the session actually received.
+                "environment_rendered": rendered if not resumed else "none"}
 
     def _can_resume(self, resume: dict[str, Any] | None) -> bool:
         """Is the session still exactly where the parent turn left it?
@@ -852,6 +884,7 @@ class RoleProcess:
                 "segment": out.get("text", ""),
                 "resumed": bool(out.get("resumed")),
                 "malformed_call": out.get("malformed_call"),
+                "environment_rendered": out.get("environment_rendered"),
                 "is_simulated": bool(out.get("is_simulated")),
                 "model_generation": out.get("model_generation")}
 
@@ -939,6 +972,7 @@ class EgoProcess(RoleProcess):
         return {"answer": text, "segment": out.get("text", ""),
                 "resumed": bool(out.get("resumed")),
                 "malformed_call": out.get("malformed_call"),
+                "environment_rendered": out.get("environment_rendered"),
                 "answered_triggers": list(answered),
                 "tool_calls": out.get("tool_calls", []),
                 "tool_requests": [{"name": c.get("tool"),
@@ -1111,6 +1145,7 @@ class IdProcess(RoleProcess):
                 "segment": out.get("text", ""),
                 "resumed": bool(out.get("resumed")),
                 "malformed_call": out.get("malformed_call"),
+                "environment_rendered": out.get("environment_rendered"),
                 "tool_calls": out.get("tool_calls", []),
                 "environment_sha256": out.get("environment_sha256"),
                 "profile_ref": out.get("profile_ref"),

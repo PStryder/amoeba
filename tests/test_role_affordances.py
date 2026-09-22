@@ -405,3 +405,68 @@ def test_a_live_malformed_attempt_is_corrected_not_delivered(tmp_path):
         assert turn["tool_call_count"] == 0
     finally:
         stack.stop()
+
+
+# ---------------------------------------------------------------------------
+# D7: an unchanged declaration is not re-sent into a session that holds it
+# ---------------------------------------------------------------------------
+def _env(sha="sha_one"):
+    return {"manifest": {"environment_sha256": sha}, "text": "DECLARED VERBS",
+            "environment_blob": None}
+
+
+def _shown_per_turn(role, envs, sessions):
+    seen = []
+    role._infer = lambda text, **_: (seen.append(text), {"text": "ok",
+                                                         "finish_reason": "stop"})[1]
+    role._can_resume = lambda resume: False
+    outs = []
+    for env, session in zip(envs, sessions):
+        role.session_id = session
+        outs.append(role._turn("q", environment=env))
+    return seen, outs
+
+
+def test_a_session_reads_an_unchanged_declaration_once():
+    role = _bare_role()
+    seen, outs = _shown_per_turn(role, [_env(), _env(), _env()],
+                                 ["s1", "s1", "s1"])
+    assert "DECLARED VERBS" in seen[0]
+    for later in seen[1:]:
+        assert "DECLARED VERBS" not in later, "an unchanged declaration was re-sent"
+        assert "unchanged" in later
+        # The call form is never the thing that goes missing.
+        _taught(later)
+    assert [o["environment_rendered"] for o in outs] == ["full", "reference", "reference"]
+
+
+def test_a_new_session_or_a_changed_declaration_gets_the_whole_thing():
+    """Every rejuvenation makes a new session; it must not inherit a reference."""
+    role = _bare_role()
+    seen, outs = _shown_per_turn(role, [_env("a"), _env("a"), _env("b")],
+                                 ["s1", "s2", "s2"])
+    assert all("DECLARED VERBS" in text for text in seen)
+    assert [o["environment_rendered"] for o in outs] == ["full", "full", "full"]
+
+
+@live
+def test_a_second_turn_does_not_pay_for_the_declaration_again(tmp_path):
+    """Measured, not assumed: the second turn's session span shrinks by the block."""
+    stack = start_stack(tmp_path, scheduler={"id_startup_turn": False})
+    try:
+        stack.wait_for_children(timeout=90)
+        spans = []
+        for message in ("first", "second"):
+            env = stack.call("ego_converse", message=message, wait=False)
+            deadline = time.time() + 120
+            while stack.call("role_answer", trigger_id=env["result"]["trigger_id"])[
+                    "status"] not in ("completed", "incomplete", "unanswerable"):
+                assert time.time() < deadline
+                time.sleep(0.3)
+            turn = stack.call("role_turns", role="ego")["turns"][0]
+            d = stack.call("role_turn", turn_id=turn["turn_id"])
+            spans.append(d["token_end"] - d["token_start"])
+        declared = len(stack.call("role_environment", role="ego")["text"].split())
+        assert spans[1] < spans[0] - declared * 0.8, (spans, declared)
+    finally:
+        stack.stop()

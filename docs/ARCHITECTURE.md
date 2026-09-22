@@ -1566,6 +1566,35 @@ Converse shows that plainly rather than the raw call.
 `test_converse_never_shows_the_raw_call`,
 `test_a_live_malformed_attempt_is_corrected_not_delivered`
 
+**I117. What a capability accepts is declared, and a refusal says what it
+would have accepted.** A verb that takes `post_type` or `kind` without saying
+what the valid values are is present and undiscoverable. Live, Ego tried
+`incident_synthesis` for both and was refused each time with nothing more
+than "unknown post type" -- the checks carried the allowed values and the
+dispatcher dropped them. Each vocabulary is now one constant, read by the
+check and by the declaration alike, so the two cannot drift; the declaration
+marks non-string arguments with their kind (`evidence:list`,
+`confidence:number`), because those were the other things Ego guessed wrong;
+and a refusal carries its allowed values back to the model.
+→ `test_every_declared_vocabulary_is_the_one_enforced`,
+`test_the_roles_are_told_the_values_they_are_checked_against`,
+`test_a_refusal_says_what_would_have_been_accepted`,
+`test_no_vocabulary_is_still_spelled_inline_where_it_is_checked`
+
+**I118. A session reads an unchanged declaration once.** Each role's environment
+digest was identical on every turn measured, and the full declaration was
+ingested every turn anyway -- 1071 tokens for Id, accumulating as duplicates
+in a single session. That, not the number of verbs, is what kept Id in
+context pressure: two of its five turns in the first pressure run ended
+there, and its one heartbeat was spent on its own context. The whole
+declaration is now rendered once per session; a later turn with the same
+digest gets a one-line reference and the call form. A changed digest, or a
+new session -- which every rejuvenation makes -- gets it in full, and the
+turn records which it received.
+→ `test_a_session_reads_an_unchanged_declaration_once`,
+`test_a_new_session_or_a_changed_declaration_gets_the_whole_thing`,
+`test_a_second_turn_does_not_pay_for_the_declaration_again`
+
 **I73. A role is never wedged by a turn it did not close.** One open turn per
 role is a database constraint, so a turn left running blocks every future turn
 for that role — the role heartbeats, reports healthy, and never thinks again
