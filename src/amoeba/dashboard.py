@@ -297,11 +297,16 @@ function conversation(main, spec) {
       // Only a terminal state ends the wait. A thought cut off by one
       // bounded turn is still being answered, and nothing it has said so far
       // is shown as if it were the reply.
-      if (s.status === "completed") return {text: s.answer, complete: true};
+      const withheld = (s.withheld || []).length > 0;
+      if (s.status === "completed")
+        return {text: s.answer, complete: true, withheld: withheld};
       if (s.status === "incomplete")
-        return {text: s.answer, complete: false};
+        return {text: s.answer, complete: false, withheld: withheld};
       if (s.status === "unanswerable")
-        throw new Error("the thought ended without an answer to this message");
+        throw new Error(withheld
+          ? "Ego tried to use a capability but wrote the request in a form " +
+            "the Harness could not read, so nothing was delivered as an answer"
+          : "the thought ended without an answer to this message");
       if (s.status === "expired")
         throw new Error("this message was not delivered");
       if (Date.now() > until)
@@ -335,6 +340,12 @@ function conversation(main, spec) {
       const was = atBottom();
       pending.body.className = "said";
       pending.body.textContent = answer.text || "(it answered with nothing)";
+      if (answer.withheld) {
+        // Never the raw request: a malformed call is not part of the reply.
+        pending.turn.appendChild(el("div","cutoff",
+          "part of this reply was a capability request the Harness could " +
+          "not read, and is not shown"));
+      }
       if (!answer.complete) {
         // Everything that was said, and one quiet line saying it stops
         // there. Not the mechanism -- the operator does not need to know

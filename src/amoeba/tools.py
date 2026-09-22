@@ -173,6 +173,48 @@ def parse_tool_calls(text: str, *, limit: int = 4) -> list[ToolCallRequest]:
     return out
 
 
+def malformed_call(text: str, offered) -> str | None:
+    """The capability a reply tried to call without the call syntax, if any.
+
+    Structural rather than a guess at intent. Flagged only when a line
+    *begins* with a verb offered this turn applied like a function
+    (`board_post(...)`, which is what Ego wrote live), or with a JSON object
+    naming one, or when the reply carries tool-call markup the parser could
+    not read. Inline code inside prose is left alone: a line that begins with
+    a backtick or a list marker is a sentence quoting a call, not an attempt
+    to make one -- and the live answer that listed "`get_memory(memory_id)`"
+    was exactly that.
+
+    Returns the verb, "<tool_call>" for unreadable markup, or None.
+    """
+    verbs = sorted({str(v) for v in offered}, key=len, reverse=True)
+    for raw in text.splitlines():
+        line = raw.strip()
+        for verb in verbs:
+            if line.startswith(verb + "("):
+                return verb
+            if re.match(r'\{\s*"(?:name|tool)"\s*:\s*"' + re.escape(verb) + '"',
+                        line):
+                return verb
+    if ("<tool_call>" in text or "</tool_call>" in text) and not parse_tool_calls(text):
+        return "<tool_call>"
+    return None
+
+
+def malformed_reason(attempt: str) -> str:
+    """What the model is told when it wrote a request in the wrong form."""
+    if attempt == "<tool_call>":
+        head = "not executed: the <tool_call> block could not be read"
+        form = '<tool_call>{"name": "<verb>", "arguments": {...}}</tool_call>'
+    else:
+        head = (f"not executed: {attempt}(...) was written as text, not as a "
+                "capability request")
+        form = ('<tool_call>{"name": "' + attempt
+                + '", "arguments": {...}}</tool_call>')
+    return (f"{head}, and it was not delivered as your reply. To make the "
+            f"request, emit {form}. To answer instead, reply in prose.")
+
+
 def strip_tool_calls(text: str) -> str:
     return TOOL_CALL_RE.sub("", text).strip()
 

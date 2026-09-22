@@ -1006,6 +1006,7 @@ def build(sup: "Supervisor") -> dict[str, Any]:
                 return {"status": "completed" if finished else "incomplete",
                         "complete": finished,
                         "ended_because": record.get("ended_because"),
+                        "withheld": record.get("withheld") or [],
                         "turn_id": row["answered_by_turn"],
                         "stop_reason": turn["stop_reason"] if turn else None,
                         "result": result,
@@ -1014,7 +1015,15 @@ def build(sup: "Supervisor") -> dict[str, Any]:
                         "profile_ref": turn["profile_ref"] if turn else None}
 
             if row["answer_status"] == "unanswerable":
+                record = {}
+                if row["answer_sha256"]:
+                    try:
+                        record = mind.blobs.get_json(row["answer_sha256"]) or {}
+                    except Exception:  # noqa: BLE001
+                        record = {}
                 return {"status": "unanswerable",
+                        "ended_because": record.get("ended_because"),
+                        "withheld": record.get("withheld") or [],
                         "turn_id": row["answered_by_turn"],
                         "result": {"answer": ""},
                         "note": ("the thought ended without producing an "
@@ -1049,8 +1058,10 @@ def build(sup: "Supervisor") -> dict[str, Any]:
         out = {"trigger_id": trigger_id, "status": settled["status"],
                "answer": result.get("answer", ""),
                "is_simulated": bool(result.get("is_simulated"))}
-        if settled["status"] == "incomplete":
+        if settled["status"] in ("incomplete", "unanswerable"):
             out["ended_because"] = settled.get("ended_because")
+        if settled.get("withheld"):
+            out["withheld"] = settled["withheld"]
         if settled.get("note"):
             out["note"] = settled["note"]
         return out

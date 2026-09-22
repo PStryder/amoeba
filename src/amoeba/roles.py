@@ -36,7 +36,8 @@ from .ids import new_id, sha256_hex
 from .logging_setup import get_logger, setup_logging
 from .rpc import RpcClient, RpcServer, read_or_create_token
 from .promptlib.model import fallback_output_ceiling
-from .tools import parse_tool_calls, strip_tool_calls
+from .tools import (malformed_call, malformed_reason, parse_tool_calls,
+                    strip_tool_calls)
 
 # What a mind is primed with when the Prompt Library has nothing selected --
 # a partial bootstrap. It is the shipped text of the governed root, not a
@@ -102,11 +103,22 @@ circumvented.
 Be terse and specific."""
 
 
+# The call syntax is stated here because nothing else ever stated it. The
+# role tool loop parses exactly this form (`tools.TOOL_CALL_RE`), and until
+# it was written down no role had been told it: across the organism's whole
+# recorded life not one Ego or Id turn executed a tool. Ego wrote
+# `board_post(author=...)` as a Python call instead, which nothing parsed, and
+# the raw text was delivered to the operator as its answer. Neuocytes were
+# always told (`ToolRegistry.prompt_block`); the persistent roles never were.
+# `test_a_role_is_taught_the_syntax_its_parser_accepts` holds the two together.
 ENVIRONMENT_BLOCK = """{environment}
 
 The declaration above is authoritative for this turn. To use a capability,
-emit a single tool call and stop; the Harness will run it and return the
-result, after which you may continue or call another.
+emit exactly one block of this form, naming a verb from the declaration:
+<tool_call>{{"name": "<verb>", "arguments": {{"<argument>": <value>}}}}</tool_call>
+Then wait for the Harness result before continuing: it runs the request, or
+refuses it, and returns the outcome to you. Anything not in that form is read
+as your reply.
 """
 
 TOOL_RESULT_BLOCK = """<tool_result name="{name}">
@@ -170,6 +182,15 @@ class RoleProcess:
                              self.scope_token, name=f"{self.role}->supervisor")
         self.inf = RpcClient(cfg.supervisor_host, cfg.inference_port, self.token,
                              name=f"{self.role}->inference")
+        # A second connection, used only to answer health probes. `RpcClient`
+        # holds one lock for a whole request, and the turn thread holds it on
+        # `self.inf` for as long as a generation runs -- so a health check
+        # through that client waited for the generation, the supervisor's
+        # probe timed out, and a role that was busy thinking was restarted as
+        # dead. At a 3072-token ceiling that is most long answers.
+        self.inf_probe = RpcClient(cfg.supervisor_host, cfg.inference_port,
+                                   self.token, timeout=1.5,
+                                   name=f"{self.role}->inference(probe)")
         self.session_id: str | None = None
         self.model_generation = ""
         self.capabilities: dict[str, Any] = {}
@@ -483,6 +504,7 @@ class RoleProcess:
         trace: list[dict[str, Any]] = []
         out: dict[str, Any] = {}
         stop_reason = "answered"
+        malformed: str | None = None
         first = env_block + user_text if env_block else user_text
 
         for turn in range(max(1, max_tool_turns)):
@@ -496,27 +518,44 @@ class RoleProcess:
             # generation, so the two halves are read together.
             said = carry + out["text"] if turn == 0 and resumed else out["text"]
             requests = parse_tool_calls(said, limit=1)
-            if not requests:
+            # A request in the wrong form is still a request, not a reply.
+            # Treated as a refused one: the model is told it was not run and
+            # not delivered, and shown the form -- so one typo costs a retry
+            # instead of turning the operator's answer into a service hatch.
+            attempt = None if requests else malformed_call(said, self._offered())
+            if not requests and attempt is None:
                 stop_reason = "answered"
                 break
+            name = requests[0].name if requests else attempt
             if turn == max_tool_turns - 1:
                 # Do not run something whose result it will never see.
                 stop_reason = "tool_turn_limit_reached"
-                trace.append({"turn": turn, "tool": requests[0].name,
-                              "executed": False,
+                trace.append({"turn": turn, "tool": name, "executed": False,
+                              "malformed": attempt is not None,
                               "reason": "tool turn limit reached before execution"})
+                malformed = attempt
                 break
-            req = requests[0]
-            res = self._invoke(req.name, req.arguments)
-            trace.append({"turn": turn, "tool": req.name, "executed": True,
+            if requests:
+                res = self._invoke(requests[0].name, requests[0].arguments)
+            else:
+                res = {"accepted": False, "result": None, "error": None,
+                       "reason": malformed_reason(attempt)}
+            trace.append({"turn": turn, "tool": name, "executed": bool(requests),
+                          "malformed": attempt is not None,
                           "accepted": res.get("accepted"),
                           "reason": res.get("reason")})
-            self._feed_tool_result(req.name, res)
+            self._feed_tool_result(name, res)
         else:
             stop_reason = "tool_turn_limit_reached"
 
         return {**out, "stop_reason": stop_reason, "tool_calls": trace,
-                "tool_call_count": len(trace),
+                # Requests the Harness was asked to run. A malformed attempt
+                # is recorded in the trace but is not one of these.
+                "tool_call_count": sum(1 for t in trace if not t.get("malformed")),
+                # Set when the turn's last generation was still a malformed
+                # attempt: that text is not a reply, and must not be shown as
+                # one.
+                "malformed_call": malformed,
                 "environment_sha256": (self.environment or {}).get(
                     "environment_sha256"),
                 "environment_blob": self.environment_blob,
@@ -601,12 +640,19 @@ class RoleProcess:
         }
 
     def health(self) -> dict[str, Any]:
-        """Answerable even when inference is broken."""
+        """Answerable even when inference is broken -- or busy.
+
+        Never through `self.inf`, which a running turn holds for the length of
+        a generation. A probe that waited on a busy mind reported it dead.
+        """
         inf_ok, inf_detail = True, "ok"
         try:
-            self.inf.call("health")
+            self.inf_probe.call("health")
         except Exception as exc:  # noqa: BLE001
             inf_ok, inf_detail = False, repr(exc)
+            # A call that timed out mid-read leaves its reply in the socket,
+            # and the next call would read it as its own. Start clean.
+            self.inf_probe.close()
         return {
             "role": self.role,
             "status": "alive",
@@ -805,6 +851,7 @@ class RoleProcess:
         return {"text": strip_tool_calls(out.get("text", "")),
                 "segment": out.get("text", ""),
                 "resumed": bool(out.get("resumed")),
+                "malformed_call": out.get("malformed_call"),
                 "is_simulated": bool(out.get("is_simulated")),
                 "model_generation": out.get("model_generation")}
 
@@ -891,6 +938,7 @@ class EgoProcess(RoleProcess):
         # token ceiling a segment runs well past 4000 characters.
         return {"answer": text, "segment": out.get("text", ""),
                 "resumed": bool(out.get("resumed")),
+                "malformed_call": out.get("malformed_call"),
                 "answered_triggers": list(answered),
                 "tool_calls": out.get("tool_calls", []),
                 "tool_requests": [{"name": c.get("tool"),
@@ -1062,6 +1110,7 @@ class IdProcess(RoleProcess):
         return {"text": strip_tool_calls(out.get("text", "")).strip(),
                 "segment": out.get("text", ""),
                 "resumed": bool(out.get("resumed")),
+                "malformed_call": out.get("malformed_call"),
                 "tool_calls": out.get("tool_calls", []),
                 "environment_sha256": out.get("environment_sha256"),
                 "profile_ref": out.get("profile_ref"),

@@ -251,7 +251,19 @@ class DeterministicBackend:
         Two sessions with identical contexts produce identical output; any
         cross-session contamination therefore shows up immediately as a changed
         string, which is what makes this useful for isolation tests.
+
+        A scripted reply may carry `delay_seconds`: a generation that takes a
+        while, so a test can hold a turn open past the supervisor's probe
+        grace. It sleeps outside the lock, as a real engine decoding would --
+        the service stays answerable while one generation takes its time.
         """
+        delay = 0.0
+        with self._lock:
+            head = self._scripted[0] if self._scripted else None
+            if isinstance(head, dict):
+                delay = float(head.get("delay_seconds") or 0.0)
+        if delay > 0:
+            time.sleep(delay)
         with self._lock:
             sess = self.get_session(session_id)
             if sess.cancel_requested:

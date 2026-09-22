@@ -721,6 +721,15 @@ def assemble_answer(conn, blobs, *, admitting_turn: str, turn_id: str,
     for ordinal, tid in enumerate(chain):
         res = result if tid == turn_id else _turn_result(conn, blobs, tid)
         resumed = bool(isinstance(res, dict) and res.get("resumed"))
+        if isinstance(res, dict) and res.get("malformed_call"):
+            # A capability request in the wrong form is not part of any reply.
+            # Withheld whole rather than trimmed -- trimming would be a guess
+            # about where the attempt ends -- and kept intact in the turn's own
+            # result, so nothing is lost, only not presented as an answer.
+            segments.append({"ordinal": ordinal, "turn_id": tid, "chars": 0,
+                             "resumed": resumed,
+                             "withheld": f"malformed call: {res['malformed_call']}"})
+            continue
         # Joined exactly, with nothing between the pieces that the model did
         # not write. A continuation is told its output is appended directly,
         # so inserting a paragraph break would contradict what it was told --
@@ -809,10 +818,20 @@ def complete(m: Mutation, mind: "Mind", *, turn_id: str, stop_reason: str,
                 mind.db.conn, mind.blobs, admitting_turn=req["turn_id"],
                 turn_id=turn_id, result=result)
             conclusion_id = None
+            withheld = [s["withheld"] for s in segments if s.get("withheld")]
             if not text:
                 # Nothing was said at all. Saying so lets a caller stop
                 # waiting instead of hanging on a thought that already ended.
-                sha, state = None, "unanswerable"
+                # When something *was* written but withheld as a malformed
+                # call, the record says so, rather than calling it silence.
+                state = "unanswerable"
+                sha = m.put_json(
+                    {"answer": "", "complete": False,
+                     "ended_because": "malformed_call" if withheld else ended_because,
+                     "withheld": withheld, "turn_id": turn_id,
+                     "stop_reason": stop_reason, "role": row["role"],
+                     "segments": segments},
+                    schema="amoeba.trigger_answer/2") if withheld else None
             else:
                 state = "answered" if finished else "incomplete"
                 if finished and row["role"] == "ego":
@@ -837,7 +856,7 @@ def complete(m: Mutation, mind: "Mind", *, turn_id: str, stop_reason: str,
                     {"answer": text, "complete": finished,
                      "ended_because": ended_because, "turn_id": turn_id,
                      "stop_reason": stop_reason, "role": row["role"],
-                     "conclusion_id": conclusion_id,
+                     "conclusion_id": conclusion_id, "withheld": withheld,
                      # Which turns the answer came from, in order. The text
                      # lives in each turn's own result; this is the index,
                      # so provenance points back at the producing turns

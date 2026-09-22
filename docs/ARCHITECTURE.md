@@ -1505,6 +1505,48 @@ audit still finds it and still resolves it to exactly the turns that wrote it.
 `test_the_live_three_turn_answer_is_one_conclusion`,
 `test_id_audits_ego_conclusion_without_asking_ego`
 
+**I113. A role is taught the call syntax its parser accepts.** The role tool
+loop parses exactly `<tool_call>{"name": ..., "arguments": ...}</tool_call>`,
+and until this it told no role so: neuocytes were shown the form, Ego and Id
+were shown verbs and arguments and nothing about how to invoke one. Across
+the organism's recorded life not one Ego or Id turn executed a tool -- every
+affordance was unreachable, and every observation about what Ego "chose" to
+do with them would have been an observation about that. The environment
+block now states the form, and a test fills in the taught template and hands
+it to the loop's own parser, so the two cannot drift apart.
+→ `test_a_role_is_taught_the_syntax_its_parser_accepts`,
+`test_the_role_is_told_to_wait_for_the_result_not_to_stop`
+
+**I114. A role is not restarted for thinking.** `RpcClient` holds one lock for
+a whole request, and a role's health handler asked inference through the
+client its turn thread holds for the length of a generation. A busy role
+therefore failed its liveness probe, and after the grace period the
+supervisor restarted it mid-turn. At 384 output tokens a generation never
+outlasted the grace; at Ego's 3072 most long answers did. Health now uses a
+connection of its own, closed after any failure so a late reply cannot be
+read by the next probe.
+→ `test_health_answers_while_a_turn_holds_the_inference_client`,
+`test_a_long_generation_does_not_get_its_role_restarted`,
+`test_a_failed_probe_leaves_no_reply_behind_for_the_next`
+
+**I115. A malformed capability call is never delivered as an answer.** Teaching
+the syntax is the fix; this is what keeps one typo from turning the
+operator's answer into a service hatch. A reply whose line begins with an
+offered verb applied like a function, or with a JSON object naming one, or
+that carries tool-call markup the parser could not read, is a request in the
+wrong form -- recognised structurally, not guessed at, and inline code quoted
+in prose is left alone. It is refused like any other request the Harness
+will not run: the model is told it was neither executed nor delivered, and
+shown the form. If a thought ends still malformed, that piece is withheld
+from the answer, kept intact in its turn's record, and the answer says so --
+Converse shows that plainly rather than the raw call.
+→ `test_a_malformed_attempt_is_refused_and_the_model_may_try_again`,
+`test_a_turn_that_ends_still_malformed_is_flagged_not_answered`,
+`test_a_malformed_piece_is_withheld_from_the_answer_and_recorded`,
+`test_an_answer_that_was_only_a_malformed_call_says_so`,
+`test_converse_never_shows_the_raw_call`,
+`test_a_live_malformed_attempt_is_corrected_not_delivered`
+
 **I73. A role is never wedged by a turn it did not close.** One open turn per
 role is a database constraint, so a turn left running blocks every future turn
 for that role — the role heartbeats, reports healthy, and never thinks again
