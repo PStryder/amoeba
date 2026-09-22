@@ -35,6 +35,7 @@ from .errors import BackendUnavailable, NotFound
 from .ids import new_id, sha256_hex
 from .logging_setup import get_logger, setup_logging
 from .rpc import RpcClient, RpcServer, read_or_create_token
+from .promptlib.model import fallback_output_ceiling
 from .tools import parse_tool_calls, strip_tool_calls
 
 # What a mind is primed with when the Prompt Library has nothing selected --
@@ -439,7 +440,8 @@ class RoleProcess:
     def _turn(self, user_text: str, *, trigger: str = "", max_tokens: int | None = None,
               temperature: float | None = None, max_tool_turns: int | None = None,
               deadline: float | None = None,
-              environment: dict[str, Any] | None = None) -> dict[str, Any]:
+              environment: dict[str, Any] | None = None,
+              resume: dict[str, Any] | None = None) -> dict[str, Any]:
         """One bounded cognitive turn with the environment and the tool loop.
 
         Environment, then turn input, then generation; a tool request is run
@@ -452,7 +454,17 @@ class RoleProcess:
         Bounded three ways, like the neuocyte loop: tool turns, the deadline,
         and the model's own token budget. Whichever binds first ends the turn
         and the reason is returned rather than swallowed.
+
+        A continuation whose parent was cut off by its output ceiling resumes
+        that very message: nothing is appended, and generation simply carries
+        on from the token where it stopped. Handing the model a fresh "please
+        continue" message instead closed its unfinished reply, so every piece
+        of a long answer came back opening with "Continuing from where the
+        previous analysis left off" -- and cost the whole environment again,
+        about nine hundred tokens, before it said a word.
         """
+        resumed = environment is not None and self._can_resume(resume)
+        carry = str((resume or {}).get("carry") or "") if resumed else ""
         if environment is not None:
             # Built by the Harness when it claimed this turn, in the same
             # transaction that froze the trigger bundle. Reusing it is what
@@ -477,10 +489,13 @@ class RoleProcess:
             if time.time() >= deadline:
                 stop_reason = "deadline_reached"
                 break
-            out = self._infer(first if turn == 0 else "",
+            out = self._infer(first if turn == 0 and not resumed else "",
                               max_tokens=max_tokens, temperature=temperature,
-                              skip_input=turn > 0)
-            requests = parse_tool_calls(out["text"], limit=1)
+                              skip_input=turn > 0 or resumed)
+            # A tool call the ceiling cut in half is finished by the resumed
+            # generation, so the two halves are read together.
+            said = carry + out["text"] if turn == 0 and resumed else out["text"]
+            requests = parse_tool_calls(said, limit=1)
             if not requests:
                 stop_reason = "answered"
                 break
@@ -505,7 +520,26 @@ class RoleProcess:
                 "environment_sha256": (self.environment or {}).get(
                     "environment_sha256"),
                 "environment_blob": self.environment_blob,
-                "profile_ref": self.profile_ref}
+                "profile_ref": self.profile_ref,
+                # Whether this turn continued its parent's message in place.
+                # On the record because it decides how the answer is joined:
+                # a resumed piece is the same message, byte for byte.
+                "resumed": resumed}
+
+    def _can_resume(self, resume: dict[str, Any] | None) -> bool:
+        """Is the session still exactly where the parent turn left it?
+
+        The Harness offers a resume point from what it recorded; only this
+        process can see the session. A rejuvenation replaces it, and anything
+        else appended moves its end -- and generating from the wrong place
+        would continue a sentence the model is no longer looking at.
+        """
+        if not resume or resume.get("session_handle") != self.session_id:
+            return False
+        try:
+            return self._context_length() == int(resume.get("token_end"))
+        except Exception:  # noqa: BLE001 - unmeasurable is not resumable
+            return False
 
     def _infer(self, user_text: str, *, max_tokens: int | None = None,
                temperature: float | None = None, seed: int | None = None,
@@ -524,7 +558,11 @@ class RoleProcess:
         """
         settings = self.profile_settings
         if max_tokens is None:
-            max_tokens = int(settings.get("max_tokens", 384))
+            # The role's own fallback, not a number shared by every mind.
+            # This was a hardcoded 384, and because the Ego root shipped
+            # without a ceiling it was how much Ego could say to anyone.
+            max_tokens = int(settings.get(
+                "max_tokens", fallback_output_ceiling(self.role)))
         elif "max_tokens" in settings:
             max_tokens = min(int(max_tokens), int(settings["max_tokens"]))
         if temperature is None:
@@ -682,7 +720,7 @@ class RoleProcess:
         try:
             out = self._turn(
                 turn["text"], trigger=f"turn {turn_id}",
-                environment=environment,
+                environment=environment, resume=turn.get("resume"),
                 deadline=time.time() + self.cfg.scheduler.turn_wall_seconds)
             stop_reason = self._stop_reason_for(out)
             tool_calls = out.get("tool_call_count", 0)
@@ -764,7 +802,9 @@ class RoleProcess:
     def on_turn(self, turn: dict[str, Any], out: dict[str, Any]
                 ) -> dict[str, Any]:
         """What this role does with a completed turn. Overridden per role."""
-        return {"text": strip_tool_calls(out.get("text", ""))[:4000],
+        return {"text": strip_tool_calls(out.get("text", "")),
+                "segment": out.get("text", ""),
+                "resumed": bool(out.get("resumed")),
                 "is_simulated": bool(out.get("is_simulated")),
                 "model_generation": out.get("model_generation")}
 
@@ -864,7 +904,13 @@ class EgoProcess(RoleProcess):
                 conclusion_id = res.get("conclusion_id")
             except Exception:  # noqa: BLE001
                 self.log.debug("could not record conclusion", exc_info=True)
-        return {"answer": text[:4000], "conclusion_id": conclusion_id,
+        # The whole of what this turn said, uncut. Each turn's result is its
+        # fragment of the interaction's answer, and a character limit here
+        # would silently truncate every piece of a long reply: at a 3072
+        # token ceiling a segment runs well past 4000 characters.
+        return {"answer": text, "segment": out.get("text", ""),
+                "resumed": bool(out.get("resumed")),
+                "conclusion_id": conclusion_id,
                 "answered_triggers": list(answered),
                 "tool_calls": out.get("tool_calls", []),
                 "tool_requests": [{"name": c.get("tool"),
@@ -1033,7 +1079,9 @@ class IdProcess(RoleProcess):
         and attributed; a turn that silently wrote state afterwards would put
         an unattributed act between the thought and the record.
         """
-        return {"text": strip_tool_calls(out.get("text", "")).strip()[:4000],
+        return {"text": strip_tool_calls(out.get("text", "")).strip(),
+                "segment": out.get("text", ""),
+                "resumed": bool(out.get("resumed")),
                 "tool_calls": out.get("tool_calls", []),
                 "environment_sha256": out.get("environment_sha256"),
                 "profile_ref": out.get("profile_ref"),

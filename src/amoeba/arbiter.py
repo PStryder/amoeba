@@ -273,14 +273,22 @@ class Arbiter:
         """
         cfg = self.cfg
         ceiling = int(budget_tokens) if budget_tokens else cfg.max_prompt_tokens
-        if prompt_tokens > ceiling:
+        capped = min(max_tokens or cfg.max_completion_tokens, cfg.max_completion_tokens)
+        # A generation is admitted only if its whole allowance fits. Checking
+        # the prompt alone let a session arrive a few hundred tokens short of
+        # its budget, be admitted, and then generate straight through it --
+        # and it made a large output ceiling fictional, because the room it
+        # promised was never reserved. Refusing here sends a role into
+        # rejuvenation *before* the turn rather than after the overrun, which
+        # is what keeps the ceiling real near the wall.
+        if prompt_tokens + capped > ceiling:
             raise ResourceExhausted(
-                "prompt exceeds the configured context budget",
-                prompt_tokens=prompt_tokens, max_prompt_tokens=ceiling,
-                budget_basis=budget_basis,
+                "prompt plus its generation allowance exceeds the configured "
+                "context budget",
+                prompt_tokens=prompt_tokens, generation_allowance=capped,
+                max_prompt_tokens=ceiling, budget_basis=budget_basis,
                 budget_source=("session" if budget_tokens else "global default"),
             )
-        capped = min(max_tokens or cfg.max_completion_tokens, cfg.max_completion_tokens)
         wall_cap = time.time() + cfg.neuocyte_wall_seconds
         return {
             "max_tokens": capped,

@@ -119,7 +119,7 @@ protocol `2025-11-25`:
 | Resources | **not implemented** (0 served) | memory items, snapshots and the event log would map well onto resources; not required by the brief |
 | Prompts | **not implemented** (0 served) | |
 | Progress notifications | **not implemented** | deliberate: the brief specifies durable handles polled via `ego_status`, not streamed progress |
-| Streaming / partial results | **not implemented** | `ego_converse` blocks for the whole completion (~2.4 s for 384 tokens at ~160 tok/s) |
+| Streaming / partial results | **not implemented** | nothing streams; an answer is delivered once it is terminal, whole across however many bounded turns it took (Ego's per-turn ceiling is 3072 tokens) |
 | Request cancellation (`notifications/cancelled`) | **implemented** | `mind_cancel`, plus automatic cancellation when a client aborts an in-flight call |
 | Sampling (server asks the client's model) | **not implemented** | see below — this is the most interesting gap |
 | Elicitation | **not implemented** | |

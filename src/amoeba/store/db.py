@@ -458,7 +458,8 @@ CREATE TABLE IF NOT EXISTS interactions (
   conversation_id TEXT,
   input_sha256    TEXT NOT NULL,
   input_preview   TEXT,
-  status          TEXT NOT NULL,          -- accepted | running | complete | failed
+  status          TEXT NOT NULL,          -- accepted | running | complete
+                                          --   | incomplete | failed
   operation_id    TEXT,
   output_sha256   TEXT,
   output_preview  TEXT,
@@ -644,7 +645,8 @@ CREATE TABLE IF NOT EXISTS role_triggers (
   -- the default merely because nothing is owed a reply.
   ambient        INTEGER NOT NULL DEFAULT 0,
   answer_sha256  TEXT,             -- the answer to THIS request
-  answer_status  TEXT,             -- NULL | answered | unanswerable
+  answer_status  TEXT,             -- NULL | answered | incomplete
+                                   --   | unanswerable
   answered_at    REAL,
   answered_by_turn TEXT,           -- which turn finally produced it
   state_version INTEGER NOT NULL

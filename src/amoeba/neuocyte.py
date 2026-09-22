@@ -36,6 +36,7 @@ from .errors import CapabilityUnsupported, Fenced, MindError
 from .ids import new_id
 from .logging_setup import get_logger, setup_logging
 from .rpc import RpcClient, read_or_create_token
+from .promptlib.model import fallback_output_ceiling
 from .tools import parse_tool_calls, strip_tool_calls
 
 WORKER_INSTRUCTION = """You are a bounded neuocyte forked from the mind's Ego context.
@@ -194,6 +195,9 @@ class Neuocyte:
         """
         maintenance = item.get("work_class") == "maintenance"
         base = "id.neuocyte" if maintenance else "ego.neuocyte"
+        # Kept so the built-in path still has the right ceiling: a worker
+        # the library could not bind is the same kind of worker.
+        self.profile_namespace = base
         wanted = (item.get("specialisation") or "").strip()
         # The specialisation first, the base as the fallback. Asking for a
         # specialist that the library does not have, or has not approved, must
@@ -371,7 +375,9 @@ class Neuocyte:
             settings = (self.profile or {}).get("backend_arguments") or {}
             out = self.inf.call(
                 "generate", session_id=self.session_id,
-                max_tokens=min(remaining, int(settings.get("max_tokens", 256))),
+                max_tokens=min(remaining, int(settings.get(
+                    "max_tokens", fallback_output_ceiling(
+                        getattr(self, "profile_namespace", "ego.neuocyte"))))),
                 temperature=float(settings.get("temperature", 0.0)),
                 deadline=deadline)
             spent += int(out.get("completion_tokens") or 0)

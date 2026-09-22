@@ -971,14 +971,14 @@ def build(sup: "Supervisor") -> dict[str, Any]:
                 return {"status": "expired", "turn_id": None,
                         "note": "undeliverable after repeated failures"}
 
-            if row["answer_status"] == "answered":
-                answer = ""
+            if row["answer_status"] in ("answered", "incomplete"):
+                answer, record = "", {}
                 if row["answer_sha256"]:
                     try:
-                        answer = (mind.blobs.get_json(row["answer_sha256"])
-                                  or {}).get("answer", "")
+                        record = mind.blobs.get_json(row["answer_sha256"]) or {}
+                        answer = record.get("answer", "")
                     except Exception:  # noqa: BLE001
-                        answer = ""
+                        answer, record = "", {}
                 turn = mind.db.conn.execute(
                     "SELECT * FROM role_turns WHERE turn_id = ?",
                     (row["answered_by_turn"],)).fetchone()
@@ -994,7 +994,15 @@ def build(sup: "Supervisor") -> dict[str, Any]:
                     result = {**result, "answer": answer}
                 else:
                     result = {"answer": answer}
-                return {"status": "completed",
+                # Terminal either way, and only one of them is finished.
+                # "completed" is reserved for a thought that concluded; one
+                # that was stopped -- by the continuation limit, a deadline, a
+                # failure -- is "incomplete", carrying everything it said and
+                # why it stopped, rather than posing as the reply.
+                finished = row["answer_status"] == "answered"
+                return {"status": "completed" if finished else "incomplete",
+                        "complete": finished,
+                        "ended_because": record.get("ended_because"),
                         "turn_id": row["answered_by_turn"],
                         "stop_reason": turn["stop_reason"] if turn else None,
                         "result": result,
@@ -1038,6 +1046,8 @@ def build(sup: "Supervisor") -> dict[str, Any]:
         out = {"trigger_id": trigger_id, "status": settled["status"],
                "answer": result.get("answer", ""),
                "is_simulated": bool(result.get("is_simulated"))}
+        if settled["status"] == "incomplete":
+            out["ended_because"] = settled.get("ended_because")
         if settled.get("note"):
             out["note"] = settled["note"]
         return out
@@ -1120,7 +1130,14 @@ def build(sup: "Supervisor") -> dict[str, Any]:
             out["answer"] = result.get("answer", "")
             out["conclusion_id"] = result.get("conclusion_id")
             out["tool_calls"] = result.get("tool_calls", [])
-            if settled["status"] != "completed":
+            if settled["status"] == "incomplete":
+                # Terminal, with everything said so far, and plainly not
+                # a finished answer.
+                limitations.append(
+                    "the answer is incomplete: it stopped before "
+                    f"finishing ({settled.get('ended_because')}); "
+                    "everything said so far is included")
+            elif settled["status"] != "completed":
                 limitations.append(
                     "Ego had not reached this input before the wait elapsed; "
                     "it remains queued and will be processed")
@@ -1180,7 +1197,14 @@ def build(sup: "Supervisor") -> dict[str, Any]:
             out["is_simulated"] = bool(result.get("is_simulated"))
             out["claim"] = result.get("answer", "")
             out["conclusion_id"] = result.get("conclusion_id")
-            if settled["status"] != "completed":
+            if settled["status"] == "incomplete":
+                # Terminal, with everything said so far, and plainly not
+                # a finished answer.
+                limitations.append(
+                    "the answer is incomplete: it stopped before "
+                    f"finishing ({settled.get('ended_because')}); "
+                    "everything said so far is included")
+            elif settled["status"] != "completed":
                 limitations.append(
                     "Ego had not reached this before the wait elapsed; it "
                     "remains queued and will be processed")
@@ -1257,7 +1281,14 @@ def build(sup: "Supervisor") -> dict[str, Any]:
                 "Id's own senses, invoked during the turn and recorded as "
                 "tool calls")
             out["interpretation_source"] = "model inference over what it read"
-            if settled["status"] != "completed":
+            if settled["status"] == "incomplete":
+                # Terminal, with everything said so far, and plainly not
+                # a finished answer.
+                limitations.append(
+                    "the answer is incomplete: it stopped before "
+                    f"finishing ({settled.get('ended_because')}); "
+                    "everything said so far is included")
+            elif settled["status"] != "completed":
                 limitations.append("Id had not reached this before the wait "
                                    "elapsed; it remains queued")
             return out
@@ -1387,7 +1418,14 @@ def build(sup: "Supervisor") -> dict[str, Any]:
                 limitations.append(
                     "Id did not state a verdict in the expected form; "
                     "'inconclusive' here means unparsed, not judged")
-            if settled["status"] != "completed":
+            if settled["status"] == "incomplete":
+                # Terminal, with everything said so far, and plainly not
+                # a finished answer.
+                limitations.append(
+                    "the answer is incomplete: it stopped before "
+                    f"finishing ({settled.get('ended_because')}); "
+                    "everything said so far is included")
+            elif settled["status"] != "completed":
                 limitations.append("Id had not reached this before the wait "
                                    "elapsed; it remains queued")
                 return out

@@ -4,6 +4,7 @@
 mode: replace
 temperature: 0.3
 top_p: 0.9
+max_output_tokens: 1024
 ---
 You are Id, the inward persistent mind of an amoeba.
 

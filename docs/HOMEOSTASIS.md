@@ -167,6 +167,24 @@ global 6144, so the proactive threshold sat six times higher than the wall and
 rejuvenation could only ever happen by collision -- the role discovered the
 limit by hitting it and losing a turn.
 
+`role_context_high` is **advisory**: it produces a recommendation in
+`context_assess` and `id_health`, and nothing acts on it automatically. What
+the Harness enforces is the generation's own headroom. A generation is
+admitted only if prompt *plus its output allowance* fits the budget (I111), so
+a role is rejuvenated at the boundary before a turn that could not finish,
+rather than after overrunning. Generated tokens grow the same quantity the
+budget measures, and so do the environment and trigger text ingested at the
+start of a turn.
+
+| | budget | allowance | admitted while prompt ≤ |
+|---|---|---|---|
+| Ego | 16384 | 3072 | 13312 |
+| Id | 8192 | 1024 | 7168 |
+
+A continuation that resumes its message ingests nothing, so a long answer
+spends its runway on the answer rather than on re-rendering the environment
+for every piece (I109).
+
 ## Admission
 
 Starting new work consults the pool. Measured for sessions that exist;

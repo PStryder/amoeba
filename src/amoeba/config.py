@@ -51,7 +51,11 @@ class ArbiterConfig:
     # small: an unbudgeted session is a bug, and granting it the pool would
     # hide that bug behind good behaviour.
     max_prompt_tokens: int = 6144
-    max_completion_tokens: int = 512
+    # A backstop over every generation, not the policy. Each mind's ceiling
+    # is its profile's `max_output_tokens`; this only has to be at least
+    # the largest of them, or a governed ceiling is silently clamped here.
+    # At 512 it was: Ego could have been granted 3072 and got 512.
+    max_completion_tokens: int = 3072
 
     # What a disposable worker may grow, by work class rather than by role,
     # because that is what a neuocyte has. A specialist profile may override

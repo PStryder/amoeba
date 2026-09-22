@@ -176,14 +176,24 @@ function transcript(main) {
   }));
 }
 
+// Quiet means nothing in flight AND nothing new asked for across a window
+// longer than a compressed poll interval. Checking only "nothing in flight"
+// returned between two polls of a panel still waiting for its answer -- the
+// harness then reported a conversation that had not finished yet, which is
+// how Converse's own tests went quietly wrong when polling was compressed.
+// A panel that polls forever (the backchannel) never goes quiet, so the wait
+// is capped rather than open-ended.
+//
+// The window is well over the compressed 20ms interval because a timer on
+// Windows fires on a ~15.6ms tick: a 20ms wait can take 31, and a window only
+// slightly longer than the interval mistakes that jitter for silence.
 async function idle() {
-  for (let i = 0; i < 600; i++) {
-    await new Promise((r) => hostTimeout(r, 1));
-    const frozen = scn.maxRequests && requests.length > scn.maxRequests;
-    if ((inflight === 0 && i > 4) || frozen) {
-      await new Promise((r) => hostTimeout(r, 3));
-      if (inflight === 0 || frozen) return;
-    }
+  const cap = Date.now() + 1500;
+  while (Date.now() < cap) {
+    const before = requests.length;
+    await new Promise((r) => hostTimeout(r, 80));
+    if (scn.maxRequests && requests.length > scn.maxRequests) return;
+    if (inflight === 0 && requests.length === before) return;
   }
 }
 

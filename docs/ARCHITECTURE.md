@@ -1380,6 +1380,92 @@ forgets.
 `test_a_room_message_is_durably_recorded_even_though_the_view_is_not`,
 `test_the_room_is_bounded`, `test_a_reader_gets_only_what_it_has_not_seen`
 
+**I107. An answer belongs to its interaction, whole.** One request may take
+several bounded turns; the turns are how the organism thinks, not how the
+answer is cut up. The answer is every turn's piece of it, in order, exactly
+once -- assembled by walking the recorded parent links from the turn that
+ended the thought back to the turn that admitted the request.
+
+It used to be whichever turn ended the thought. Live, a reply cut off three
+times arrived as its last quarter, opening "Continuing from where the previous
+analysis left off" and ending mid-list; the first three quarters had been
+generated, recorded against their turns, and never delivered. Nothing is
+stored twice to fix it: each turn's result is its fragment, written once when
+that turn closed, and the assembled answer records which turns it came from.
+Tool-call machinery is removed per piece, because the boundary can cut a call
+in half and cleaning the joined text would then discard everything after it.
+→ `test_an_answer_spanning_three_turns_arrives_whole_and_in_order`,
+`test_each_piece_appears_exactly_once`,
+`test_fragments_are_attached_to_their_own_interaction`,
+`test_retrying_an_abandoned_continuation_does_not_duplicate_a_piece`,
+`test_a_rival_request_cannot_enter_the_chain_or_its_answer`,
+`test_a_three_turn_answer_reaches_the_operator_whole`
+
+**I108. Only a concluded thought is a finished answer.** A turn completing is
+not an interaction completing. A turn cut off by its output ceiling is
+finished as a turn and says nothing about the reply except "not yet", so
+nothing is delivered until the thought ends. When it ends, only the model
+choosing to stop is `answered`. Running out of continuations, a deadline or a
+failure ends it too, and leaves an answer that stopped rather than one that
+concluded: that is `incomplete`, carrying everything said so far and why it
+stopped. Reporting it as answered -- which the continuation limit used to do,
+keeping only the last fragment -- tells the caller, permanently, that the
+fragment was the reply.
+→ `test_running_out_of_continuations_is_incomplete_not_complete`,
+`test_a_stop_that_is_not_the_model_finishing_is_not_complete`,
+`test_an_exhausted_continuation_chain_releases_its_waiter`,
+`test_running_out_of_continuations_reaches_the_client_as_incomplete`
+
+**I109. A continuation resumes the message it continues -- only where that is
+literally what the session holds.** A continuation used to reach the model as
+a fresh "please continue" message with the environment re-rendered in front
+of it. The model closed its unfinished reply and began another, so every
+piece of a long answer opened with its own preamble, and each cost about nine
+hundred tokens before it said a word. Now a continuation whose parent was cut
+off by its ceiling generates on from the exact token where it stopped:
+nothing appended, the pieces joining byte for byte.
+
+Offered by the Harness only when the parent stopped at its ceiling, was the
+role's last turn, and the continuation is the whole bundle -- evidence may
+still ride with a continuation, and evidence has to be shown, which a resumed
+generation has no place to do. The role then confirms its session is still
+exactly the recorded length, because only it can see the session: after a
+rejuvenation or anything else appended, it asks visibly instead.
+→ `test_a_bare_continuation_is_offered_its_parents_exact_position`,
+`test_a_continuation_carrying_evidence_asks_visibly_instead`,
+`test_a_turn_that_ran_in_between_forbids_resuming`,
+`test_a_resumed_piece_joins_exactly_where_it_was_cut`,
+`test_a_tool_call_cut_in_half_leaves_no_machinery_in_the_answer`,
+`test_a_three_turn_answer_reaches_the_operator_whole`
+
+**I110. Each mind has its own output ceiling, and nothing silently lowers
+it.** Ego 3072, Id 1024, `ego.neuocyte` 512, `id.neuocyte` 384 -- ceilings,
+not target lengths, stated in each governed profile and inherited as model
+variables are, so a silent specialist gets its worker's ceiling rather than
+Ego's. The Ego root shipped with none, so a hardcoded 384 decided how much Ego
+could say to anyone; and a global 512 backstop would have clamped a real one.
+The fallback is now a per-namespace code constant, held equal to the shipped
+headers by a test -- a constant rather than a read of the shipped file,
+because editing a shipped file makes a candidate and must not reach a running
+mind unapproved. The backstop is at least the largest governed ceiling, and
+nothing between the model and the operator cuts an answer by characters.
+→ `test_each_mind_is_granted_its_own_ceiling_by_its_governed_profile`,
+`test_changing_one_ceiling_does_not_move_another`,
+`test_the_fallback_ceilings_match_the_shipped_headers`,
+`test_the_backstop_clamps_no_governed_ceiling`,
+`test_the_shipped_config_backstop_clamps_no_governed_ceiling`,
+`test_a_long_answer_is_not_cut_by_characters_anywhere`
+
+**I111. A generation is admitted only if its whole allowance fits.** The
+arbiter used to check the prompt alone, so a session a few hundred tokens
+short of its budget was admitted and generated straight through it -- and a
+large ceiling was fictional near the wall, because the room it promised was
+never reserved. Admission now requires prompt plus allowance to fit, and the
+refusal is worded as context pressure, so a role is rejuvenated *before* the
+turn rather than after the overrun. For Ego that places the wall at 13312 of
+16384; for Id at 7168 of 8192.
+→ `test_a_generation_is_admitted_only_if_its_allowance_fits`
+
 **I73. A role is never wedged by a turn it did not close.** One open turn per
 role is a database constraint, so a turn left running blocks every future turn
 for that role — the role heartbeats, reports healthy, and never thinks again

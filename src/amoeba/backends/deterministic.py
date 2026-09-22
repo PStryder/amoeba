@@ -266,7 +266,18 @@ class DeterministicBackend:
                 # Still labelled as simulated: a scripted reply is no more
                 # model inference than a hashed one, and the label is what
                 # stops either being mistaken for it.
-                text = f"{SIM_PREFIX} {self._scripted.pop(0)}"
+                entry = self._scripted.pop(0)
+                if isinstance(entry, dict):
+                    # A scripted *truncation*: the only way a test can make a
+                    # known answer span several bounded turns and then check
+                    # that nothing between them went missing. `continues`
+                    # marks the tail of a generation that was cut off, which a
+                    # real model would not prefix with anything either.
+                    finish = str(entry.get("finish_reason") or "scripted")
+                    body = str(entry.get("text") or "")
+                    text = body if entry.get("continues") else f"{SIM_PREFIX} {body}"
+                else:
+                    finish, text = "scripted", f"{SIM_PREFIX} {entry}"
                 out_tokens = self.tokenize(text)
                 sess.tokens.extend(out_tokens)
                 self._used_cells += len(out_tokens)
@@ -276,13 +287,21 @@ class DeterministicBackend:
                     on_token(text)
                 return GenerationResult(
                     session_id=session_id, text=text, tokens=out_tokens,
-                    finish_reason="scripted",
+                    finish_reason=finish,
                     prompt_tokens=sess.n_past - len(out_tokens),
                     completion_tokens=len(out_tokens),
                     time_to_first_token=elapsed, total_seconds=elapsed)
             seed_material = f"{sess.role}|{seed}|{','.join(map(str, sess.tokens))}"
             digest = hashlib.sha256(seed_material.encode()).hexdigest()
-            n_words = max(1, min(max_tokens // 4, 16))
+            # The simulated mind has sixteen words to say. It is cut off only
+            # when the allowance is smaller than that, and says so only then.
+            # This used to report "length" unconditionally -- a false claim of
+            # truncation on every turn, harmless while truncation changed
+            # nothing and wrong once an interaction that ends on a truncation
+            # is reported as incomplete rather than answered.
+            natural = 16
+            n_words = max(1, min(max_tokens // 4, natural))
+            finish = "length" if max_tokens // 4 < natural else "stop"
             words = [digest[i * 4:(i + 1) * 4] for i in range(n_words)]
             text = f"{SIM_PREFIX} {sess.role}:{' '.join(words)}"
             if self.latency_per_token:
@@ -296,7 +315,7 @@ class DeterministicBackend:
                 on_token(text)
             return GenerationResult(
                 session_id=session_id, text=text, tokens=out_tokens,
-                finish_reason="length", prompt_tokens=sess.n_past - len(out_tokens),
+                finish_reason=finish, prompt_tokens=sess.n_past - len(out_tokens),
                 completion_tokens=len(out_tokens),
                 time_to_first_token=elapsed, total_seconds=elapsed,
                 first_token_logprob_top=self.top_logits(session_id, 3),

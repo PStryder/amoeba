@@ -373,7 +373,8 @@ def _answer_of(mind, trigger_id):
     row = mind.db.conn.execute(
         "SELECT answer_status, answer_sha256 FROM role_triggers"
         " WHERE trigger_id = ?", (trigger_id,)).fetchone()
-    if row["answer_status"] != "answered" or not row["answer_sha256"]:
+    # An incomplete answer carries text just as real as a finished one.
+    if not row["answer_sha256"]:
         return row["answer_status"], None
     return row["answer_status"], mind.blobs.get_json(row["answer_sha256"])["answer"]
 
@@ -424,6 +425,12 @@ def test_a_continued_thought_answers_the_request_that_started_it(mind):
     The answer used to be whatever the *first* turn produced, because the
     trigger was consumed there. Everything the continuation went on to think
     was produced and then unreachable.
+
+    The fix for that then asserted the opposite mistake: that the answer is
+    whatever the *last* turn produced. It was, and live that meant a reply cut
+    off three times arrived as its final quarter. The answer is every turn's
+    piece, in order -- here two separate messages, because the second turn
+    was asked visibly rather than resuming the first.
     """
     req = _request(mind, summary="something that needs more than one turn")
 
@@ -439,8 +446,8 @@ def test_a_continued_thought_answers_the_request_that_started_it(mind):
     _complete(mind, second["turn_id"], stop_reason="model_stop",
               result={"answer": "the finished thought"})
 
-    assert _answer_of(mind, req["trigger_id"]) == ("answered",
-                                                   "the finished thought")
+    assert _answer_of(mind, req["trigger_id"]) == (
+        "answered", "a partial thought\n\nthe finished thought")
 
 
 def test_a_continuation_still_receives_its_supporting_evidence(mind):
@@ -474,7 +481,7 @@ def test_a_continuation_still_receives_its_supporting_evidence(mind):
     _complete(mind, second["turn_id"], stop_reason="model_stop",
               result={"answer": "it is a race on the lock"})
     assert _answer_of(mind, request["trigger_id"]) == (
-        "answered", "it is a race on the lock")
+        "answered", "delegated, waiting on results\n\nit is a race on the lock")
     assert _answer_of(mind, rival["trigger_id"]) == (None, None)
 
 
@@ -505,8 +512,8 @@ def test_a_continuation_does_not_adopt_a_new_request(mind):
               result={"answer": "the finished thought"})
 
     # The original got its answer; the newcomer is still waiting for its own.
-    assert _answer_of(mind, first["trigger_id"]) == ("answered",
-                                                     "the finished thought")
+    assert _answer_of(mind, first["trigger_id"]) == (
+        "answered", "a partial thought\n\nthe finished thought")
     assert _answer_of(mind, second["trigger_id"]) == (None, None)
 
     # And it gets a different one.
@@ -619,8 +626,13 @@ def test_an_exhausted_continuation_chain_releases_its_waiter(mind):
             break
         turn = _claim(mind, "ego")
     status, answer = _answer_of(mind, req["trigger_id"])
-    assert status == "answered", "the waiter was left hanging"
-    assert answer == "still going", "the partial thought was discarded"
+    # Released, which is what this test is for. "answered" used to be the
+    # word for it, which told the caller the last fragment was the reply; a
+    # thought stopped by the limit is incomplete, and every piece of it is
+    # kept rather than only the one the limit happened to land on.
+    assert status == "incomplete", "the waiter was left hanging, or misled"
+    assert answer == "\n\n".join(["still going"] * 3), \
+        "the partial thought was discarded"
 
 
 def test_an_event_expects_no_answer(mind):

@@ -131,6 +131,46 @@ why there are none: the map is total over :data:`MODEL_VARS` and a test says so.
 """
 
 
+FALLBACK_OUTPUT_CEILINGS: dict[str, int] = {
+    "ego": 3072,
+    "id": 1024,
+    "ego.neuocyte": 512,
+    "id.neuocyte": 384,
+}
+"""The generation ceiling a mind gets when its governed profile states none.
+
+Ceilings, not target lengths: a model that has finished stops long before
+reaching one. Ego is the persistent synthesiser the operator talks to and
+gets the most room; Id reports and audits; neuocytes are bounded workers.
+
+The governed values live in the shipped prompt headers and reach a mind
+through its bound profile. This table is only what applies when a profile is
+silent -- which is not hypothetical: the Ego root shipped without a ceiling,
+and a hardcoded 384 decided how much Ego could say to anyone. It is a code
+constant rather than a read of the shipped file on purpose. Editing a shipped
+file makes a governed *candidate*; if the fallback read that file, the edit
+would reach a running mind without anyone approving it.
+
+A guard test holds this table equal to the shipped headers, so the two
+cannot drift.
+"""
+
+
+def fallback_output_ceiling(namespace: str) -> int:
+    """The nearest ancestor's fallback ceiling, as the resolver inherits it.
+
+    A specialist `ego.neuocyte.reviewer` that states nothing inherits the
+    worker ceiling, not Ego's -- the same answer resolution gives, because
+    model variables are inherited root-first with the nearest one winning.
+    """
+    parts = namespace.split(".")
+    for size in range(len(parts), 0, -1):
+        found = FALLBACK_OUTPUT_CEILINGS.get(".".join(parts[:size]))
+        if found is not None:
+            return found
+    raise InvalidInput("no output ceiling for that namespace", namespace=namespace)
+
+
 class NamespaceError(InvalidInput, ValueError):
     """A namespace or lineage reference that cannot mean anything.
 

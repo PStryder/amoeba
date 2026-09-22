@@ -111,11 +111,13 @@ class LiveStack:
         self.client.close()
 
 
-# Scheduler settings for a test stack. The deterministic backend always
-# reports finish_reason="length", so every role turn genuinely truncates and
-# pulls its full continuation chain -- at the production default that is four
-# turns per input and the suite crawls. One continuation still exercises the
-# path; the bound itself is covered by unit tests and a mutation.
+# Scheduler settings for a test stack. The deterministic backend reports
+# finish_reason="length" only when its allowance is smaller than what it has
+# to say, which at a role's ceiling it never is -- so an ordinary simulated
+# turn ends model_stop. A test that needs a truncation scripts one
+# (`script_responses` with a finish reason). One continuation stays the
+# default so a scripted chain is quick; tests that need a longer chain ask
+# for it, and the bound itself is covered by unit tests and a mutation.
 TEST_SCHEDULER = {
     "poll_seconds": 0.2,
     "id_heartbeat_seconds": 0.0,     # tests that want a heartbeat ask for one
@@ -157,7 +159,10 @@ def _write_stack_config(tmp_path: Path, *, kind: str = "deterministic",
         ]
     sched = {**TEST_SCHEDULER, **(scheduler or {})}
     lines += ["", "[scheduler]"]
-    lines += [f"{k} = {v!r}" for k, v in sched.items()]
+    # TOML spells booleans in lower case; Python's repr does not, so a bool
+    # override produced a config the supervisor could not parse.
+    lines += [f"{k} = {str(v).lower() if isinstance(v, bool) else repr(v)}"
+              for k, v in sched.items()]
     lines += [
         "",
         "[arbiter]",

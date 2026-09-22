@@ -273,7 +273,13 @@ def build(sup: "Supervisor") -> dict[str, Any]:  # noqa: C901
             # "Complete" has to mean answered. Reporting an empty answer as a
             # completed interaction tells the client, permanently, that
             # nothing was the organism's reply.
-            settled = isinstance(result, dict) and result.get("status") == "completed"
+            state = result.get("status") if isinstance(result, dict) else None
+            # Terminal means Amoeba has said all it is going to about this
+            # input. Only "completed" is a finished answer; "incomplete" is
+            # everything Ego said before it was stopped, and the client gets
+            # both the text and that fact rather than one without the other.
+            settled = state in ("completed", "incomplete")
+            final = "complete" if state == "completed" else "incomplete"
             if not settled:
                 raise DeadlineExceeded(
                     "Ego did not answer within this interaction's patience; "
@@ -288,14 +294,15 @@ def build(sup: "Supervisor") -> dict[str, Any]:  # noqa: C901
             def body(m: Mutation) -> None:
                 m.register_blob(digest, 0, "application/json",
                                 "external_output")
-                m.sql("UPDATE interactions SET status = 'complete',"
+                m.sql("UPDATE interactions SET status = ?,"
                       " output_sha256 = ?, output_preview = ?, operation_id = ?,"
                       " completed_at = ? WHERE interaction_id = ?",
-                      (digest, str(answer)[:1000], payload.get("operation_id"),
-                       time.time(), interaction_id))
+                      (final, digest, str(answer)[:1000],
+                       payload.get("operation_id"), time.time(),
+                       interaction_id))
                 m.emit(EventKind.INTERACTION_COMPLETED, {
                     "interaction_id": interaction_id, "client_id": client_id,
-                    "output_sha256": digest})
+                    "output_sha256": digest, "status": final})
 
             mind.writer.apply(body, actor=f"client:{client_id}")
         except Exception as exc:  # noqa: BLE001
@@ -341,7 +348,7 @@ def build(sup: "Supervisor") -> dict[str, Any]:  # noqa: C901
         deadline = time.monotonic() + max(0.0, min(float(timeout_seconds), 300.0))
         while True:
             row = _own(interaction_id, client_id)
-            if row["status"] in ("complete", "failed"):
+            if row["status"] in ("complete", "incomplete", "failed"):
                 return io_output(interaction_id=interaction_id,
                                  client_id=client_id)
             if time.monotonic() >= deadline:

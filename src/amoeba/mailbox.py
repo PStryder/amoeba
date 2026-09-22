@@ -67,6 +67,7 @@ from .errors import InvalidInput, NotFound
 from .ids import new_id, sha256_hex
 from .store.events import EventKind
 from .store.writer import Mutation
+from .tools import TOOL_CALL_RE
 
 if TYPE_CHECKING:
     from .mind import Mind
@@ -419,6 +420,16 @@ def claim(m: Mutation, mind: "Mind", *, role: str, incarnation: int | None,
 
     parent = next((t["causal_parent"] for t in admitted
                    if t["kind"] == "continuation" and t["causal_parent"]), None)
+    # Resume the cut-off message itself, rather than asking for more in a new
+    # one, when the continuation is all this turn carries. Evidence may ride
+    # along with a continuation -- that guarantee stands -- and evidence has
+    # to be shown, which a resumed generation has no place to do; so a turn
+    # with anything else in it asks visibly instead. Decided before this turn
+    # exists, so "the parent was the last thing this role did" is still true.
+    resume = None
+    if parent and len(admitted) == 1:
+        resume = resume_point(mind.db.conn, mind.blobs, role=role,
+                              parent_turn=parent)
     # The externally visible operation this turn answers, if any. A conclusion
     # recorded during the turn is tied to it, so `audit_dossier` can resolve
     # the claim back to the request that caused it.
@@ -464,7 +475,7 @@ def claim(m: Mutation, mind: "Mind", *, role: str, incarnation: int | None,
             "answering": answering, "owes_answer": bool(answering),
             "bundle_sha256": bundle_sha, "bundle_blob": bundle_blob,
             "parent_turn": parent, "operation_id": operation,
-            "lineage": turn_lineage}
+            "lineage": turn_lineage, "resume": resume}
 
 
 # ---------------------------------------------------------------------------
@@ -562,7 +573,8 @@ def awaiting_answer(conn, turn_id: str) -> list[dict[str, Any]]:
     while current and current not in seen and len(seen) < 32:
         seen.add(current)
         for row in conn.execute(
-                "SELECT trigger_id, operation_id, correlation_id FROM role_triggers"
+                "SELECT trigger_id, operation_id, correlation_id, turn_id"
+                " FROM role_triggers"
                 " WHERE turn_id = ? AND expects_answer = 1"
                 " AND answer_status IS NULL", (current,)):
             out.append(dict(row))
@@ -571,6 +583,151 @@ def awaiting_answer(conn, turn_id: str) -> list[dict[str, Any]]:
             (current,)).fetchone()
         current = parent["parent_turn"] if parent else None
     return out
+
+
+# ---------------------------------------------------------------------------
+# answers belong to interactions, not to turns
+# ---------------------------------------------------------------------------
+# A continuation may resume the very message its parent was cut off in, but
+# only when that is literally what the session holds: the parent stopped at
+# its output ceiling, and nothing has been appended since.
+RESUMABLE = frozenset({"max_output_tokens"})
+
+_TOOL_OPEN, _TOOL_CLOSE = "<tool_call>", "</tool_call>"
+
+
+def _segment_of(result: dict[str, Any] | None) -> str:
+    """The user-facing text one bounded turn contributed, uncleaned.
+
+    `segment` is recorded raw because a resumed continuation joins its parent
+    byte for byte: stripping each piece would weld "self" and " knowledge"
+    into "selfknowledge". Older results, from before segments were recorded,
+    fall back to what they did store.
+    """
+    if not isinstance(result, dict):
+        return ""
+    seg = result.get("segment")
+    if seg is None:
+        seg = result.get("answer") or result.get("text") or ""
+    return str(seg)
+
+
+def _clean_segment(seg: str, *, resumed: bool) -> str:
+    """Remove tool-call machinery from one segment, leaving its prose alone.
+
+    Cleaned per segment rather than after joining, because a tool call can be
+    cut in half by the boundary: the parent ends inside `<tool_call>` and the
+    resumed turn begins with the rest of it. Cleaning the joined text would
+    find that unterminated opener and throw away everything after it --
+    including every later segment.
+    """
+    if resumed:
+        close, opened = seg.find(_TOOL_CLOSE), seg.find(_TOOL_OPEN)
+        if close >= 0 and (opened < 0 or close < opened):
+            seg = seg[close + len(_TOOL_CLOSE):]
+    seg = TOOL_CALL_RE.sub("", seg)
+    dangling = seg.rfind(_TOOL_OPEN)
+    if dangling >= 0:
+        seg = seg[:dangling]
+    return seg
+
+
+def _open_tool_call(text: str) -> str:
+    """The unterminated tool call a truncated generation ended inside, if any."""
+    at = text.rfind(_TOOL_OPEN)
+    return text[at:] if at >= 0 and _TOOL_CLOSE not in text[at:] else ""
+
+
+def _turn_result(conn, blobs, turn_id: str) -> dict[str, Any] | None:
+    row = conn.execute("SELECT result_sha256 FROM role_turns WHERE turn_id = ?",
+                       (turn_id,)).fetchone()
+    if row is None or not row["result_sha256"]:
+        return None
+    try:
+        out = blobs.get_json(row["result_sha256"])
+    except Exception:  # noqa: BLE001 - an unreadable fragment is reported as empty
+        return None
+    return out if isinstance(out, dict) else None
+
+
+def resume_point(conn, blobs, *, role: str, parent_turn: str
+                 ) -> dict[str, Any] | None:
+    """Where a continuation can pick up its parent's message, if anywhere.
+
+    Only when the parent was cut off by its output ceiling and was the last
+    thing this role did. The role still checks its own session is exactly
+    that long before resuming, because the Harness records positions and
+    only the role can see the session itself -- a rejuvenation, or anything
+    else appended, and the continuation falls back to asking visibly.
+    """
+    row = conn.execute(
+        "SELECT status, stop_reason, session_handle, token_end"
+        " FROM role_turns WHERE turn_id = ?", (parent_turn,)).fetchone()
+    if row is None or row["status"] != "completed":
+        return None
+    if row["stop_reason"] not in RESUMABLE:
+        return None
+    if not row["session_handle"] or row["token_end"] is None:
+        return None
+    latest = conn.execute(
+        "SELECT turn_id FROM role_turns WHERE role = ?"
+        " ORDER BY started_at DESC, rowid DESC LIMIT 1", (role,)).fetchone()
+    if latest is None or latest["turn_id"] != parent_turn:
+        return None
+    parent = _turn_result(conn, blobs, parent_turn)
+    return {"parent_turn": parent_turn,
+            "session_handle": row["session_handle"],
+            "token_end": int(row["token_end"]),
+            # A tool call the ceiling cut in half is finished by the resumed
+            # generation, so the role parses the two halves together.
+            "carry": _open_tool_call(_segment_of(parent))}
+
+
+def assemble_answer(conn, blobs, *, admitting_turn: str, turn_id: str,
+                    result: dict[str, Any] | None
+                    ) -> tuple[str, list[dict[str, Any]]]:
+    """The whole answer to one request, from every turn that produced it.
+
+    The answer used to be whatever the *last* turn said. A thought cut off
+    three times therefore arrived as its final quarter, beginning "Continuing
+    from where the previous analysis left off" -- the rest had been generated,
+    recorded against each turn, and never delivered.
+
+    Walked from the turn that ends the thought back to the one that admitted
+    the request, along recorded parent links, then read forward. Nothing is
+    stored twice: each turn's result is its fragment, written once when that
+    turn closed and never rewritten, and the assembled answer records which
+    turns it came from.
+    """
+    chain: list[str] = []
+    current: str | None = turn_id
+    seen: set[str] = set()
+    while current and current not in seen and len(seen) < 64:
+        seen.add(current)
+        chain.append(current)
+        if current == admitting_turn:
+            break
+        row = conn.execute("SELECT parent_turn FROM role_turns WHERE turn_id = ?",
+                           (current,)).fetchone()
+        current = row["parent_turn"] if row else None
+    chain.reverse()
+
+    parts: list[str] = []
+    segments: list[dict[str, Any]] = []
+    for ordinal, tid in enumerate(chain):
+        res = result if tid == turn_id else _turn_result(conn, blobs, tid)
+        resumed = bool(isinstance(res, dict) and res.get("resumed"))
+        seg = _clean_segment(_segment_of(res), resumed=resumed)
+        if seg and parts and not resumed:
+            # A continuation that had to be asked for visibly is a new
+            # message, so it starts a new paragraph. A resumed one is the
+            # same message and joins exactly where it was cut.
+            parts.append("\n\n")
+        if seg:
+            parts.append(seg)
+        segments.append({"ordinal": ordinal, "turn_id": tid,
+                         "chars": len(seg), "resumed": resumed})
+    return "".join(parts).strip(), segments
 
 
 def complete(m: Mutation, mind: "Mind", *, turn_id: str, stop_reason: str,
@@ -622,44 +779,67 @@ def complete(m: Mutation, mind: "Mind", *, turn_id: str, stop_reason: str,
     m.emit(EventKind.ROLE_TRIGGER_CONSUMED, {
         "turn_id": turn_id, "role": row["role"], "trigger_ids": consumed})
 
-    # --- answer the request, if this turn finished the thought -----------
+    # --- is the thought over? --------------------------------------------
+    # A turn closing is not the interaction ending. This turn is finished
+    # either way; the question is whether the *request* is, and a turn cut
+    # off by its ceiling says nothing about that except "not yet".
     awaiting = awaiting_answer(mind.db.conn, turn_id)
     answered: list[str] = []
-    if awaiting and stop_reason not in NON_TERMINAL:
-        answer_text = ""
-        if isinstance(result, dict):
-            answer_text = str(result.get("answer") or result.get("text") or "")
-        if answer_text.strip():
-            answer_sha = m.put_json(
-                {"answer": answer_text, "turn_id": turn_id,
-                 "stop_reason": stop_reason, "role": row["role"]},
-                schema="amoeba.trigger_answer/1")
-            state = "answered"
-        else:
-            # A terminal stop that produced nothing is not an answer. Saying
-            # so lets a caller stop waiting instead of hanging on a thought
-            # that already ended.
-            answer_sha, state = None, "unanswerable"
-        for req in awaiting:
-            m.sql("UPDATE role_triggers SET answer_sha256 = ?,"
-                  " answer_status = ?, answered_at = ?, answered_by_turn = ?"
-                  " WHERE trigger_id = ?",
-                  (answer_sha, state, time.time(), turn_id, req["trigger_id"]))
-            answered.append(req["trigger_id"])
-        m.emit(EventKind.ROLE_TRIGGER_ANSWERED, {
-            "turn_id": turn_id, "role": row["role"], "trigger_ids": answered,
-            "answer_status": state, "answer_sha256": answer_sha,
-            "stop_reason": stop_reason,
-            "note": ("the answer belongs to the request that asked, not to "
-                     "the turn that happened to produce it")})
-
     continuation = None
     depth = continuation_depth(mind.db.conn, turn_id)
     exhausted = depth >= max(0, int(max_continuations))
-    if status == "completed" and stop_reason in NON_TERMINAL and exhausted:
+    interrupted = status == "completed" and stop_reason in NON_TERMINAL
+    continuing = interrupted and not exhausted
+
+    if awaiting and not continuing:
+        # Only the model choosing to stop is a finished answer. Anything else
+        # that ends the thought -- the continuation limit, a deadline, a
+        # backend failure -- leaves an answer that stopped rather than one
+        # that concluded, and reporting it as "answered" would tell the
+        # caller, permanently, that the fragment was the reply.
+        finished = stop_reason == "model_stop" and not interrupted
+        ended_because = "continuation_limit" if interrupted else stop_reason
+        outcomes: list[dict[str, Any]] = []
+        for req in awaiting:
+            text, segments = assemble_answer(
+                mind.db.conn, mind.blobs, admitting_turn=req["turn_id"],
+                turn_id=turn_id, result=result)
+            if not text:
+                # Nothing was said at all. Saying so lets a caller stop
+                # waiting instead of hanging on a thought that already ended.
+                sha, state = None, "unanswerable"
+            else:
+                state = "answered" if finished else "incomplete"
+                sha = m.put_json(
+                    {"answer": text, "complete": finished,
+                     "ended_because": ended_because, "turn_id": turn_id,
+                     "stop_reason": stop_reason, "role": row["role"],
+                     # Which turns the answer came from, in order. The text
+                     # lives in each turn's own result; this is the index,
+                     # so provenance points back at the producing turns
+                     # without storing any fragment twice.
+                     "segments": segments},
+                    schema="amoeba.trigger_answer/2")
+            m.sql("UPDATE role_triggers SET answer_sha256 = ?,"
+                  " answer_status = ?, answered_at = ?, answered_by_turn = ?"
+                  " WHERE trigger_id = ? AND answer_status IS NULL",
+                  (sha, state, time.time(), turn_id, req["trigger_id"]))
+            answered.append(req["trigger_id"])
+            outcomes.append({"trigger_id": req["trigger_id"],
+                             "answer_status": state, "answer_sha256": sha,
+                             "segments": len(segments)})
+        m.emit(EventKind.ROLE_TRIGGER_ANSWERED, {
+            "turn_id": turn_id, "role": row["role"], "trigger_ids": answered,
+            "answers": outcomes, "stop_reason": stop_reason,
+            "ended_because": ended_because,
+            "note": ("the answer belongs to the request that asked, not to "
+                     "the turn that happened to produce it")})
+
+    if interrupted and exhausted:
         # Stop the chain rather than granting another turn that will almost
         # certainly end the same way. Recorded, because a thought abandoned
-        # half-finished is something an operator should be able to find.
+        # half-finished is something an operator should be able to find --
+        # and the request it owed has just been told so, above.
         m.emit(EventKind.ROLE_CONTINUATION_SCHEDULED, {
             "role": row["role"], "previous_turn": turn_id,
             "stop_reason": stop_reason, "trigger_id": None,
@@ -667,24 +847,7 @@ def complete(m: Mutation, mind: "Mind", *, turn_id: str, stop_reason: str,
             "note": (f"continuation limit reached after {depth} consecutive "
                      "continuations; the chain stops here rather than "
                      "continuing to truncate")})
-        # Nobody is going to finish this thought, so nobody should keep
-        # waiting for it. A partial answer is still an answer; no answer at
-        # all is said plainly.
-        for req in awaiting:
-            partial = ""
-            if isinstance(result, dict):
-                partial = str(result.get("answer") or result.get("text") or "")
-            sha = m.put_json(
-                {"answer": partial, "turn_id": turn_id, "partial": True,
-                 "stop_reason": stop_reason, "role": row["role"]},
-                schema="amoeba.trigger_answer/1") if partial.strip() else None
-            m.sql("UPDATE role_triggers SET answer_sha256 = ?,"
-                  " answer_status = ?, answered_at = ?, answered_by_turn = ?"
-                  " WHERE trigger_id = ?",
-                  (sha, "answered" if sha else "unanswerable", time.time(),
-                   turn_id, req["trigger_id"]))
-            answered.append(req["trigger_id"])
-    elif status == "completed" and stop_reason in NON_TERMINAL:
+    elif continuing:
         # The Harness decides this, not the model. A thought cut off by an
         # output ceiling cannot be expected to ask for its own continuation:
         # being cut off is what stopped it.
@@ -712,8 +875,7 @@ def complete(m: Mutation, mind: "Mind", *, turn_id: str, stop_reason: str,
             "awaiting": [r["trigger_id"] for r in awaiting],
             "continuation": continuation,
             "continuation_depth": depth,
-            "continuation_limit_reached": bool(
-                exhausted and stop_reason in NON_TERMINAL)}
+            "continuation_limit_reached": bool(interrupted and exhausted)}
 
 
 def abandon(m: Mutation, mind: "Mind", *, turn_id: str, reason: str

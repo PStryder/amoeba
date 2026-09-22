@@ -77,6 +77,8 @@ DASHBOARD_HTML = """<!doctype html>
   .turn.me .said { color:var(--dim); }
   .waiting { color:var(--dim); font-style:italic; font-size:13px; }
   .failed { color:var(--bad); white-space:pre-wrap; line-height:1.5; }
+  .cutoff { color:var(--dim); font-size:12px; font-style:italic;
+            margin-top:.35rem; }
   .notice { color:var(--bad); font-size:12px; padding:.35rem 0; }
   .composer { display:flex; gap:.5rem; align-items:flex-end;
               border-top:1px solid var(--line); padding-top:.6rem; }
@@ -292,7 +294,12 @@ function conversation(main, spec) {
       // continuation turns is still answering the message that began it, and
       // the operator never has to know that happened.
       const s = await rpc("role_answer", {trigger_id: trigger_id});
-      if (s.status === "completed") return s.answer;
+      // Only a terminal state ends the wait. A thought cut off by one
+      // bounded turn is still being answered, and nothing it has said so far
+      // is shown as if it were the reply.
+      if (s.status === "completed") return {text: s.answer, complete: true};
+      if (s.status === "incomplete")
+        return {text: s.answer, complete: false};
       if (s.status === "unanswerable")
         throw new Error("the thought ended without an answer to this message");
       if (s.status === "expired")
@@ -327,7 +334,14 @@ function conversation(main, spec) {
       const answer = await collect(trigger_id);
       const was = atBottom();
       pending.body.className = "said";
-      pending.body.textContent = answer || "(it answered with nothing)";
+      pending.body.textContent = answer.text || "(it answered with nothing)";
+      if (!answer.complete) {
+        // Everything that was said, and one quiet line saying it stops
+        // there. Not the mechanism -- the operator does not need to know
+        // about turns -- just that this is not how the reply was meant to end.
+        pending.turn.appendChild(el("div","cutoff",
+          "this answer was cut off before it was finished"));
+      }
       follow(was);
     } catch (e) {
       pending.body.className = "failed";
