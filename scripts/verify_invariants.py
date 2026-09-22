@@ -1750,7 +1750,7 @@ MUTATIONS: list[Mutation] = [
                '        "SELECT sha256 FROM issued_results WHERE result_ref = ? AND issued_to = ?",',
                '        "SELECT sha256 FROM issued_results WHERE result_ref = ? AND ? IS NOT NULL",  # MUTANT'),
               ("src/amoeba/turn_api.py",
-               '            budget_tokens=int(getattr(role_cfg, "tool_result_budget_tokens", 0) or 512))',
+               '            budget_tokens=int(getattr(sup.cfg, role).tool_result_budget_tokens))',
                "            budget_tokens=512)  # MUTANT: one budget for everyone"),
               ("src/amoeba/prompt_api.py",
                '        if detail == "summary":\n',

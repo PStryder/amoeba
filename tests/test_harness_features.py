@@ -319,7 +319,7 @@ def test_id_can_request_rejuvenation_and_the_harness_decides(stack: LiveStack):
     assert "rejuvenation.requested" in kinds
     if out["performed"]:
         assert out["new_session_id"] != out["old_session_id"]
-        assert "verbatim" in out["reconstitution"]
+        assert "no message was cut" in out["reconstitution"]
         assert "rejuvenation.performed" in kinds
     else:
         assert out["refused_because"]

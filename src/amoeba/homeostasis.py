@@ -59,7 +59,7 @@ from typing import Any, Callable, Sequence
 
 from . import reconstitution as rc
 from .results import issue_result, issued_digest
-from .tools import project_result
+from .tools import DEFAULT_RESULT_BUDGET_TOKENS, project_result
 from .errors import CapabilityUnsupported, InvalidInput, NotFound
 from .ids import new_id
 from .logging_setup import get_logger
@@ -469,7 +469,8 @@ class ContextHomeostasis:
         projected: list[dict[str, Any]] = []
         if not chosen["reached_target"]:
             total = chosen["kept_tokens"]
-            delivery = int(getattr(role_cfg, "tool_result_budget_tokens", 0) or 512)
+            delivery = (int(role_cfg.tool_result_budget_tokens)
+                        if role_cfg is not None else DEFAULT_RESULT_BUDGET_TOKENS)
             for bound in (delivery, REBUILD_RESULT_FLOOR_TOKENS):
                 for i, j in rc.shrinkable(units, chosen["kept_units"]):
                     if total <= target:

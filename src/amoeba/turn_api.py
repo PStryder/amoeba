@@ -330,10 +330,9 @@ def build(sup: "Supervisor") -> dict[str, Any]:  # noqa: C901
             except Exception:  # noqa: BLE001
                 sup.log.exception("could not wake Id to audit %s",
                                   result.get("conclusion_id"))
-        role_cfg = getattr(sup.cfg, role, None)
         delivered = deliver_tool_result(
             result, store=_store, count=count_tokens,
-            budget_tokens=int(getattr(role_cfg, "tool_result_budget_tokens", 0) or 512))
+            budget_tokens=int(getattr(sup.cfg, role).tool_result_budget_tokens))
         return _recorded({"accepted": True, "result": result, "reason": None,
                           "result_text": delivered["text"],
                           "result_complete": delivered["complete"],
