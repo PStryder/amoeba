@@ -30,26 +30,36 @@ Reconstitution has three possible modes and they are not interchangeable:
 ``exact``
     Replay the whole recorded token prefix. Semantically perfect, and useless
     for relieving pressure, because the context ends up the same size.
-``trim``
-    Replay a **verbatim head and tail** of the recorded tokens with a measured
-    span dropped from the middle. Still real tokens -- no paraphrase, no model
-    in the loop -- just fewer of them. The dropped span is recorded by count
-    and offset, and remains reconstructible from the checkpoint blob.
+``rebuild``
+    Reconstruct the substrate and keep cognition selectively, in whole
+    parts: the governed prompt rendered fresh, every environment block
+    removed (the next turn of a new session is given the current declaration
+    in full), settled turns dropped whole, and turns still owed an answer
+    kept whole -- an oversized result in one is shown as a bounded
+    projection naming the exact stored copy, never deleted. No message is
+    cut. See ``reconstitution``.
 ``summarise``
     Ask a model to compress the context. **Not implemented.** It is a different
-    behaviour from trimming, not a better version of it, and calling it
+    behaviour from rebuilding, not a better version of it, and calling it
     reconstitution would be a lie about what the mind now contains.
 
-``trim`` is the default, because it is the only one of the three that both
-relieves pressure and keeps every surviving token authentic.
+``rebuild`` is the default. There used to be a positional ``trim`` -- keep a
+verbatim head and tail, drop what lay between -- and live it cut Id's
+declaration off mid-line and left references to text it had removed: states
+the conversation could never have reached by itself. It is gone rather than
+kept as an option, because the rule is that nothing is token-spliced.
 """
 
 from __future__ import annotations
 
+import json
 import time
 from dataclasses import dataclass, field
 from typing import Any, Callable, Sequence
 
+from . import reconstitution as rc
+from .results import issue_result, issued_digest
+from .tools import project_result
 from .errors import CapabilityUnsupported, InvalidInput, NotFound
 from .ids import new_id
 from .logging_setup import get_logger
@@ -57,7 +67,10 @@ from .store.events import EventKind
 from .store.writer import Mutation
 
 PRESSURE_LEVELS = ("nominal", "elevated", "high", "critical")
-RECONSTITUTION_MODES = ("exact", "evict", "trim", "summarise")
+# The smallest projection a rebuild will make of a result in owed work, once
+# the role's ordinary delivery bound was not enough.
+REBUILD_RESULT_FLOOR_TOKENS = 128
+RECONSTITUTION_MODES = ("exact", "rebuild", "summarise")
 
 
 @dataclass(slots=True)
@@ -70,10 +83,10 @@ class HomeostasisConfig:
     # A role is a candidate for rejuvenation once its own context passes this
     # fraction of the per-role budget.
     role_context_high: float = 0.75
-    # trim keeps this many tokens verbatim from the head (system prompt and
-    # earliest turns) and as many as possible from the tail.
-    keep_head_tokens: int = 512
-    keep_tail_fraction: float = 0.45
+    # A rebuild keeps whole cognition up to this fraction of the role's own
+    # context budget, leaving the rest for the declaration the next turn is
+    # given and for the turn itself.
+    rebuild_keep_fraction: float = 0.40
     min_seconds_between_rejuvenations: float = 120.0
     max_rejuvenations_per_hour: int = 12
     auto_rejuvenate: bool = True
@@ -221,7 +234,7 @@ class ContextHomeostasis:
         return True, "admitted"
 
     def request_rejuvenation(self, *, role: str, reason: str, requested_by: str = "id",
-                             mode: str = "evict", operation_id: str | None = None
+                             mode: str = "rebuild", operation_id: str | None = None
                              ) -> dict[str, Any]:
         """Id's entry point. A request, not a command.
 
@@ -244,7 +257,7 @@ class ContextHomeostasis:
         return self.rejuvenate(role=role, reason=reason, mode=mode,
                                requested_by=requested_by, operation_id=operation_id)
 
-    def rejuvenate(self, *, role: str, reason: str, mode: str = "evict",
+    def rejuvenate(self, *, role: str, reason: str, mode: str = "rebuild",
                    requested_by: str = "supervisor", operation_id: str | None = None
                    ) -> dict[str, Any]:
         """Checkpoint, retire, reborn. Performed by the Harness, receipted."""
@@ -254,26 +267,22 @@ class ContextHomeostasis:
         if mode == "summarise":
             raise CapabilityUnsupported(
                 "summarising a context is a different behaviour from reconstituting "
-                "it, and is not implemented; use 'trim', which keeps every surviving "
-                "token verbatim",
+                "it, and is not implemented; use 'rebuild', which keeps every "
+                "surviving message whole",
                 mode=mode)
         inf = self._inference()
         before = self.measure()
 
         checkpoint = self.checkpoint(role=role, operation_id=operation_id)
         tokens: list[int] = checkpoint["tokens"]
-        if mode == "evict":
-            plan = self._plan_eviction_for(role, checkpoint, tokens)
-        elif mode == "trim":
-            plan = self.plan_trim(tokens)
-        else:
-            plan = {
-                "mode": "exact", "keep_head": len(tokens), "keep_tail": 0,
-                "dropped_tokens": 0, "kept_tokens": len(tokens),
-                "dropped_span": None,
-            }
-
         old_session = checkpoint["session_id"]
+        if mode == "rebuild":
+            built = self._rebuild(role, old_session, tokens, inf)
+            keep, plan = built["tokens"], built["plan"]
+        else:
+            keep = list(tokens)
+            plan = {"mode": "exact", "placed": []}
+
         inf.call("close_session", session_id=old_session)
         self._emit(EventKind.SESSION_RETIRED, {
             "role": role, "session_id": old_session, "reason": reason,
@@ -288,8 +297,6 @@ class ContextHomeostasis:
         budget = int(getattr(role_cfg, "max_context_tokens", 0) or 0) or None
         new = inf.call("open_session", role=role,
                        context_budget_tokens=budget, budget_basis="total")
-        keep = (self.apply_eviction(tokens, plan) if plan["mode"] == "evict"
-                else self.apply_trim(tokens, plan))
         if keep:
             inf.call("restore_prefix", session_id=new["session_id"], tokens=keep,
                      snapshot_id=checkpoint.get("snapshot_id"))
@@ -308,6 +315,11 @@ class ContextHomeostasis:
                 "rejuvenation would work from a closed session", role,
                 new["session_id"])
             raise
+        # Where each carried turn now sits, against the new handle. Its own
+        # row keeps the coordinates it was measured under (I94); without these
+        # the next rebuild would find every carried turn `unknown`, keep it
+        # all, and the context could only ever grow.
+        self._record_carried_spans(new["session_id"], plan.get("placed") or [])
 
         after = self.measure()
         self._history.append(time.time())
@@ -324,29 +336,23 @@ class ContextHomeostasis:
             "checkpoint_snapshot_id": checkpoint.get("snapshot_id"),
             "tokens_before": len(tokens),
             "tokens_after": len(keep),
-            "dropped_tokens": plan["dropped_tokens"],
-            # Trim removes one range; eviction removes several. Both are
-            # reported, and the singular field stays populated for trim so a
-            # caller reading it does not silently start seeing None.
-            "dropped_span": plan.get("dropped_span"),
-            "dropped_spans": plan.get("dropped_spans") or [],
-            "evicted_turns": plan.get("evicted_turns") or [],
-            "fell_back_to_trim": bool(plan.get("fell_back_to_trim")),
+            "dropped_tokens": len(tokens) - len(keep),
             "occupancy_before": round(before.occupancy, 4),
             "occupancy_after": round(after.occupancy, 4),
             "pressure_before": before.pressure,
             "pressure_after": after.pressure,
             "reconstitution": (
-                "whole finished interactions were removed at turn boundaries; "
-                "every surviving token is verbatim, the evicted turns are "
-                "not summarised, and they remain reconstructible from the "
-                "checkpoint blob"
-                if mode == "evict" else
-                "verbatim head and tail of the recorded token prefix; the dropped "
-                "span is not summarised and remains reconstructible from the "
-                "checkpoint blob"
-                if mode == "trim" else
+                "rebuilt from whole parts: the governed prompt rendered fresh, "
+                "every environment block removed so the current declaration "
+                "is given at the next turn, settled turns dropped whole, and "
+                "turns still owed an answer kept whole with any oversized "
+                "result shown as a projection of its stored copy; no message "
+                "was cut, nothing is summarised, and the checkpoint holds "
+                "every original token"
+                if mode == "rebuild" else
                 "the full recorded token prefix, replayed exactly"),
+            **({k: v for k, v in plan.items() if k != "placed"}
+               if mode == "rebuild" else {}),
         }
         self._emit(EventKind.REJUVENATION_PERFORMED, result, actor="supervisor",
                    operation_id=operation_id)
@@ -360,135 +366,208 @@ class ContextHomeostasis:
         return result
 
     # ------------------------------------------------------------------
-    def _plan_eviction_for(self, role: str, checkpoint: dict[str, Any],
-                           tokens: Sequence[int]) -> dict[str, Any]:
-        """Evict finished interactions; fall back to trim for any shortfall.
+    # rebuild: whole parts, never offsets
+    # ------------------------------------------------------------------
+    def _markers(self, inf: Any) -> dict[str, Any]:
+        """The chat template's message framing, read from the template itself.
 
-        A database upgraded in place has no recorded spans for turns taken
-        before the upgrade, so the first rejuvenation after one finds nothing
-        to evict and trims instead. That is a real path, not a theoretical
-        one, and it is why `trim` is kept rather than replaced.
+        Rendered rather than hard-coded, so the boundaries are the ones this
+        model's sessions really have.
         """
+        probe = "\x1f"
+        rendered = inf.call("apply_chat_template",
+                            messages=[{"role": "user", "content": probe}],
+                            add_assistant=False)
+        head, _, tail = rendered.partition(probe)
+        first = inf.call("tokenize", text=head, add_special=False,
+                         parse_special=True)
+        start_id = int(first[0])
+        start_text = inf.call("detokenize", tokens=[start_id], special=True)
+        return {"start_id": start_id, "start_text": start_text, "end_text": tail}
+
+    def _messages(self, tokens: Sequence[int], inf: Any,
+                  mk: dict[str, Any]) -> list[rc.Message]:
+        out = []
+        for a, b in rc.split_messages(tokens, mk["start_id"]):
+            piece = list(tokens[a:b])
+            text = inf.call("detokenize", tokens=piece, special=True)
+            role, kind, terminated, _ = rc.classify(
+                text, start_text=mk["start_text"], end_text=mk["end_text"])
+            out.append(rc.Message(start=a, end=b, tokens=piece, text=text,
+                                  role=role, kind=kind, terminated=terminated))
+        return out
+
+    def _governed_tokens(self, role: str, inf: Any) -> list[int] | None:
+        """The governed prompt, rendered the way a role primes its session."""
+        source = getattr(self, "governed_prompt", None)
+        text = source(role) if callable(source) else None
+        if not text:
+            return None
+        rendered = inf.call("apply_chat_template",
+                            messages=[{"role": "system", "content": text}],
+                            add_assistant=False)
+        return list(inf.call("tokenize", text=rendered, add_special=False,
+                             parse_special=True))
+
+    def _rebuild(self, role: str, session_id: str, tokens: Sequence[int],
+                 inf: Any) -> dict[str, Any]:
         from . import mailbox
 
-        spans = mailbox.settled_spans(self.mind.db.conn, role,
-                                      checkpoint.get("session_id"))
-        plan = self.plan_eviction(tokens, spans)
-        if plan["reached_target"] or not tokens:
-            return plan
+        mk = self._markers(inf)
+        messages = self._messages(tokens, inf, mk)
+        system = messages[0] if messages and messages[0].kind == "system" else None
+        rest = messages[1:] if system else messages
 
-        # Not enough finished work to free what is needed. Trim the remainder
-        # rather than leave the context oversized, and say so: an eviction
-        # that quietly under-delivered would look like a rejuvenation loop
-        # with no cause.
-        kept = self.apply_eviction(tokens, plan)
-        trim = self.plan_trim(kept)
-        plan = {
-            **plan,
-            "mode": "evict",
-            "fell_back_to_trim": True,
-            "trim_after_eviction": trim,
-            "dropped_tokens": len(tokens) - len(self.apply_trim(kept, trim)),
-            "kept_tokens": len(self.apply_trim(kept, trim)),
-            "note": ("finished interactions were evicted first; there were "
-                     "not enough of them to reach the budget, so the "
-                     "remainder was trimmed positionally"),
+        units = rc.group_units(rest)
+        rc.attribute(units, mailbox.session_spans(self.mind.db.conn, role, session_id),
+                     mailbox.owed_lineages(self.mind.db.conn, role))
+        # An assistant header nothing was generated into: a generation the
+        # Harness refused. It carries nothing, and keeping it would leave the
+        # next message nested inside an unopened reply. Removed after the
+        # turns are placed, because the turn that ended there counts it.
+        dropped_prompts = 0
+        if units and rc.is_empty_generation_prompt(units[-1].messages[-1]) \
+                and len(units[-1].messages) > 1:
+            units[-1].messages.pop()
+            dropped_prompts = 1
+
+        # Substrate out of every kept opening. Re-rendered from its own text,
+        # so what remains of the message is byte-for-byte what it said.
+        environments_removed = 0
+        environment_tokens = 0
+        for u in units:
+            for m in u.messages:
+                if m.kind != "opening":
+                    continue
+                text, changed = rc.strip_environment(m.text)
+                if changed:
+                    new = list(inf.call("tokenize", text=text, add_special=False,
+                                        parse_special=True))
+                    environment_tokens += m.n - len(new)
+                    environments_removed += 1
+                    m.tokens, m.text, m.rewritten = new, text, True
+
+        governed = self._governed_tokens(role, inf)
+        if governed is not None:
+            head, system_source = governed, "reconstructed"
+        elif system is not None:
+            # No binding to render from -- a partial bootstrap. The message
+            # the incarnation primed with is whole and is its governed prompt.
+            head, system_source = list(system.tokens), "verbatim"
+        else:
+            head, system_source = [], "absent"
+
+        role_cfg = getattr(self.mind.cfg, role, None)
+        budget = int(getattr(role_cfg, "max_context_tokens", 0) or 0) or len(tokens)
+        target = int(budget * self.cfg.rebuild_keep_fraction)
+        chosen = rc.plan(units, system_tokens=len(head), target=target)
+
+        # Owed work is never cut, but an oversized result in it can be shown
+        # the way a live call would show it: a bounded projection naming the
+        # exact stored copy. The continuation keeps "I called X, here is what
+        # it returned, and the rest is retrievable" instead of losing X.
+        projected: list[dict[str, Any]] = []
+        if not chosen["reached_target"]:
+            total = chosen["kept_tokens"]
+            delivery = int(getattr(role_cfg, "tool_result_budget_tokens", 0) or 512)
+            for bound in (delivery, REBUILD_RESULT_FLOOR_TOKENS):
+                for i, j in rc.shrinkable(units, chosen["kept_units"]):
+                    if total <= target:
+                        break
+                    done = self._project_message(role, units[i].messages[j],
+                                                 budget=bound, inf=inf)
+                    if done:
+                        total -= done["saved"]
+                        projected.append(done)
+                if total <= target:
+                    break
+            chosen["kept_tokens"] = total
+            chosen["reached_target"] = total <= target
+
+        body, placed = rc.assemble(units, chosen)
+        base = len(head)
+        return {
+            "tokens": head + body,
+            "plan": {
+                "system_prompt": system_source,
+                "system_prompt_changed": (system is not None and governed is not None
+                                          and list(system.tokens) != governed),
+                "messages_before": len(messages),
+                "units_before": len(units),
+                "units_kept": len(chosen["kept_units"]),
+                "units_unknown": sum(1 for u in units if u.status == "unknown"),
+                "units_owed": sum(1 for u in units if u.status == "owed"),
+                "environments_removed": environments_removed,
+                "environment_tokens_removed": environment_tokens,
+                "empty_generation_prompts_removed": dropped_prompts,
+                "dropped_units": chosen["dropped_units"],
+                "results_projected": projected,
+                "target_tokens": target,
+                "reached_target": chosen["reached_target"],
+                "placed": [{"turn_ids": u.turn_ids, "start": base + a, "end": base + b}
+                           for u, a, b in placed if u.turn_ids],
+            },
         }
-        return plan
 
-    def plan_eviction(self, tokens: Sequence[int], spans: Sequence[dict],
-                      *, target: int | None = None) -> dict[str, Any]:
-        """Drop finished interactions, oldest first, until the budget is met.
+    def _project_message(self, role: str, m: rc.Message, *, budget: int,
+                         inf: Any) -> dict[str, Any] | None:
+        """Re-render one tool-result message as a bounded projection.
 
-        The budget is the one positional trim would have produced, so the two
-        are directly comparable: same size, different cuts. Eviction removes
-        whole turns at boundaries the chat format already has; trim removes
-        whatever sits between two offsets.
-
-        Overlapping or out-of-range spans are ignored rather than trusted. The
-        offsets come from a role measuring its own session, and a role that
-        was restarted mid-turn can leave a span that no longer describes
-        anything -- acting on it would drop live context.
+        From the exact result, always: a message that already holds a
+        projection is re-projected from the stored copy its reference names,
+        so "of 17" still means seventeen. A refusal or plain-text result has
+        no structure to project and is left as it is.
         """
-        n = len(tokens)
-        if target is None:
-            head = min(self.cfg.keep_head_tokens, n)
-            target = head + int(n * self.cfg.keep_tail_fraction)
-        target = max(0, int(target))
+        parts = rc.result_body(m.text)
+        if parts is None:
+            return None
+        before, name, body, after = parts
+        try:
+            payload = json.loads(body)
+        except ValueError:
+            return None
+        if (isinstance(payload, dict) and payload.get("complete") is False
+                and payload.get("result_ref")):
+            ref = str(payload["result_ref"])
+            digest = issued_digest(self.mind, ref, role=role)
+            if digest is None:
+                return None
+            payload = json.loads(self.mind.blobs.get(digest).decode("utf-8"))
+        else:
+            ref = issue_result(self.mind, body, role=role, tool=name,
+                               actor="supervisor")[:16]
 
-        drop: list[dict] = []
-        kept = n
-        last_end = 0
-        for span in spans:
-            if kept <= target:
-                break
-            start, end = int(span["start"]), int(span["end"])
-            if start < last_end or end > n or start < 0 or end <= start:
-                continue
-            drop.append({"turn_id": span.get("turn_id"),
-                         "lineage": span.get("lineage"),
-                         "start": start, "end": end})
-            kept -= end - start
-            last_end = end
+        def count(text: str) -> int:
+            return len(inf.call("tokenize", text=text, add_special=False,
+                                parse_special=True))
 
-        dropped_tokens = sum(d["end"] - d["start"] for d in drop)
-        return {
-            "mode": "evict",
-            "target_tokens": target,
-            "dropped_tokens": dropped_tokens,
-            "kept_tokens": n - dropped_tokens,
-            "dropped_spans": drop,
-            "evicted_turns": [d["turn_id"] for d in drop],
-            "reached_target": (n - dropped_tokens) <= target,
-            "note": ("whole finished turns were removed; every surviving token "
-                     "is verbatim and every surviving turn is complete"),
-        }
+        view = project_result(payload, budget_tokens=budget, count=count, ref=ref)
+        text = before + view["text"] + after
+        tokens = list(inf.call("tokenize", text=text, add_special=False,
+                               parse_special=True))
+        if len(tokens) >= m.n:
+            return None
+        saved = m.n - len(tokens)
+        record = {"tool": name, "tokens_before": m.n, "tokens_after": len(tokens),
+                  "saved": saved, "result_ref": ref}
+        m.tokens, m.text, m.rewritten = tokens, text, True
+        return record
 
-    @classmethod
-    def apply_eviction(cls, tokens: Sequence[int], plan: dict[str, Any]
-                       ) -> list[int]:
-        """Keep everything outside the dropped spans, in order."""
-        drop = plan.get("dropped_spans") or []
-        keep: list[int] = list(tokens)
-        if drop:
-            keep = []
-            cursor = 0
-            for span in sorted(drop, key=lambda d: d["start"]):
-                keep.extend(tokens[cursor:span["start"]])
-                cursor = max(cursor, span["end"])
-            keep.extend(tokens[cursor:])
-        # A plan that could not reach the budget by eviction alone carries the
-        # positional trim it needed on top.
-        after = plan.get("trim_after_eviction")
-        if after:
-            keep = cls.apply_trim(keep, after)
-        return keep
+    def _record_carried_spans(self, session_id: str,
+                              placed: Sequence[dict[str, Any]]) -> None:
+        if not placed:
+            return
 
-    def plan_trim(self, tokens: Sequence[int]) -> dict[str, Any]:
-        """Decide what to keep. Deterministic and inspectable before it runs."""
-        n = len(tokens)
-        head = min(self.cfg.keep_head_tokens, n)
-        tail_budget = int(n * self.cfg.keep_tail_fraction)
-        tail = max(0, min(tail_budget, n - head))
-        dropped = n - head - tail
-        if dropped <= 0:
-            return {"mode": "trim", "keep_head": n, "keep_tail": 0,
-                    "dropped_tokens": 0, "kept_tokens": n, "dropped_span": None,
-                    "note": "context already smaller than the trim budget"}
-        return {
-            "mode": "trim", "keep_head": head, "keep_tail": tail,
-            "dropped_tokens": dropped, "kept_tokens": head + tail,
-            "dropped_span": {"start": head, "end": head + dropped},
-            "note": ("the kept tokens are verbatim; the dropped span is recorded by "
-                     "offset and stays in the checkpoint"),
-        }
+        def body(m: Mutation) -> None:
+            for p in placed:
+                for turn_id in p["turn_ids"]:
+                    m.conn.execute(
+                        "INSERT OR REPLACE INTO turn_spans(turn_id, session_handle,"
+                        " token_start, token_end) VALUES (?, ?, ?, ?)",
+                        (turn_id, session_id, int(p["start"]), int(p["end"])))
 
-    @staticmethod
-    def apply_trim(tokens: Sequence[int], plan: dict[str, Any]) -> list[int]:
-        if plan.get("dropped_tokens", 0) <= 0:
-            return list(tokens)
-        head, tail = plan["keep_head"], plan["keep_tail"]
-        return list(tokens[:head]) + (list(tokens[-tail:]) if tail else [])
+        self.mind.writer.apply(body, actor="supervisor", bump_version=False,
+                               mutation_id=f"homeo:spans:{new_id('h')}")
 
     def checkpoint(self, *, role: str, operation_id: str | None = None
                    ) -> dict[str, Any]:

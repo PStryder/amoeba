@@ -90,6 +90,8 @@ ROLE_BASE = (
     "board_read", "board_get_post", "board_thread", "board_stats",
     "artifact_list",
     "context_report",
+    # The exact copy of a result the mind was shown only part of.
+    "result_read",
 )
 
 # Ego's own surface. Two things are deliberately gone from an earlier draft of
@@ -210,6 +212,8 @@ _SHARED_MODEL_FACING = (
     "board_read", "board_get_post", "board_thread", "board_stats",
     # work product and self-measurement
     "artifact_list", "context_report",
+    # the rest of a result shown as a bounded projection
+    "result_read",
 )
 
 EGO_MODEL_FACING = _SHARED_MODEL_FACING + (

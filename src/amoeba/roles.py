@@ -402,9 +402,14 @@ class RoleProcess:
             out = self.sup.call(
                 "role_tool_invoke", turn_id=self.current_turn_id, name=name,
                 arguments=self._sanitise(name, arguments))
+            # `result_text` is what the Harness decided this mind is shown.
+            # It used to be dropped here, so `_feed_tool_result` re-serialized
+            # the whole result and every role saw it unbounded: live, one
+            # call put 1827 tokens into Id.
             return {"accepted": bool(out.get("accepted")),
                     "result": out.get("result"), "error": None,
-                    "reason": out.get("reason")}
+                    "reason": out.get("reason"),
+                    "result_text": out.get("result_text")}
         except Exception as exc:  # noqa: BLE001
             # Reported back to the model as a failed call rather than killing
             # the turn. A refusal the model never learns about leaves it

@@ -16,7 +16,7 @@ from __future__ import annotations
 from .ego_api import MESSAGE_KINDS, REVIEW_SUBJECTS
 from .homeostasis import RECONSTITUTION_MODES
 from .id_api import FINDING_KINDS, SEVERITIES, TARGET_ROLES
-from .prompt_api import VERDICTS as PROMPT_VERDICTS
+from .prompt_api import INCARNATION_DETAILS, VERDICTS as PROMPT_VERDICTS
 from .promptlib.model import PROMPT_MODES
 from .store.board_repo import AUTHOR_KINDS, POST_TYPES
 from .store.memory_repo import MEMORY_KINDS
@@ -42,6 +42,8 @@ ARGUMENT_VOCABULARIES: dict[tuple[str, str], tuple[tuple[str, ...], str, str]] =
     ("id_evaluate_prompt", "verdict"): (PROMPT_VERDICTS, "prompt_api.py", "VERDICTS"),
     ("id_propose_profile", "prompt_mode"): (PROMPT_MODES, "promptlib/model.py",
                                             "PROMPT_MODES"),
+    ("prompt_incarnations", "detail"): (INCARNATION_DETAILS, "prompt_api.py",
+                                        "INCARNATION_DETAILS"),
 }
 
 

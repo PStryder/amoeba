@@ -306,6 +306,7 @@ class Supervisor:
                            hardening["audit"]["exposed_paths"])
         self.mind = Mind(self.cfg)
         self.homeostasis.mind = self.mind
+        self.homeostasis.governed_prompt = self._governed_prompt
         # Configured host roots are Peter's directories, not Amoeba's state,
         # so they are deliberately NOT hardened: locking down a directory the
         # user works in would be a surprising side effect of pointing Amoeba
@@ -693,6 +694,34 @@ class Supervisor:
                 "recovered %d interrupted %s turn(s); %d trigger(s) requeued",
                 len(recovered), role or "role",
                 sum(len(r["requeued"]) for r in recovered))
+
+    def _governed_prompt(self, role: str) -> str | None:
+        """The prompt this role's incarnation was bound to, for a rebuild.
+
+        Resolved from the library by the binding's own profile ref and held to
+        the digest the binding froze, so a rebuilt session is primed with
+        exactly what the incarnation was born with -- not with whatever the
+        library selects now. `None` when that cannot be shown, and the
+        rebuild then keeps the message the session was primed with.
+        """
+        from .ids import sha256_hex
+
+        row = self.mind.db.conn.execute(
+            "SELECT profile_ref, prompt_sha256 FROM incarnation_profiles"
+            " WHERE actor_id = ? AND actor_kind = ?"
+            " ORDER BY created_at DESC LIMIT 1", (role, role)).fetchone()
+        if row is None or not row["profile_ref"]:
+            return None
+        try:
+            text = self.methods()["prompt_resolve"](
+                profile_ref=row["profile_ref"], include_text=True)["prompt_text"]
+        except Exception:  # noqa: BLE001
+            self.log.warning("could not resolve %s for a rebuild",
+                             row["profile_ref"], exc_info=True)
+            return None
+        if sha256_hex(text.encode("utf-8")) != row["prompt_sha256"]:
+            return None
+        return text
 
     def hand_over_session(self, role: str, session_id: str | None, *,
                           reason: str = "") -> bool:

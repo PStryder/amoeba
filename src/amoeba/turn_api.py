@@ -28,10 +28,12 @@ import time
 from typing import TYPE_CHECKING, Any
 
 from .argcheck import argument_problem
+from .results import issue_result, issued_digest
 from . import mailbox
 from .errors import InvalidInput, NotFound
 from .scopes import model_facing_verbs
-from .tools import bounded_tool_result, redact_arguments as _redact
+from .tools import (RESULT_READ_VERB, deliver_tool_result, read_result_path,
+                    redact_arguments as _redact)
 from .store.events import EventKind
 from .store.writer import Mutation
 
@@ -163,7 +165,7 @@ def build(sup: "Supervisor") -> dict[str, Any]:  # noqa: C901
         try:
             done = sup.methods()["context_rejuvenate"](
                 role=role, reason="context pressure at a turn boundary",
-                mode="trim")
+                mode="rebuild")
         except Exception as exc:  # noqa: BLE001
             sup.log.warning("rejuvenation for %s failed: %s", role, exc)
             return {"performed": False, "reason": str(exc)[:200]}
@@ -310,16 +312,11 @@ def build(sup: "Supervisor") -> dict[str, Any]:  # noqa: C901
             return _recorded({"accepted": False, "result": None,
                               "reason": reason[:500]}, role_name=role)
         # Bounded here rather than in the role process: this is the side
-        # that can store what does not fit, and a digest named by a notice has
-        # to be a digest something actually holds.
+        # that can store what does not fit, and a reference a projection names
+        # has to be one something actually holds -- and one this role was
+        # given, so `result_read` can open it for this role and nobody else.
         def _store(text: str) -> str:
-            digest = mind.blobs.put(text.encode("utf-8"))
-            mind.writer.apply(
-                lambda m: m.register_blob(digest, len(text.encode("utf-8")),
-                                          "application/json",
-                                          "tool_result_full"),
-                actor=role, bump_version=False)
-            return digest
+            return issue_result(mind, text, role=role, tool=name)
 
         # Ego putting a claim into the auditable record is what wakes Id to
         # audit it -- the claim is intentional now, so this is signal rather
@@ -333,12 +330,49 @@ def build(sup: "Supervisor") -> dict[str, Any]:  # noqa: C901
             except Exception:  # noqa: BLE001
                 sup.log.exception("could not wake Id to audit %s",
                                   result.get("conclusion_id"))
-        bounded = bounded_tool_result(result, store=_store)
+        role_cfg = getattr(sup.cfg, role, None)
+        delivered = deliver_tool_result(
+            result, store=_store, count=count_tokens,
+            budget_tokens=int(getattr(role_cfg, "tool_result_budget_tokens", 0) or 512))
         return _recorded({"accepted": True, "result": result, "reason": None,
-                "result_text": bounded["text"],
-                "result_truncated": bounded["truncated"],
-                "result_chars": bounded["chars"],
-                          "result_sha256": bounded["sha256"]}, role_name=role)
+                          "result_text": delivered["text"],
+                          "result_complete": delivered["complete"],
+                          "result_tokens": delivered["tokens"],
+                          "result_chars": delivered["chars"],
+                          "result_ref": delivered["result_ref"],
+                          "result_sha256": delivered["sha256"]}, role_name=role)
+
+    def count_tokens(text: str) -> int:
+        """Model tokens, measured by the model's own tokenizer.
+
+        Characters only if the tokenizer cannot be reached, which can only
+        over-state a result's size: a bound that errs that way withholds
+        more than it needed to, and says so, rather than overrunning.
+        """
+        try:
+            return len(sup.client("inference").call(
+                "tokenize", text=text, add_special=False, parse_special=True))
+        except Exception:  # noqa: BLE001
+            sup.log.debug("counting a tool result in characters", exc_info=True)
+            return len(text)
+
+    def result_read(*, result_ref: str, path: str | None = None, offset: int = 0,
+                    limit: int | None = None, turn_id: str | None = None
+                    ) -> dict[str, Any]:
+        """The exact stored result behind a bounded projection, or any part of it."""
+        if not turn_id:
+            raise InvalidInput("result_read belongs to a role's turn")
+        row = mind.db.conn.execute(
+            "SELECT role FROM role_turns WHERE turn_id = ?", (turn_id,)).fetchone()
+        if row is None:
+            raise NotFound("no such turn", turn_id=turn_id)
+        digest = issued_digest(mind, result_ref, role=row["role"])
+        if digest is None:
+            raise NotFound("no result with that reference was shown to you",
+                           result_ref=result_ref)
+        full = json.loads(mind.blobs.get(digest).decode("utf-8"))
+        return read_result_path(full, path, offset=offset, limit=limit)
+
 
     # ==================================================================
     # Queueing: the Harness noticing that something happened
@@ -487,6 +521,7 @@ def build(sup: "Supervisor") -> dict[str, Any]:  # noqa: C901
         "role_complete_turn": role_complete_turn,
         "role_abandon_turn": role_abandon_turn,
         "role_tool_invoke": role_tool_invoke,
+        RESULT_READ_VERB: result_read,
         "role_enqueue_trigger": role_enqueue_trigger,
         "operator_message_role": operator_message_role,
         "role_mailbox": role_mailbox,

@@ -241,7 +241,7 @@ def build(sup: "Supervisor") -> dict[str, Any]:  # noqa: C901
     # ==================================================================
     # Homeostasis
     # ==================================================================
-    def id_request_rejuvenation(*, target_role: str, reason: str, mode: str = "trim",
+    def id_request_rejuvenation(*, target_role: str, reason: str, mode: str = "rebuild",
                                 pulse_id: str | None = None,
                                 operation_id: str | None = None) -> dict[str, Any]:
         """Request that a role's context be rejuvenated.

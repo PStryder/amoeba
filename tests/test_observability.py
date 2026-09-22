@@ -82,7 +82,7 @@ def test_the_overview_shows_measured_context(stack):
 
 
 def test_a_binding_shows_what_the_harness_supplied(stack):
-    bindings = stack.call("prompt_incarnations")["bindings"]
+    bindings = stack.call("prompt_incarnations", detail="full")["bindings"]
     assert bindings
     for b in bindings:
         assert "harness_constraints" in b, b

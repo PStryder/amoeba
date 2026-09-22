@@ -20,8 +20,7 @@ class HomeostasisSettings:
     high: float = 0.70
     critical: float = 0.85
     role_context_high: float = 0.75
-    keep_head_tokens: int = 512
-    keep_tail_fraction: float = 0.45
+    rebuild_keep_fraction: float = 0.40
     min_seconds_between_rejuvenations: float = 120.0
     max_rejuvenations_per_hour: int = 12
     auto_rejuvenate: bool = True
@@ -248,6 +247,10 @@ class RoleConfig:
     # the whole of the default pool; the real numbers live in config.toml
     # beside the `n_ctx` they have to fit inside.
     max_context_tokens: int = 6144
+    # How many tokens of one tool result this role is shown. A result that
+    # does not fit is delivered as a bounded projection with a reference to
+    # the exact stored copy, never cut.
+    tool_result_budget_tokens: int = 512
 
 
 @dataclass(slots=True)

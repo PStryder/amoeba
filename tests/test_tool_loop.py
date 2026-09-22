@@ -444,76 +444,85 @@ def test_a_neuocyte_can_propose_an_artifact_but_not_promote_it(stack):
 # ===========================================================================
 def test_a_tool_result_that_fits_is_shown_whole(cfg):
     """The bound is a ceiling, not a formatter. Nothing is added below it."""
-    from amoeba.tools import bounded_tool_result
+    from amoeba.tools import deliver_tool_result
 
-    out = bounded_tool_result({"state_version": 7})
-    assert out["truncated"] is False
-    assert out["sha256"] is None
+    out = deliver_tool_result({"state_version": 7})
+    assert out["complete"] is True
+    assert out["sha256"] is None and out["result_ref"] is None
     assert out["text"] == '{"state_version": 7}'
-    assert "truncated" not in out["text"]
 
 
-def test_a_truncated_tool_result_says_so_and_names_where_the_rest_is(cfg):
-    """The defect was silence, so the test is about what the notice contains.
+def test_an_oversized_result_is_projected_whole_and_says_what_it_left_out(cfg):
+    """Never chopped: whole items, how many of how many, and where the rest is.
 
-    A model shown eight of twenty work items and told nothing will reason as
-    though the list is complete. It has to learn three things: that it was
-    cut, how much it did not see, and what to do about it.
+    The old bound cut the serialized JSON at 2000 characters -- half a value
+    in the context, priced in the wrong unit. A model has to learn that the
+    view is partial, how much it did not see, and how to get it.
     """
-    from amoeba.tools import bounded_tool_result, MAX_TOOL_RESULT_CHARS
+    import json as _json
 
-    payload = {"items": [{"id": f"w{i}", "note": "x" * 80} for i in range(60)]}
+    from amoeba.tools import deliver_tool_result
+
+    payload = {"items": [{"id": f"w{i}", "note": "x" * 80} for i in range(60)],
+               "state_version": 3}
     digest = "a" * 64
-    out = bounded_tool_result(payload, store=lambda _text: digest)
-
-    assert out["truncated"] is True
-    assert out["chars"] > MAX_TOOL_RESULT_CHARS
-    assert out["sha256"] == digest
-    # what was shown, and that it was cut
-    assert out["text"].startswith('{"items":')
-    assert "truncated" in out["text"]
-    # how much was not shown -- both numbers, so the model can judge the gap
-    assert str(MAX_TOOL_RESULT_CHARS) in out["text"]
-    assert str(out["chars"]) in out["text"]
-    # where the rest is, and what to do
-    assert digest in out["text"]
-    assert "Narrow the call" in out["text"]
-    assert "complete result" in out["text"]
+    out = deliver_tool_result(payload, budget_tokens=400, count=lambda t: len(t) // 3,
+                              store=lambda _text: digest)
+    view = _json.loads(out["text"])                       # whole JSON, always
+    assert out["complete"] is False and view["complete"] is False
+    assert out["sha256"] == digest and view["result_ref"] == digest[:16]
+    assert view["list"]["of"] == 60 and 0 < view["list"]["returned"] < 60
+    assert view["list"]["next_offset"] == view["list"]["returned"]
+    shown = view["result"]["items"]
+    assert shown == payload["items"][:len(shown)], "an item was cut or altered"
+    assert view["result"]["state_version"] == 3
+    assert "result_read" in view["retrieve"]
+    assert out["tokens"] <= 400
 
 
-def test_a_truncation_notice_claims_no_digest_it_was_not_given(cfg):
-    """Pointing at a copy nobody stored would be worse than saying nothing.
+def test_a_value_too_large_to_show_is_named_not_cut(cfg):
+    import json as _json
 
-    The notice is only as good as the thing it names, so without a store the
-    wording must not claim one exists.
-    """
-    from amoeba.tools import bounded_tool_result
+    from amoeba.tools import deliver_tool_result
 
-    out = bounded_tool_result({"items": ["y" * 100 for _ in range(60)]})
-    assert out["truncated"] is True
-    assert out["sha256"] is None
-    assert "stored as" not in out["text"]
-    assert "sha256" not in out["text"]
-    assert "Narrow the call" in out["text"]
+    payload = {"namespace": "id", "prompt_text": "doctrine " * 800}
+    out = deliver_tool_result(payload, budget_tokens=120, count=lambda t: len(t) // 3,
+                              store=lambda _text: "c" * 64)
+    view = _json.loads(out["text"])
+    marker = view["result"]["prompt_text"]
+    assert marker["omitted"] == "string" and marker["path"] == "prompt_text"
+    assert marker["chars"] == len(_json.dumps(payload["prompt_text"]))
+    assert view["result"]["namespace"] == "id"
+    assert view["omitted"] == ["prompt_text"]
 
 
-def test_the_copy_a_truncation_notice_names_is_really_there(mind):
-    """The digest has to resolve, against a real blob store.
+def test_a_projection_claims_no_copy_it_was_not_given(cfg):
+    """Pointing at a copy nobody stored would be worse than saying nothing."""
+    import json as _json
 
-    A notice naming content nothing holds is theatre: an operator following
-    the digest finds nothing, and the model was told a comforting falsehood
-    about where its missing data went.
-    """
-    from amoeba.tools import bounded_tool_result
+    from amoeba.tools import deliver_tool_result
+
+    out = deliver_tool_result({"items": ["y" * 100 for _ in range(60)]},
+                              budget_tokens=300)
+    view = _json.loads(out["text"])
+    assert out["complete"] is False
+    assert out["sha256"] is None and view["result_ref"] is None
+    assert view["retrieve"] == "narrow the call"
+    assert out["counted"] == "characters"
+
+
+def test_the_copy_a_projection_names_is_really_there(mind):
+    """The reference has to resolve, against a real blob store."""
+    import json as _json
+
+    from amoeba.tools import deliver_tool_result
 
     payload = {"items": [{"id": f"w{i}", "note": "z" * 80} for i in range(60)]}
-    out = bounded_tool_result(
-        payload, store=lambda text: mind.blobs.put(text.encode("utf-8")))
-
-    assert out["truncated"] is True and out["sha256"]
+    out = deliver_tool_result(
+        payload, budget_tokens=300,
+        store=lambda text: mind.blobs.put(text.encode("utf-8")))
+    assert out["complete"] is False and out["sha256"]
     stored = mind.blobs.get(out["sha256"]).decode("utf-8")
-    assert len(stored) == out["chars"]
-    import json as _json
     assert _json.loads(stored) == payload, "the stored copy is not the result"
 
 
@@ -526,10 +535,10 @@ def test_the_neuocyte_feeds_back_the_bounded_text_it_was_given(cfg):
     truncation would become silent again at the last step.
     """
     inf = _FakeInference([TOOL_CALL, "FINDING: done"])
-    bounded = "SHOWN" * 10 + "\n\n[truncated: showing the first 50 of 9000 characters.]"
+    bounded = '{"complete": false, "result_ref": null, "retrieve": "narrow the call", "result": "SHOWN"}'
     sup = _FakeSupervisorRpc({"name": "current_state_version", "accepted": True,
                               "result": {"items": ["ignored"]},
-                              "result_text": bounded, "result_truncated": True,
+                              "result_text": bounded, "result_complete": False,
                               "result_chars": 9000, "result_sha256": "b" * 64,
                               "error": None, "reason": "executed",
                               "receipt_id": "rcp_1"})
@@ -538,7 +547,7 @@ def test_the_neuocyte_feeds_back_the_bounded_text_it_was_given(cfg):
                             max_turns=6)
 
     fed = "\n".join(inf.ingested)
-    assert "[truncated:" in fed, "the truncation notice never reached the model"
+    assert '"complete": false' in fed, "the bounded view never reached the model"
     assert "ignored" not in fed, "the process re-serialized instead of rendering"
 
 

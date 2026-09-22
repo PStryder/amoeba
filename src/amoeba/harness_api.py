@@ -25,7 +25,7 @@ from .ids import new_id, sha256_hex
 from .sandbox import SandboxLimits
 from .store.events import EventKind
 from .filespace import decode_exact_text
-from .tools import (ToolCallRequest, bounded_tool_result,
+from .tools import (ToolCallRequest, deliver_tool_result,
                     redact_arguments as _redact,
                     build_neuocyte_registry)
 from .waking import wake_owner_of_work
@@ -1023,15 +1023,17 @@ def build(sup: "Supervisor") -> dict[str, Any]:  # noqa: C901
                                        operation_id=operation_id,
                                        bump_version=outcome.accepted
                                        and not outcome.error)
-        bounded = bounded_tool_result(
-            outcome.result,
+        # A neuocyte has no `result_read`, so its projection says to narrow
+        # the call instead of naming a retrieval it cannot make.
+        delivered = deliver_tool_result(
+            outcome.result, retrieve=None,
             store=lambda text: mind.blobs.put(text.encode("utf-8")))
         return {**outcome.to_dict(), "receipt_id": receipt.receipt_id,
                 "turn": turn,
-                "result_text": bounded["text"],
-                "result_truncated": bounded["truncated"],
-                "result_chars": bounded["chars"],
-                "result_sha256": bounded["sha256"],
+                "result_text": delivered["text"],
+                "result_complete": delivered["complete"],
+                "result_chars": delivered["chars"],
+                "result_sha256": delivered["sha256"],
                 "available_tools": registry.names(role="neuocyte")}
 
     def tool_schemas(*, work_id: str | None = None, role: str = "neuocyte"
@@ -1057,7 +1059,7 @@ def build(sup: "Supervisor") -> dict[str, Any]:  # noqa: C901
         """Whether a role's context is healthy enough to keep reasoning in."""
         return sup.homeostasis.assess()
 
-    def context_rejuvenate(*, role: str, reason: str, mode: str = "evict",
+    def context_rejuvenate(*, role: str, reason: str, mode: str = "rebuild",
                            operation_id: str | None = None) -> dict[str, Any]:
         """Harness-initiated. Ego and Id cannot call this; they request."""
         return sup.homeostasis.rejuvenate(role=role, reason=reason, mode=mode,
@@ -1065,7 +1067,7 @@ def build(sup: "Supervisor") -> dict[str, Any]:  # noqa: C901
                                           operation_id=operation_id)
 
     def request_rejuvenation(*, role: str, reason: str, requested_by: str = "id",
-                             mode: str = "evict", operation_id: str | None = None
+                             mode: str = "rebuild", operation_id: str | None = None
                              ) -> dict[str, Any]:
         return sup.homeostasis.request_rejuvenation(
             role=role, reason=reason, requested_by=requested_by, mode=mode,

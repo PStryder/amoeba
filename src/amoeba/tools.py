@@ -22,46 +22,229 @@ from .errors import InvalidInput
 from .ids import sha256_hex
 
 
-MAX_TOOL_RESULT_CHARS = 2000
-"""How much of a tool result is shown to the model.
+DEFAULT_RESULT_BUDGET_TOKENS = 512
+"""How many model tokens of one tool result a mind is shown, when nothing says otherwise.
 
-A bound, not a policy about what matters: the first N characters of a JSON
-document are whatever the serializer happened to emit first. What makes the
-bound safe is that exceeding it is *stated*, so a model reasoning from eight
-of twenty work items knows there are twelve more rather than concluding the
-list is complete.
+In tokens, because tokens are what a context spends: live, 3150 characters of
+digest-heavy JSON cost Id 1827 of them, which a character bound would have
+priced at a third of that.
 """
 
+RESULT_READ_VERB = "result_read"
 
-def bounded_tool_result(payload: Any, *, budget: int = MAX_TOOL_RESULT_CHARS,
-                        store: Callable[[str], str] | None = None
-                        ) -> dict[str, Any]:
-    """Serialize a tool result and, when it does not fit, say so.
+# A value smaller than this is never worth replacing with a marker: the marker
+# would cost as much as what it stands for.
+_OMIT_MIN_CHARS = 48
+_MAX_OMISSIONS = 64
 
-    `store` is given the full text and returns a digest for it. It is optional
-    only so this stays testable without a blob store; in the Harness it is
-    always supplied, because a truncation notice naming a digest that was
-    never stored would be worse than no notice at all.
 
-    The notice is phrased as an instruction because the model has a real
-    remedy available. It cannot read the stored copy -- no capability for that
-    exists on either cognitive path, deliberately -- but nearly every sense
-    takes a filter or a limit, so the useful thing to tell it is to ask again
-    more narrowly.
+def _dump(obj: Any) -> str:
+    return json.dumps(obj, default=str)
+
+
+def _path_text(path: tuple) -> str:
+    out = ""
+    for p in path:
+        out += f"[{p}]" if isinstance(p, int) else (f".{p}" if out else str(p))
+    return out
+
+
+def _get(obj: Any, path: tuple) -> Any:
+    for p in path:
+        obj = obj[p]
+    return obj
+
+
+def _put(obj: Any, path: tuple, value: Any) -> Any:
+    if not path:
+        return value
+    _get(obj, path[:-1])[path[-1]] = value
+    return obj
+
+
+def _is_marker(v: Any) -> bool:
+    return isinstance(v, dict) and set(v) >= {"omitted", "chars"}
+
+
+def _principal_list(view: Any) -> tuple | None:
+    """The list a result is mostly made of, if it is made of one."""
+    if isinstance(view, list):
+        return ()
+    if isinstance(view, dict):
+        best, size = None, 0
+        for k, v in view.items():
+            if isinstance(v, list) and v:
+                n = len(_dump(v))
+                if n > size:
+                    best, size = (k,), n
+        return best
+    return None
+
+
+def _omittable(obj: Any, path: tuple = ()) -> list[tuple[int, tuple]]:
+    out: list[tuple[int, tuple]] = []
+    items = (obj.items() if isinstance(obj, dict)
+             else enumerate(obj) if isinstance(obj, list) else ())
+    for k, v in items:
+        if _is_marker(v):
+            continue
+        size = len(_dump(v))
+        if size > _OMIT_MIN_CHARS:
+            out.append((size, path + (k,)))
+            out.extend(_omittable(v, path + (k,)))
+    return out
+
+
+def _marker(value: Any, path: tuple) -> dict[str, Any]:
+    kind = ("list" if isinstance(value, list) else "object" if isinstance(value, dict)
+            else "string" if isinstance(value, str) else type(value).__name__)
+    m: dict[str, Any] = {"omitted": kind, "chars": len(_dump(value)),
+                         "path": _path_text(path)}
+    if isinstance(value, (list, dict)):
+        m["items"] = len(value)
+    return m
+
+
+def _envelope(view: Any, *, ref: str | None, listing: dict | None,
+              omitted: list[str], retrieve: str | None) -> dict[str, Any]:
+    env: dict[str, Any] = {"complete": False, "result_ref": ref}
+    if listing:
+        env["list"] = listing
+    if omitted:
+        env["omitted"] = omitted
+    env["retrieve"] = (f"{retrieve}(result_ref, path, offset, limit)"
+                       if retrieve and ref else "narrow the call")
+    env["result"] = view
+    return env
+
+
+def project_result(payload: Any, *, budget_tokens: int,
+                   count: Callable[[str], int], ref: str | None,
+                   retrieve: str | None = RESULT_READ_VERB) -> dict[str, Any]:
+    """A bounded view of a result that says exactly what it leaves out.
+
+    Always whole JSON. A result that is mostly one list shows whole items from
+    the start and says how many of how many; anything else too large is
+    replaced, largest first, by a marker naming its path and size. Nothing is
+    cut mid-value, and nothing is left out without saying so.
     """
-    text = json.dumps(payload, default=str)
-    if len(text) <= budget:
-        return {"text": text, "truncated": False,
-                "chars": len(text), "sha256": None}
+    view = json.loads(_dump(payload))
+    listing: dict[str, Any] | None = None
+    omitted: list[str] = []
+
+    def text() -> str:
+        return _dump(_envelope(view, ref=ref, listing=listing, omitted=omitted,
+                               retrieve=retrieve))
+
+    def fits() -> bool:
+        return count(text()) <= budget_tokens
+
+    def listed(k: int, total: int) -> dict[str, Any]:
+        out: dict[str, Any] = {"path": _path_text(lp) or "", "returned": k, "of": total}
+        if k < total:
+            out["next_offset"] = k
+        return out
+
+    def omit_until_fits() -> None:
+        nonlocal view
+        for _ in range(_MAX_OMISSIONS):
+            if fits():
+                return
+            candidates = [c for c in _omittable(view) if c[1] != lp]
+            if not candidates:
+                return
+            _size, path = max(candidates, key=lambda c: (c[0], -len(c[1])))
+            view = _put(view, path, _marker(_get(view, path), path))
+            omitted.append(_path_text(path))
+
+    lp = _principal_list(view)
+    if lp is not None:
+        items = _get(view, lp)
+        total = len(items)
+        lo, hi = 1, total
+        while lo < hi:                       # the largest k that fits, at least 1
+            mid = (lo + hi + 1) // 2
+            view, listing = _put(view, lp, items[:mid]), listed(mid, total)
+            if fits():
+                lo = mid
+            else:
+                hi = mid - 1
+        view, listing = _put(view, lp, items[:lo]), listed(lo, total)
+    omit_until_fits()
+    if not fits() and lp is not None:
+        # Not even one whole item fits: the shape and the count still do.
+        view = _put(json.loads(_dump(payload)), lp, [])
+        listing, omitted = listed(0, len(_get(payload, lp))), []
+        omit_until_fits()
+    if not fits():
+        # Nothing smaller is left to take out piecemeal: say what there was.
+        view = _marker(payload, ())
+        listing, omitted = None, ["(the whole result)"]
+    body = text()
+    return {"text": body, "tokens": count(body), "listing": listing,
+            "omitted": omitted}
+
+
+def deliver_tool_result(payload: Any, *, budget_tokens: int = DEFAULT_RESULT_BUDGET_TOKENS,
+                        count: Callable[[str], int] | None = None,
+                        store: Callable[[str], str] | None = None,
+                        retrieve: str | None = RESULT_READ_VERB) -> dict[str, Any]:
+    """What a mind is shown of a tool result, and whether that is all of it.
+
+    A result that fits is shown whole. One that does not is never chopped:
+    the exact text is stored, and the mind is shown a bounded projection that
+    names what it omits and how to get it (`project_result`). The old bound
+    cut the serialized JSON at 2000 characters, which left half a value in
+    the context and was priced in the wrong unit.
+
+    `count` measures model tokens; without one, characters are counted, which
+    can only over-state the cost. `store` returns the digest of the stored
+    copy; `result_ref` is its first sixteen hex digits.
+    """
+    counted = "tokens" if count is not None else "characters"
+    count = count or len
+    text = _dump(payload)
+    n = count(text)
+    if n <= budget_tokens:
+        return {"text": text, "complete": True, "tokens": n, "chars": len(text),
+                "counted": counted, "sha256": None, "result_ref": None}
     digest = store(text) if store is not None else None
-    where = (f" The whole result is stored as sha256 {digest}."
-             if digest else "")
-    notice = (f"\n\n[truncated: showing the first {budget} of {len(text)} "
-              f"characters.{where} Narrow the call -- a tighter filter, fewer "
-              f"items, a smaller range -- if you need the rest. Do not treat "
-              f"what is shown as the complete result.]")
-    return {"text": text[:budget] + notice, "truncated": True,
-            "chars": len(text), "sha256": digest}
+    ref = digest[:16] if digest else None
+    view = project_result(payload, budget_tokens=budget_tokens, count=count,
+                          ref=ref, retrieve=retrieve)
+    return {"text": view["text"], "complete": False, "tokens": view["tokens"],
+            "chars": len(text), "full_tokens": n, "counted": counted,
+            "sha256": digest, "result_ref": ref,
+            "listing": view["listing"], "omitted": view["omitted"]}
+
+
+def read_result_path(full: Any, path: str | None, *, offset: int = 0,
+                     limit: int | None = None) -> Any:
+    """Navigate a stored result: `bindings`, `bindings[3].effective_settings`."""
+    obj = full
+    for part in re.findall(r"[^.\[\]]+", path or ""):
+        if isinstance(obj, list):
+            if not part.lstrip("-").isdigit():
+                raise InvalidInput("a list is indexed by number", path=path, at=part)
+            idx = int(part)
+            if not -len(obj) <= idx < len(obj):
+                raise InvalidInput("index out of range", path=path, at=part,
+                                   length=len(obj))
+            obj = obj[idx]
+        elif isinstance(obj, dict):
+            if part not in obj:
+                raise InvalidInput("no such field", path=path, at=part,
+                                   allowed=sorted(map(str, obj))[:40])
+            obj = obj[part]
+        else:
+            raise InvalidInput("nothing below a plain value", path=path, at=part)
+    if isinstance(obj, list):
+        start = max(0, int(offset))
+        stop = len(obj) if limit is None else start + max(0, int(limit))
+        return {"path": path or "", "offset": start, "of": len(obj),
+                "items": obj[start:stop]}
+    return {"path": path or "", "value": obj}
+
 
 # A tool call is requested by emitting exactly this block.
 TOOL_CALL_RE = re.compile(

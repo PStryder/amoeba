@@ -923,13 +923,12 @@ for twenty work items and was shown eight had no way to know the other twelve
 existed -- and would reason confidently from a truncated world. The same
 defect as I76, in the opposite direction. The Harness bounds the result,
 because it is the side that can store what does not fit and therefore name a
-digest something actually holds, and the notice says how much was withheld and
-what to do about it. The cognitive processes render what they are given and
-cut nothing: the limit used to live in both of them as a bare slice, free to
-drift from each other and to remove the notice at the last step.
-→ `test_a_truncated_tool_result_says_so_and_names_where_the_rest_is`,
-`test_the_copy_a_truncation_notice_names_is_really_there`,
-`test_a_truncation_notice_claims_no_digest_it_was_not_given`,
+copy something actually holds, and what it shows says how much was left out
+and how to reach it. The cognitive processes render what they are given and
+cut nothing. How the bound is applied -- never by cutting -- is I123.
+→ `test_an_oversized_result_is_projected_whole_and_says_what_it_left_out`,
+`test_the_copy_a_projection_names_is_really_there`,
+`test_a_projection_claims_no_copy_it_was_not_given`,
 `test_the_neuocyte_feeds_back_the_bounded_text_it_was_given`,
 `test_a_tool_result_that_fits_is_shown_whole`
 
@@ -1054,25 +1053,22 @@ started and the length when it ended are that turn's, all of them and nothing
 else. That makes the mapping exact rather than estimated, and it is what lets
 a finished interaction be removed at a boundary the chat format already has.
 
-Eviction is demand-driven and refuses more than it accepts. It drops settled
-interactions oldest-first and only as far as the budget requires, so a quiet
-role loses nothing; a lineage still owed an answer is never evicted however
-old, because losing a thought mid-flight is the failure I80 exists to prevent
-and arriving there through housekeeping is no better; a span that was never
-measured, or was measured in a previous session, is kept, because "I do not
-know what this is" must not resolve to "so remove it". Every surviving token
-is verbatim -- removal is the only operation, and nothing summarises the
-organism's own history. When there is not enough finished work to reach the
-budget, the positional trim still runs and the result says that is what
-happened.
-→ `test_a_lineage_still_owed_an_answer_is_never_evictable`,
-`test_a_turn_with_no_measured_span_is_never_evictable`,
-`test_spans_from_another_session_are_never_evictable`,
-`test_an_overlapping_or_impossible_span_is_ignored`,
-`test_eviction_drops_oldest_first_and_only_what_is_needed`,
-`test_eviction_keeps_every_surviving_token_verbatim`,
-`test_a_settled_interaction_is_evictable`,
-`test_eviction_that_cannot_reach_the_budget_says_so`
+Removal is demand-driven and refuses more than it accepts. Settled
+interactions go oldest-first and only as far as the target requires, so a
+quiet role loses nothing; a lineage still owed an answer is never removed
+however old, because losing a thought mid-flight is the failure I80 exists to
+prevent and arriving there through housekeeping is no better; a turn that was
+never measured, or was measured in a previous session, is kept, because "I do
+not know what this is" must not resolve to "so remove it". Positional trim no
+longer exists even as a fallback: see I122 for what a rebuild does instead.
+→ `test_a_lineage_still_owed_an_answer_is_never_removable`,
+`test_a_turn_with_no_measured_span_is_never_removable`,
+`test_spans_from_another_session_are_never_removable`,
+`test_a_settled_interaction_is_removable`,
+`test_a_span_that_fits_no_unit_places_nothing`,
+`test_settled_turns_go_oldest_first_and_only_as_far_as_needed`,
+`test_a_turn_still_owed_an_answer_is_never_removed`,
+`test_a_turn_the_record_cannot_place_is_kept`
 
 **I94. The recorded session handle follows the live one.** Rejuvenation closes
 a role's session and opens a fresh one, and `hand_over_session` tells the role
@@ -1091,17 +1087,17 @@ continue -- which is the reason the session is handed over instead of the role
 being restarted.
 
 This is also what makes token coordinates safe to keep forever. A span is
-recorded against the handle it was measured under, and after an eviction the
-surviving tokens sit at different offsets, so every earlier span is stale.
+recorded against the handle it was measured under, and after a rebuild the
+surviving messages sit at different offsets, so every earlier span is stale.
 They are not remapped and they are not deleted: they stay attached to a
-handle that is now closed, and eviction filters on the current one. Stale
-coordinates are therefore unreachable rather than merely unlikely to be
-chosen, and the historical record stays truthful about the session it
-described.
+handle that is now closed, and a rebuild reads only the current one. Where
+it placed each kept turn is recorded separately, against the new handle
+(I122), so the historical record stays truthful about the session it
+described and the next rebuild can still place what it carried.
 → `test_a_second_rejuvenation_does_not_resurrect_what_the_first_dropped`,
 `test_a_rejuvenated_role_keeps_its_identity_and_gains_a_new_handle`,
-`test_an_eviction_never_reads_spans_measured_in_a_previous_session`,
-`test_spans_from_another_session_are_never_evictable`
+`test_spans_of_a_closed_session_never_place_a_turn_in_its_successor`,
+`test_spans_from_another_session_are_never_removable`
 
 **I95. What became of an attempt travels with what it said.** A neuocyte's
 window onto other work is almost entirely the blackboard -- no `get_work`, no
@@ -1636,6 +1632,60 @@ ceiling the Harness supplied looked like one the profile stated.
 → `test_a_role_tool_call_is_on_its_operations_history`,
 `test_the_overview_shows_measured_context`,
 `test_a_binding_shows_what_the_harness_supplied`
+
+**I122. A rebuilt context is one the conversation could have reached by
+itself.** Measured on Id's live session, rejuvenation kept a 512-token head
+that cut the capability declaration off after 227 tokens, mid-line; kept two
+"the declaration given earlier still applies" references to text it had just
+removed; resumed the tail in the middle of a tool result; and then sent the
+whole declaration again -- a cycle that retired Id's session every few
+minutes from seq 292 on. None of those states could have arisen naturally.
+The rule is: environment is reconstructed, cognition is preserved
+selectively, neither is token-spliced. The checkpoint is split at the
+template's own message-start token. The governed prompt is rendered fresh
+from the binding and held to its frozen digest. Every environment block,
+declaration or reference, is removed, because a new session's next turn is
+given the current declaration in full (I118) immediately before it is used,
+so nothing kept can point at text that is gone. Settled turns are removed
+whole; owed turns lose nothing, and an oversized result in one is re-rendered
+as the bounded projection a live call would get, from its exact stored copy --
+"I called X, here is what it returned, the rest is retrievable" -- rather than
+deleted. Where a turn sits in the new session is recorded against the new
+handle, so the next rebuild can still tell settled work from owed work; the
+turn's own row keeps the coordinates it was measured under (I94). A rebuild
+that cannot reach its target says so and cuts nothing.
+→ `test_every_message_of_a_rebuilt_session_is_whole`,
+`test_no_environment_block_or_reference_survives_a_rebuild`,
+`test_the_governed_prompt_is_rendered_fresh`,
+`test_an_owed_result_is_projected_never_deleted_and_its_exact_copy_is_there`,
+`test_a_second_rebuild_can_still_remove_carried_settled_turns`,
+`test_spans_of_a_closed_session_never_place_a_turn_in_its_successor`,
+`test_an_empty_generation_prompt_is_not_carried`,
+`test_a_rebuild_that_cannot_reach_its_target_says_so_and_cuts_nothing`,
+`test_positional_trim_and_eviction_are_gone`,
+`test_the_turn_boundary_asks_for_a_rebuild`
+
+**I123. A tool result too large for its delivery budget is never chopped.**
+Two defects made Id's session fill itself. The Harness computed a bounded
+text for every role result and `RoleProcess._invoke` dropped it, so every
+role result was delivered whole -- one `prompt_incarnations(limit=5)` cost
+Id 1827 tokens. And where the bound did apply it cut the serialized JSON at
+2000 characters: half a value in the context, priced in the unit the context
+does not spend. A result now fits the role's budget in model tokens, counted
+by the model's tokenizer, or is shown as a projection that is whole JSON:
+whole list items with how many of how many, and anything else too large
+replaced by a marker naming its path and size. The exact text is stored and
+its reference issued to that role, and `result_read` opens it -- or any part
+of it -- for that role only. The two views Id reached for are compact by
+default: `prompt_incarnations` answers "what is each mind bound to" in a line
+per binding, and `prompt_resolve` gives the doctrine only when asked.
+→ `test_a_role_is_shown_the_bounded_result_not_the_whole_one`,
+`test_the_harness_bounds_a_role_result_by_that_roles_budget_and_issues_it`,
+`test_an_oversized_result_is_projected_whole_and_says_what_it_left_out`,
+`test_a_value_too_large_to_show_is_named_not_cut`,
+`test_result_read_returns_the_exact_stored_result_and_any_part_of_it`,
+`test_a_reference_opens_only_for_the_role_it_was_issued_to`,
+`test_the_compact_views_answer_the_usual_question`
 
 **I73. A role is never wedged by a turn it did not close.** One open turn per
 role is a database constraint, so a turn left running blocks every future turn

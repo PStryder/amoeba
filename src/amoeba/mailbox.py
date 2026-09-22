@@ -483,37 +483,49 @@ def claim(m: Mutation, mind: "Mind", *, role: str, incarnation: int | None,
 # closing a turn
 # ---------------------------------------------------------------------------
 
-def settled_spans(conn, role: str, session_handle: str | None
-                  ) -> list[dict[str, Any]]:
-    """Closed turns, in this session, whose interaction owes nothing.
+def owed_lineages(conn, role: str) -> set[Any]:
+    """Interactions this role still owes an answer to.
 
     "Settled" is a property of the *lineage*, not of the turn. A turn can be
     closed while the thought it belongs to continues in the next one, so
-    asking only whether this turn finished would evict half of a live
-    interaction.
-
-    A turn with no lineage -- a heartbeat, a startup review -- is settled once
-    it is closed, unless some request with no lineage is still unanswered.
+    asking only whether this turn finished would drop half of a live
+    interaction. A turn with no lineage -- a heartbeat, a startup review -- is
+    settled once it is closed, unless some request with no lineage is still
+    unanswered, which is why `None` can be a member.
     """
-    if not session_handle:
-        return []
-    owed = {r["lineage"] for r in conn.execute(
+    return {r["lineage"] for r in conn.execute(
         "SELECT DISTINCT lineage FROM role_triggers"
         " WHERE target_role = ? AND expects_answer = 1"
         "   AND answer_status IS NULL", (role,))}
-    out = []
-    for row in conn.execute(
-            "SELECT turn_id, lineage, token_start, token_end FROM role_turns"
-            " WHERE role = ? AND session_handle = ? AND status != 'running'"
-            "   AND token_start IS NOT NULL AND token_end IS NOT NULL"
-            "   AND token_end > token_start"
-            " ORDER BY token_start ASC", (role, session_handle)):
-        if row["lineage"] in owed:
-            continue
-        out.append({"turn_id": row["turn_id"], "lineage": row["lineage"],
-                    "start": int(row["token_start"]),
-                    "end": int(row["token_end"])})
-    return out
+
+
+def session_spans(conn, role: str, session_handle: str | None
+                  ) -> list[dict[str, Any]]:
+    """Every closed turn's position in this session, measured or carried.
+
+    Measured spans are the turn's own coordinates, recorded when it closed.
+    Carried spans are where a rebuild put a turn in the session it made; the
+    turn's own row keeps the coordinates it was measured under (I94), so the
+    new ones are recorded against the new handle instead. Either way a span
+    describes only the session named, and a closed session's spans are
+    unreachable from its successor.
+    """
+    if not session_handle:
+        return []
+    rows = conn.execute(
+        "SELECT turn_id, lineage, token_start, token_end FROM role_turns"
+        " WHERE role = ? AND session_handle = ? AND status != 'running'"
+        "   AND token_start IS NOT NULL AND token_end IS NOT NULL"
+        "   AND token_end > token_start"
+        " UNION ALL"
+        " SELECT s.turn_id, t.lineage, s.token_start, s.token_end"
+        "  FROM turn_spans s JOIN role_turns t ON t.turn_id = s.turn_id"
+        " WHERE t.role = ? AND s.session_handle = ? AND t.status != 'running'"
+        " ORDER BY token_start ASC", (role, session_handle, role, session_handle))
+    return [{"turn_id": r["turn_id"], "lineage": r["lineage"],
+             "start": int(r["token_start"]), "end": int(r["token_end"])}
+            for r in rows]
+
 
 def continuation_depth(conn, turn_id: str, *, limit: int = 32) -> int:
     """How many continuations in a row led to this turn.

@@ -73,13 +73,31 @@ Three steps, receipted:
 | Mode | What it does | Status |
 |---|---|---|
 | `exact` | Replay the whole recorded token prefix | Implemented — and useless for relieving pressure, because the context ends up the same size |
-| `trim` | Replay a **verbatim head and tail**, dropping a measured span from the middle | **Default.** Still real tokens: no paraphrase, no model in the loop |
-| `summarise` | Ask a model to compress the context | **Refused.** It is a *different behaviour*, not a better version of trimming, and calling it reconstitution would misdescribe what the mind now contains |
+| `rebuild` | Reconstruct the substrate, keep cognition selectively, in whole parts | **Default.** No message is cut; nothing is paraphrased; no model in the loop |
+| `summarise` | Ask a model to compress the context | **Refused.** It is a *different behaviour*, not a better version of rebuilding, and calling it reconstitution would misdescribe what the mind now contains |
 
-`trim` keeps `keep_head_tokens` verbatim from the head (system prompt and
-earliest turns) and `keep_tail_fraction` of the context from the tail. The
-dropped span is recorded by offset and count, and **remains reconstructible
-from the checkpoint blob** — only the live context shrinks, not the record.
+A rebuild follows one rule: **environment is reconstructed, cognition is
+preserved selectively, neither is token-spliced.**
+
+- The checkpoint is split at the chat template's message-start token, so every
+  boundary is one the session had.
+- The governed prompt is rendered fresh from the incarnation's binding and
+  held to its frozen digest.
+- Every environment block — full declaration or "unchanged" reference — is
+  removed. The next turn of a new session is given the current declaration in
+  full, immediately before it is used (I118).
+- Settled turns are removed whole, oldest first, only as far as
+  `rebuild_keep_fraction` of the role's budget requires.
+- Turns still owed an answer, and turns the record cannot place, lose nothing.
+  An oversized tool result in one is re-rendered as the bounded projection a
+  live call would get, naming the exact stored copy (I123).
+- Where each kept turn now sits is recorded against the new session, so the
+  next rebuild can still tell settled from owed.
+- A rebuild that cannot reach its target says so and cuts nothing.
+
+Positional `trim` — keep a verbatim head and tail, drop what lay between — is
+gone. Live, it cut Id's declaration off mid-line and left references to text it
+had removed (I122). Every original token remains in the checkpoint either way.
 
 Attempting `summarise` raises `capability_unsupported` with that explanation.
 
@@ -112,8 +130,7 @@ elevated = 0.55
 high = 0.70
 critical = 0.85
 role_context_high = 0.75
-keep_head_tokens = 512
-keep_tail_fraction = 0.45
+rebuild_keep_fraction = 0.40
 min_seconds_between_rejuvenations = 120.0
 max_rejuvenations_per_hour = 12
 auto_rejuvenate = true
@@ -203,9 +220,9 @@ has nothing to do with resources. See invariants I96, I97 and I98.
 
 ## Not implemented
 
-- **Compaction.** Nothing merges or rewrites context. Eviction removes whole
-  finished turns and `trim` drops a positional span; neither rephrases
-  anything, which is the point.
+- **Compaction.** Nothing merges or rephrases context. A rebuild removes whole
+  settled turns and shows oversized results as projections of their stored
+  copies; nothing is paraphrased, which is the point.
 - **Summarisation.** Refused by design, as above.
 - **Neuocyte-session rejuvenation.** Neuocytes are mortal by design — the answer
   for a neuocyte with a stale context is retirement, not repair.

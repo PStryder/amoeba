@@ -704,6 +704,31 @@ CREATE INDEX IF NOT EXISTS ix_role_turn_status ON role_turns(role, status);
 CREATE UNIQUE INDEX IF NOT EXISTS ux_one_open_turn_per_role
   ON role_turns(role) WHERE status = 'running';
 
+-- Where a rebuild placed a turn in the session it made. The turn's own row
+-- keeps the coordinates it was measured under; these are the new ones,
+-- against the new handle, so a later rebuild can still tell a settled turn
+-- from one still owed an answer instead of finding every carried turn
+-- unknown and keeping it all.
+-- Which stored results were shown to whom. `result_read` opens only a
+-- reference issued to the role asking, so a reference is a capability that
+-- was handed over, not a digest anybody could guess at.
+CREATE TABLE IF NOT EXISTS issued_results (
+  result_ref       TEXT NOT NULL,
+  issued_to        TEXT NOT NULL,
+  sha256           TEXT NOT NULL,
+  tool             TEXT,
+  created_at       REAL NOT NULL,
+  PRIMARY KEY (result_ref, issued_to)
+);
+
+CREATE TABLE IF NOT EXISTS turn_spans (
+  turn_id          TEXT NOT NULL,
+  session_handle   TEXT NOT NULL,
+  token_start      INTEGER NOT NULL,
+  token_end        INTEGER NOT NULL,
+  PRIMARY KEY (turn_id, session_handle)
+);
+
 CREATE TABLE IF NOT EXISTS conversations (
   conversation_id TEXT PRIMARY KEY,
   created_at      REAL NOT NULL,

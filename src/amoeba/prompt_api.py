@@ -44,6 +44,9 @@ PROMPT_READ = (
     "explain_profile", "prompt_incarnations",
 )
 
+# How much of each binding `prompt_incarnations` shows.
+INCARNATION_DETAILS = ("summary", "full")
+
 # Id's half: judge and suggest.
 ID_PROMPT = ("id_evaluate_prompt", "id_propose_profile")
 
@@ -160,12 +163,24 @@ def build(sup: "Supervisor") -> dict[str, Any]:  # noqa: C901
     def prompt_resolve(*, namespace: str | None = None,
                        profile_ref: str | None = None,
                        local_version: int | None = None,
-                       purpose: str = "production") -> dict[str, Any]:
-        """What a new incarnation of this profile would actually receive."""
+                       purpose: str = "production",
+                       include_text: bool = False) -> dict[str, Any]:
+        """What a new incarnation of this profile would actually receive.
+
+        The doctrine itself only when asked for. It is most of the answer by
+        size and rarely what the question was: live, Id spent 694 tokens on
+        this to learn which version it was bound to.
+        """
         ref = _ref(store, namespace=namespace, profile_ref=profile_ref,
                    local_version=local_version, purpose=purpose)
         resolved = resolver.resolve_ref(ref)
-        return {**resolved.to_dict(),
+        shape = resolved.to_dict()
+        if not include_text:
+            text = shape.pop("prompt_text", "") or ""
+            shape["prompt_chars"] = len(text)
+            shape["prompt_text_sha256"] = sha256_hex(text.encode("utf-8"))
+            shape["prompt_text_omitted"] = "pass include_text=true for the doctrine itself"
+        return {**shape,
                 "backend_arguments": resolved.backend_kwargs(),
                 "selected_now": bool(
                     namespace and not profile_ref and local_version is None),
@@ -213,14 +228,21 @@ def build(sup: "Supervisor") -> dict[str, Any]:  # noqa: C901
                      "version numbers"),
         }
 
-    def prompt_incarnations(*, namespace: str | None = None, limit: int = 50
-                            ) -> dict[str, Any]:
+    def prompt_incarnations(*, namespace: str | None = None, limit: int = 50,
+                            detail: str = "summary") -> dict[str, Any]:
         """Which minds were actually born with which profile.
 
         Read from the frozen bindings, not recomputed. A binding records the
         resolved digests as they were at birth, so this stays true even after
         the library moves on.
+
+        `summary` answers the usual question -- what is each mind bound to --
+        in a line per binding. Live, five full bindings cost Id 1827 tokens,
+        most of them digests it could not use.
         """
+        if detail not in INCARNATION_DETAILS:
+            raise InvalidInput("unknown detail", detail=detail,
+                               allowed=list(INCARNATION_DETAILS))
         sql = ("SELECT binding_id, actor_id, actor_kind, incarnation, work_id,"
                " namespace, profile_ref, prompt_sha256, config_sha256,"
                " profile_sha256, model_generation, effective_settings,"
@@ -232,8 +254,16 @@ def build(sup: "Supervisor") -> dict[str, Any]:  # noqa: C901
             sql += " WHERE namespace = ?"
             params = (namespace,)
         sql += " ORDER BY created_at DESC LIMIT ?"
-        rows = mind.db.conn.execute(sql, (*params, max(1, min(int(limit), 500))))
-        return {"bindings": [dict(r) for r in rows]}
+        rows = [dict(r) for r in mind.db.conn.execute(
+            sql, (*params, max(1, min(int(limit), 500))))]
+        if detail == "summary":
+            rows = [{"actor_id": r["actor_id"], "actor_kind": r["actor_kind"],
+                     "incarnation": r["incarnation"], "profile_ref": r["profile_ref"],
+                     "prompt_sha256": (r["prompt_sha256"] or "")[:12],
+                     "created_at": r["created_at"],
+                     **({"work_id": r["work_id"]} if r["work_id"] else {})}
+                    for r in rows]
+        return {"bindings": rows, "detail": detail}
 
     # ==================================================================
     # Birth: freezing what a mind actually received

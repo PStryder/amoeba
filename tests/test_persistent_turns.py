@@ -1519,15 +1519,28 @@ def _span_turn(mind, *, lineage, answer, session="sess_a", start=0, end=100,
     return turn
 
 
-def test_a_settled_interaction_is_evictable(mind):
-    """Finished work is what eviction is for."""
+def _status(mind, session, start=0, end=100):
+    """How a rebuild would classify the unit occupying [start, end)."""
+    from amoeba import reconstitution as rc
+
+    unit = rc.Unit(messages=[rc.Message(start=start, end=end, tokens=[0] * (end - start),
+                                        text="", role="user", kind="opening",
+                                        terminated=True)])
+    rc.attribute([unit], mailbox.session_spans(mind.db.conn, "ego", session),
+                 mailbox.owed_lineages(mind.db.conn, "ego"))
+    return unit.status
+
+
+def test_a_settled_interaction_is_removable(mind):
+    """Finished work is what a rebuild may drop."""
     turn = _span_turn(mind, lineage="op-1", answer="done", start=10, end=60)
-    spans = mailbox.settled_spans(mind.db.conn, "ego", "sess_a")
+    spans = mailbox.session_spans(mind.db.conn, "ego", "sess_a")
     assert [s["turn_id"] for s in spans] == [turn["turn_id"]]
     assert spans[0]["start"] == 10 and spans[0]["end"] == 60
+    assert _status(mind, "sess_a", 10, 60) == "settled"
 
 
-def test_a_lineage_still_owed_an_answer_is_never_evictable(mind):
+def test_a_lineage_still_owed_an_answer_is_never_removable(mind):
     """Dropping a live thought is the failure I80 exists to prevent.
 
     Arriving at it by way of housekeeping rather than by way of bundling
@@ -1545,22 +1558,23 @@ def test_a_lineage_still_owed_an_answer_is_never_evictable(mind):
     _complete(mind, turn["turn_id"], stop_reason="max_output_tokens",
               session_handle="sess_a", token_start=0, token_end=50)
 
-    spans = mailbox.settled_spans(mind.db.conn, "ego", "sess_a")
-    assert spans == [], "a turn holding an unanswered request was evictable"
+    assert _status(mind, "sess_a", 0, 50) == "owed", \
+        "a turn holding an unanswered request was removable"
 
 
-def test_a_turn_with_no_measured_span_is_never_evictable(mind):
+def test_a_turn_with_no_measured_span_is_never_removable(mind):
     """"I do not know what this is" must not resolve to "so remove it".
 
     A role that could not measure its context, or a turn taken before the
-    columns existed, leaves the offsets NULL. Those turns are kept forever,
-    which costs a rejuvenation at worst.
+    columns existed, leaves the offsets NULL. Those turns are kept, which
+    costs a larger context at worst.
     """
     _span_turn(mind, lineage="op-2", answer="done", start=None, end=None)
-    assert mailbox.settled_spans(mind.db.conn, "ego", "sess_a") == []
+    assert mailbox.session_spans(mind.db.conn, "ego", "sess_a") == []
+    assert _status(mind, "sess_a") == "unknown"
 
 
-def test_spans_from_another_session_are_never_evictable(mind):
+def test_spans_from_another_session_are_never_removable(mind):
     """Offsets mean nothing across a rejuvenation; the new session starts at 0.
 
     Acting on a previous session's offsets would drop whatever now happens to
@@ -1568,10 +1582,9 @@ def test_spans_from_another_session_are_never_evictable(mind):
     """
     _span_turn(mind, lineage="op-3", answer="done", session="sess_old",
                start=0, end=80)
-    assert mailbox.settled_spans(mind.db.conn, "ego", "sess_new") == []
-    assert len(mailbox.settled_spans(mind.db.conn, "ego", "sess_old")) == 1
-
-
+    assert mailbox.session_spans(mind.db.conn, "ego", "sess_new") == []
+    assert _status(mind, "sess_new", 0, 80) == "unknown"
+    assert _status(mind, "sess_old", 0, 80) == "settled"
 
 
 def test_a_role_tool_invocation_is_on_the_record(mind):

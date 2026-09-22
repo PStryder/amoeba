@@ -531,7 +531,7 @@ const render = {
     main.appendChild(bc);
 
     // What was actually born with what.
-    const inc = await rpc("prompt_incarnations", {limit:25});
+    const inc = await rpc("prompt_incarnations", {limit:25, detail:"full"});
     const ic = card("incarnations", true);
     ic.appendChild(table(inc.bindings, ["actor_id","actor_kind","incarnation",
                                         "profile_ref","prompt_sha256","work_id"]));

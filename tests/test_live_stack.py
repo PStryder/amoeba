@@ -580,7 +580,7 @@ def test_the_real_roles_are_born_from_the_prompt_library(stack: LiveStack):
     assert selected["ego"]["profile_ref"] == "ego@1"
     assert selected["ego.neuocyte"]["profile_ref"] == "ego.neuocyte@1.1"
 
-    bindings = stack.call("prompt_incarnations")["bindings"]
+    bindings = stack.call("prompt_incarnations", detail="full")["bindings"]
     by_actor = {b["actor_id"]: b for b in bindings}
     assert "ego" in by_actor and "id" in by_actor, "a role fell back"
 
