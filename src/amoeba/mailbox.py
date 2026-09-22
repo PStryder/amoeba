@@ -698,6 +698,10 @@ def assemble_answer(conn, blobs, *, admitting_turn: str, turn_id: str,
     stored twice: each turn's result is its fragment, written once when that
     turn closed and never rewritten, and the assembled answer records which
     turns it came from.
+
+    Model text is never rewritten here. A continuation that opens with a
+    preamble despite being told not to keeps it: stripping it would take a
+    heuristic guess about what the model meant, applied silently to its reply.
     """
     chain: list[str] = []
     current: str | None = turn_id
@@ -717,12 +721,12 @@ def assemble_answer(conn, blobs, *, admitting_turn: str, turn_id: str,
     for ordinal, tid in enumerate(chain):
         res = result if tid == turn_id else _turn_result(conn, blobs, tid)
         resumed = bool(isinstance(res, dict) and res.get("resumed"))
+        # Joined exactly, with nothing between the pieces that the model did
+        # not write. A continuation is told its output is appended directly,
+        # so inserting a paragraph break would contradict what it was told --
+        # and silently editing a reply is not this function's job. Only
+        # tool-call machinery is removed, which is not part of any reply.
         seg = _clean_segment(_segment_of(res), resumed=resumed)
-        if seg and parts and not resumed:
-            # A continuation that had to be asked for visibly is a new
-            # message, so it starts a new paragraph. A resumed one is the
-            # same message and joins exactly where it was cut.
-            parts.append("\n\n")
         if seg:
             parts.append(seg)
         segments.append({"ordinal": ordinal, "turn_id": tid,
@@ -804,16 +808,36 @@ def complete(m: Mutation, mind: "Mind", *, turn_id: str, stop_reason: str,
             text, segments = assemble_answer(
                 mind.db.conn, mind.blobs, admitting_turn=req["turn_id"],
                 turn_id=turn_id, result=result)
+            conclusion_id = None
             if not text:
                 # Nothing was said at all. Saying so lets a caller stop
                 # waiting instead of hanging on a thought that already ended.
                 sha, state = None, "unanswerable"
             else:
                 state = "answered" if finished else "incomplete"
+                if finished and row["role"] == "ego":
+                    # Ego's answer becomes an auditable claim here, once, when
+                    # it is the whole answer -- not at each bounded turn,
+                    # which made four fragments of one unfinished reply into
+                    # four conclusions and had Id auditing half-sentences. An
+                    # incomplete answer is not a conclusion at all. Every
+                    # producing turn is cited, so the claim still resolves to
+                    # exactly the turns that wrote it.
+                    conclusion_id = new_id("concl")
+                    mind.memory.write_conclusion(
+                        m, conclusion_id=conclusion_id, claim=text,
+                        produced_by="ego",
+                        evidence=([{"note": f"turn {piece['turn_id']}"}
+                                   for piece in segments]
+                                  + [{"note": f"trigger {req['trigger_id']}"}]),
+                        operation_id=req.get("operation_id") or row["operation_id"],
+                        model_identity=(result or {}).get("model_generation")
+                        if isinstance(result, dict) else None)
                 sha = m.put_json(
                     {"answer": text, "complete": finished,
                      "ended_because": ended_because, "turn_id": turn_id,
                      "stop_reason": stop_reason, "role": row["role"],
+                     "conclusion_id": conclusion_id,
                      # Which turns the answer came from, in order. The text
                      # lives in each turn's own result; this is the index,
                      # so provenance points back at the producing turns
@@ -827,7 +851,8 @@ def complete(m: Mutation, mind: "Mind", *, turn_id: str, stop_reason: str,
             answered.append(req["trigger_id"])
             outcomes.append({"trigger_id": req["trigger_id"],
                              "answer_status": state, "answer_sha256": sha,
-                             "segments": len(segments)})
+                             "segments": len(segments),
+                             "conclusion_id": conclusion_id})
         m.emit(EventKind.ROLE_TRIGGER_ANSWERED, {
             "turn_id": turn_id, "role": row["role"], "trigger_ids": answered,
             "answers": outcomes, "stop_reason": stop_reason,
@@ -854,8 +879,16 @@ def complete(m: Mutation, mind: "Mind", *, turn_id: str, stop_reason: str,
         continuation = enqueue(
             m, role=row["role"], kind="continuation", source="harness",
             source_ref=turn_id, causal_parent=turn_id,
-            summary=(f"your previous turn stopped early ({stop_reason}); "
-                     "continue from where you left off"),
+            # What a continuation reads when it cannot simply resume the
+            # message in place. Its output is appended directly onto the
+            # previous one, and the model has to know that, because nothing
+            # afterwards rewrites what it writes: a preamble it adds anyway is
+            # kept, and will be read.
+            summary=(f"Your previous output stopped before the answer was "
+                     f"finished ({stop_reason}). Continue the same answer "
+                     "exactly where it stopped: what you write is appended "
+                     "directly to it. Do not introduce the continuation, "
+                     "recap, restart a section, or repeat earlier text."),
             lineage=row["lineage"],
             # The second half of a thought is accountable to the same
             # externally visible operation as the first. Without this a

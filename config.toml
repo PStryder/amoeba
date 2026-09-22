@@ -49,8 +49,9 @@ type_v       = "f16"
 max_neuocytes              = 3
 max_outstanding_work     = 64
 max_prompt_tokens        = 6144
-# Backstop over every generation; each mind's ceiling is its profile's
-# max_output_tokens. Must be at least the largest of those (Ego, 3072).
+# Hard platform cap on one generation. Each mind's ceiling is its profile's
+# max_output_tokens; this refuses, never clamps -- the supervisor will not
+# start if a selected profile states more than this.
 max_completion_tokens    = 3072
 neuocyte_wall_seconds      = 180.0
 neuocyte_token_budget      = 512

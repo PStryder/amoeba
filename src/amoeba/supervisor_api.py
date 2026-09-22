@@ -994,6 +994,9 @@ def build(sup: "Supervisor") -> dict[str, Any]:
                     result = {**result, "answer": answer}
                 else:
                     result = {"answer": answer}
+                # So does its conclusion: recorded with the whole answer, not
+                # by the turn that happened to finish it.
+                result["conclusion_id"] = record.get("conclusion_id")
                 # Terminal either way, and only one of them is finished.
                 # "completed" is reserved for a thought that concluded; one
                 # that was stopped -- by the continuation limit, a deadline, a

@@ -27,7 +27,8 @@ from typing import TYPE_CHECKING, Any, Sequence
 from .errors import InvalidInput
 from .ids import new_id, sha256_hex
 from .promptlib import cascade
-from .promptlib.model import ProfileRef, parse_ref, validate_namespace
+from .promptlib.model import (ProfileRef, fallback_output_ceiling, parse_ref,
+                              validate_namespace)
 from .promptlib.resolver import Resolver
 from .promptlib.store import APPROVED, PromptStore
 from .store.events import EventKind
@@ -236,17 +237,20 @@ def build(sup: "Supervisor") -> dict[str, Any]:  # noqa: C901
     # ==================================================================
     # Birth: freezing what a mind actually received
     # ==================================================================
-    def _harness_constraints(namespace: str) -> dict[str, Any]:
-        """Ceilings the Harness imposes on top of the profile.
+    def _harness_constraints(namespace: str, resolved: Any) -> dict[str, Any]:
+        """What the Harness supplies on top of the profile, on the record.
 
-        Today this is empty: the Harness has no generation ceiling of its own,
-        and inventing one here so the field looked used would be exactly the
-        kind of decoration this library exists to avoid. The mechanism is real
-        and applied -- a constraint placed here narrows the profile and is
-        recorded in ``effective_settings`` -- so when a real ceiling arrives it
-        has one place to go and one place it shows up.
+        It never narrows a ceiling a profile states: the governed value is the
+        one canonical ceiling, and a Harness default quietly lowering it is
+        exactly how Ego was granted 3072 and given 512. It only fills in a
+        ceiling a profile does not state -- an approved root that predates
+        the setting -- with the shipped value for that namespace. That lands
+        here, in the binding's `harness_constraints`, so the record says the
+        number was supplied rather than chosen, and startup says so aloud.
         """
-        return {}
+        if "max_output_tokens" in (resolved.model_vars or {}):
+            return {}
+        return {"max_output_tokens": fallback_output_ceiling(namespace)}
 
     def bind_profile(*, namespace: str, actor_id: str, actor_kind: str,
                      work_id: str | None = None, purpose: str = "production",
@@ -281,8 +285,21 @@ def build(sup: "Supervisor") -> dict[str, Any]:  # noqa: C901
                      "version for anything beyond it")
         resolved = resolver.resolve_version(namespace,
                                             int(selected["local_version"]))
-        constraints = _harness_constraints(namespace)
+        constraints = _harness_constraints(namespace, resolved)
         effective = resolved.effective_settings(constraints)
+        # A ceiling above the platform cap is a contradiction in the
+        # configuration, and it is refused here rather than clamped somewhere
+        # later: a clamp is precisely how a governed number becomes a lie.
+        ceiling = effective.get("max_output_tokens")
+        platform_cap = int(sup.cfg.arbiter.max_completion_tokens)
+        if ceiling is not None and int(ceiling) > platform_cap:
+            raise InvalidInput(
+                f"{namespace} states an output ceiling of {ceiling}, above the "
+                f"platform cap of {platform_cap}",
+                namespace=namespace, profile_ref=str(resolved.ref),
+                max_output_tokens=int(ceiling), platform_cap=platform_cap,
+                hint="lower the profile's ceiling or raise "
+                     "[arbiter] max_completion_tokens")
         # A neuocyte forked from an Ego snapshot already holds its ancestors'
         # text. It injects only the suffix, and the binding records both facts
         # separately rather than claiming the whole profile was handed over.

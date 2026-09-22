@@ -51,10 +51,12 @@ class ArbiterConfig:
     # small: an unbudgeted session is a bug, and granting it the pool would
     # hide that bug behind good behaviour.
     max_prompt_tokens: int = 6144
-    # A backstop over every generation, not the policy. Each mind's ceiling
-    # is its profile's `max_output_tokens`; this only has to be at least
-    # the largest of them, or a governed ceiling is silently clamped here.
-    # At 512 it was: Ego could have been granted 3072 and got 512.
+    # The hard platform cap on one generation. Not a policy and not a
+    # default: each mind's ceiling is its profile's `max_output_tokens`, and
+    # this only bounds what any profile may state. It refuses, never clamps
+    # -- startup fails on a selected profile above it, and a request above it
+    # is an error. At 512, as a silent clamp, it gave Ego 512 of a governed
+    # 3072.
     max_completion_tokens: int = 3072
 
     # What a disposable worker may grow, by work class rather than by role,

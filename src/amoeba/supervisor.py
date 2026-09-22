@@ -328,6 +328,7 @@ class Supervisor:
         recovery = self.mind.recover()
         self.log.info("recovery: %s", recovery["summary"])
         self._ingest_prompt_library()
+        self._validate_output_ceilings()
         self._recover_role_turns()
 
         self._server = RpcServer(
@@ -398,6 +399,58 @@ class Supervisor:
                 "waiting for approval: %s", counts["delta"],
                 [r["namespace"] for r in out["ingested"]
                  if r["outcome"] == "delta"])
+
+    def _validate_output_ceilings(self) -> None:
+        """Every selected profile's output ceiling must fit the platform cap.
+
+        Checked once, before any mind is born, and fatal when it fails. A
+        profile stating 3072 under a cap of 512 is a contradiction, and the
+        only two ways to resolve it silently -- clamp the profile, or ignore
+        the cap -- each make one of the two numbers a lie. So the supervisor
+        refuses to start and says which profile and which setting disagree.
+
+        A selected profile that states no ceiling at all is not fatal: an
+        approved root can predate the setting, and the binding supplies the
+        shipped value for its namespace and records that it did. It is said
+        aloud here, with what to approve, because a ceiling nobody chose is
+        a thing an operator should know about.
+        """
+        from .promptlib.model import FALLBACK_OUTPUT_CEILINGS
+        from .promptlib.resolver import Resolver
+        from .promptlib.store import PromptStore
+
+        cap = int(self.cfg.arbiter.max_completion_tokens)
+        store = PromptStore(self.mind)
+        resolver = Resolver(store)
+        contradictions: list[str] = []
+        silent: list[str] = []
+        for namespace, shipped in sorted(FALLBACK_OUTPUT_CEILINGS.items()):
+            if shipped > cap:
+                contradictions.append(
+                    f"the shipped ceiling for {namespace} is {shipped}")
+        for namespace in store.namespaces():
+            if store.selected(namespace) is None:
+                continue
+            resolved = resolver.resolve_selected(namespace)
+            stated = resolved.model_vars.get("max_output_tokens")
+            if stated is None:
+                silent.append(str(resolved.ref))
+            elif int(stated) > cap:
+                contradictions.append(
+                    f"{resolved.ref} states max_output_tokens {stated}")
+        if contradictions:
+            raise RuntimeError(
+                f"output ceilings exceed the platform cap of {cap} "
+                "([arbiter] max_completion_tokens): "
+                + "; ".join(contradictions)
+                + ". Lower the profile or raise the cap; the supervisor will "
+                "not start with the two in contradiction.")
+        if silent:
+            self.log.warning(
+                "selected profile(s) state no max_output_tokens: %s. Each is "
+                "bound with the shipped ceiling for its namespace, recorded in "
+                "the binding's harness_constraints; approve the candidate that "
+                "states it to make the ceiling governed.", ", ".join(silent))
 
     # ------------------------------------------------------------------
     # Turn scheduling: deterministic substrate, never a cognitive component

@@ -870,47 +870,27 @@ class EgoProcess(RoleProcess):
 
     def on_turn(self, turn: dict[str, Any], out: dict[str, Any]
                 ) -> dict[str, Any]:
-        """Commit what an Ego turn produced.
+        """Report what an Ego turn produced.
 
-        A conclusion is recorded when the turn actually answered something,
-        so the record carries Ego's outward cognition rather than every
-        housekeeping wake. Id audits conclusions against evidence, and a
-        conclusion nobody claimed is noise in that audit.
-
-        Which requests those are is the Harness's finding, walked from the
-        durable record. Inferring it from the kinds in this turn's own bundle
-        missed every continuation -- and a continuation is where a long
-        thought actually produces its answer.
+        What this does not do any more is declare a conclusion. It used to
+        record one for every turn that owed an answer, which made each bounded
+        piece of a long reply its own claim: one question, cut off three
+        times, left four conclusions -- the first three unfinished sentences
+        -- and Id auditing fragments. A bounded turn ending is not Ego
+        concluding anything. The Harness records the conclusion when the
+        interaction's answer is whole and finished, citing every turn that
+        produced it (`mailbox.complete`).
         """
         text = strip_tool_calls(out.get("text", "")).strip()
-        # Whether this turn owes an answer is the Harness's finding, not a
-        # guess from trigger kinds. A thought continued across turns produces
-        # its answer in the *last* one, whose bundle holds a continuation
-        # trigger and no request at all -- so kind-sniffing recorded no
-        # conclusion for exactly the turns that concluded something.
+        # Which requests this turn serves is the Harness's finding, reported
+        # back for provenance. It is not a licence to conclude.
         answered = list(turn.get("answering") or [])
-        conclusion_id = None
-        if text and answered:
-            try:
-                res = self.sup.call(
-                    "record_conclusion", claim=text[:2000], produced_by="ego",
-                    evidence=[{"note": f"turn {turn['turn_id']}"}]
-                    + [{"note": f"trigger {tid}"} for tid in answered],
-                    model_identity=out.get("model_generation"),
-                    # The operation that asked. Without it a conclusion cannot
-                    # be resolved back to the request that produced it, and
-                    # `audit_dossier` has nothing to audit against.
-                    operation_id=turn.get("operation_id"))
-                conclusion_id = res.get("conclusion_id")
-            except Exception:  # noqa: BLE001
-                self.log.debug("could not record conclusion", exc_info=True)
         # The whole of what this turn said, uncut. Each turn's result is its
         # fragment of the interaction's answer, and a character limit here
         # would silently truncate every piece of a long reply: at a 3072
         # token ceiling a segment runs well past 4000 characters.
         return {"answer": text, "segment": out.get("text", ""),
                 "resumed": bool(out.get("resumed")),
-                "conclusion_id": conclusion_id,
                 "answered_triggers": list(answered),
                 "tool_calls": out.get("tool_calls", []),
                 "tool_requests": [{"name": c.get("tool"),

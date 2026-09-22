@@ -21,7 +21,7 @@ from dataclasses import dataclass, field
 from typing import Any, Literal
 
 from .config import ArbiterConfig
-from .errors import ResourceExhausted
+from .errors import InvalidInput, ResourceExhausted
 
 WorkClass = Literal["user", "maintenance"]
 
@@ -273,7 +273,17 @@ class Arbiter:
         """
         cfg = self.cfg
         ceiling = int(budget_tokens) if budget_tokens else cfg.max_prompt_tokens
-        capped = min(max_tokens or cfg.max_completion_tokens, cfg.max_completion_tokens)
+        # The platform cap refuses; it never clamps. A request above it means
+        # a profile and the platform disagree, and silently shrinking the
+        # request is how a governed 3072 became 512 with nobody told.
+        # Startup refuses such a profile before any mind is born; this is
+        # the same rule at the point of use.
+        platform_cap = int(cfg.max_completion_tokens)
+        capped = int(max_tokens) if max_tokens else platform_cap
+        if capped > platform_cap:
+            raise InvalidInput(
+                "requested output ceiling exceeds the platform cap",
+                requested=capped, platform_cap=platform_cap)
         # A generation is admitted only if its whole allowance fits. Checking
         # the prompt alone let a session arrive a few hundred tokens short of
         # its budget, be admitted, and then generate straight through it --
@@ -293,5 +303,4 @@ class Arbiter:
         return {
             "max_tokens": capped,
             "deadline": min(deadline, wall_cap) if deadline else wall_cap,
-            "clamped": capped != (max_tokens or cfg.max_completion_tokens),
         }

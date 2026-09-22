@@ -288,7 +288,7 @@ def test_a_non_terminal_stop_schedules_a_continuation(mind):
     nxt = _claim(mind, "ego")
     assert nxt["parent_turn"] == turn["turn_id"], "causal linkage lost"
     assert nxt["triggers"][0]["kind"] == "continuation"
-    assert "stopped early" in nxt["text"]
+    assert "stopped before the answer was finished" in nxt["text"]
 
     # It is a new bounded turn, not an invisible extension of the old one.
     assert nxt["turn_id"] != turn["turn_id"]
@@ -429,8 +429,8 @@ def test_a_continued_thought_answers_the_request_that_started_it(mind):
     The fix for that then asserted the opposite mistake: that the answer is
     whatever the *last* turn produced. It was, and live that meant a reply cut
     off three times arrived as its final quarter. The answer is every turn's
-    piece, in order -- here two separate messages, because the second turn
-    was asked visibly rather than resuming the first.
+    piece, in order, concatenated exactly: a continuation is told its output
+    is appended directly, so nothing is inserted between the pieces.
     """
     req = _request(mind, summary="something that needs more than one turn")
 
@@ -447,7 +447,7 @@ def test_a_continued_thought_answers_the_request_that_started_it(mind):
               result={"answer": "the finished thought"})
 
     assert _answer_of(mind, req["trigger_id"]) == (
-        "answered", "a partial thought\n\nthe finished thought")
+        "answered", "a partial thoughtthe finished thought")
 
 
 def test_a_continuation_still_receives_its_supporting_evidence(mind):
@@ -481,7 +481,7 @@ def test_a_continuation_still_receives_its_supporting_evidence(mind):
     _complete(mind, second["turn_id"], stop_reason="model_stop",
               result={"answer": "it is a race on the lock"})
     assert _answer_of(mind, request["trigger_id"]) == (
-        "answered", "delegated, waiting on results\n\nit is a race on the lock")
+        "answered", "delegated, waiting on resultsit is a race on the lock")
     assert _answer_of(mind, rival["trigger_id"]) == (None, None)
 
 
@@ -513,7 +513,7 @@ def test_a_continuation_does_not_adopt_a_new_request(mind):
 
     # The original got its answer; the newcomer is still waiting for its own.
     assert _answer_of(mind, first["trigger_id"]) == (
-        "answered", "a partial thought\n\nthe finished thought")
+        "answered", "a partial thoughtthe finished thought")
     assert _answer_of(mind, second["trigger_id"]) == (None, None)
 
     # And it gets a different one.
@@ -631,7 +631,7 @@ def test_an_exhausted_continuation_chain_releases_its_waiter(mind):
     # thought stopped by the limit is incomplete, and every piece of it is
     # kept rather than only the one the limit happened to land on.
     assert status == "incomplete", "the waiter was left hanging, or misled"
-    assert answer == "\n\n".join(["still going"] * 3), \
+    assert answer == "still going" * 3, \
         "the partial thought was discarded"
 
 

@@ -243,12 +243,16 @@ chain stops, that is recorded rather than silent.
 off by its ceiling, was the role's last turn, carries nothing else, and the
 session is still exactly as long as the parent left it. Generation simply
 carries on from that token -- no new message, no re-rendered environment -- so
-the pieces join byte for byte. Otherwise it asks visibly, as a new message (I109).
+the pieces join byte for byte. Otherwise it asks visibly, as a new message,
+telling the model its output is appended directly to what it already said
+(I109).
 
 **The answer is the interaction's, not the last turn's.** Every piece, in
 order, once, assembled along the parent links (I107). Only a thought the model
 ended is `answered`; one stopped by the continuation limit, a deadline or a
 failure is `incomplete`, with everything it said and why it stopped (I108).
+Ego's conclusion is recorded from the whole finished answer, once -- never
+from a fragment (I112).
 
 ## 12. Context homeostasis
 

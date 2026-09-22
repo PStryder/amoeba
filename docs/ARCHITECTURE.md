@@ -1394,12 +1394,21 @@ stored twice to fix it: each turn's result is its fragment, written once when
 that turn closed, and the assembled answer records which turns it came from.
 Tool-call machinery is removed per piece, because the boundary can cut a call
 in half and cleaning the joined text would then discard everything after it.
+
+Otherwise the model's text is never rewritten. Pieces are concatenated
+exactly, with nothing inserted between them. A continuation that has to be
+asked for visibly is told that its output is appended directly to the
+previous output, and not to introduce, recap, restart or repeat -- and a
+preamble it writes anyway is kept, because stripping it would be a heuristic
+guess applied silently to somebody's reply.
 → `test_an_answer_spanning_three_turns_arrives_whole_and_in_order`,
 `test_each_piece_appears_exactly_once`,
 `test_fragments_are_attached_to_their_own_interaction`,
 `test_retrying_an_abandoned_continuation_does_not_duplicate_a_piece`,
 `test_a_rival_request_cannot_enter_the_chain_or_its_answer`,
-`test_a_three_turn_answer_reaches_the_operator_whole`
+`test_a_three_turn_answer_reaches_the_operator_whole`,
+`test_the_continuation_instruction_says_its_output_is_appended`,
+`test_a_preamble_the_model_writes_anyway_is_kept`
 
 **I108. Only a concluded thought is a finished answer.** A turn completing is
 not an interaction completing. A turn cut off by its output ceiling is
@@ -1444,17 +1453,31 @@ not target lengths, stated in each governed profile and inherited as model
 variables are, so a silent specialist gets its worker's ceiling rather than
 Ego's. The Ego root shipped with none, so a hardcoded 384 decided how much Ego
 could say to anyone; and a global 512 backstop would have clamped a real one.
-The fallback is now a per-namespace code constant, held equal to the shipped
-headers by a test -- a constant rather than a read of the shipped file,
-because editing a shipped file makes a candidate and must not reach a running
-mind unapproved. The backstop is at least the largest governed ceiling, and
-nothing between the model and the operator cuts an answer by characters.
+There is one canonical ceiling: the bound profile's. Nothing narrows it. An
+approved profile that states none -- a root that predates the setting -- is
+bound with the shipped value for its namespace, supplied through the
+binding's `harness_constraints` so the record says the number was supplied
+rather than chosen, and startup says so aloud with what to approve. That
+value is a per-namespace code constant held equal to the shipped headers by
+a test, not a read of the shipped file: editing a shipped file makes a
+candidate, and must not reach a running mind unapproved.
+
+`[arbiter] max_completion_tokens` is a hard platform cap, and it refuses
+rather than clamps. Startup refuses to run with any selected profile above
+it; binding refuses such a profile; a request above it is an error. A silent
+clamp is how a governed 3072 became 512 with nobody told. And nothing
+between the model and the operator cuts an answer by characters.
 → `test_each_mind_is_granted_its_own_ceiling_by_its_governed_profile`,
 `test_changing_one_ceiling_does_not_move_another`,
 `test_the_fallback_ceilings_match_the_shipped_headers`,
 `test_the_backstop_clamps_no_governed_ceiling`,
 `test_the_shipped_config_backstop_clamps_no_governed_ceiling`,
-`test_a_long_answer_is_not_cut_by_characters_anywhere`
+`test_a_long_answer_is_not_cut_by_characters_anywhere`,
+`test_the_platform_cap_refuses_rather_than_clamps`,
+`test_startup_refuses_ceilings_that_contradict_the_platform_cap`,
+`test_binding_refuses_a_profile_above_the_platform_cap`,
+`test_a_silent_profile_is_bound_with_the_shipped_ceiling_on_the_record`,
+`test_a_stated_ceiling_is_never_narrowed_by_the_harness`
 
 **I111. A generation is admitted only if its whole allowance fits.** The
 arbiter used to check the prompt alone, so a session a few hundred tokens
@@ -1465,6 +1488,22 @@ refusal is worded as context pressure, so a role is rejuvenated *before* the
 turn rather than after the overrun. For Ego that places the wall at 13312 of
 16384; for Id at 7168 of 8192.
 → `test_a_generation_is_admitted_only_if_its_allowance_fits`
+
+**I112. A fragment is not a conclusion.** Ego used to record a conclusion for
+every turn that owed an answer, so each bounded piece of a long reply became
+its own auditable claim. Live, one question left four conclusions -- three of
+them sentences cut off mid-word -- and Id auditing half-thoughts. A turn
+ending is not Ego concluding anything.
+
+The conclusion is recorded once, by the Harness, in the same transaction that
+records the interaction's whole answer, and only when that answer is
+finished: an incomplete answer is not a claim Ego made. It cites every turn
+that produced it, and its event belongs to the operation that asked, so an
+audit still finds it and still resolves it to exactly the turns that wrote it.
+→ `test_a_fragment_is_not_a_conclusion_and_the_whole_answer_is`,
+`test_an_incomplete_answer_is_not_a_conclusion`,
+`test_the_live_three_turn_answer_is_one_conclusion`,
+`test_id_audits_ego_conclusion_without_asking_ego`
 
 **I73. A role is never wedged by a turn it did not close.** One open turn per
 role is a database constraint, so a turn left running blocks every future turn

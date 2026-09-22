@@ -1584,12 +1584,36 @@ MUTATIONS: list[Mutation] = [
         '    "ego": 3072,',
         '    "ego": 384,  # MUTANT: the hardcoded number Ego actually ran with',
         ["test_the_fallback_ceilings_match_the_shipped_headers",
-         "test_the_backstop_clamps_no_governed_ceiling"],
+         "test_the_backstop_clamps_no_governed_ceiling",
+         "test_the_platform_cap_refuses_rather_than_clamps"],
         layer="FALLBACK_OUTPUT_CEILINGS / ArbiterConfig.max_completion_tokens",
         note="The two ways Ego's ceiling was fictional: a fallback of 384 that applied because the Ego root stated none, and a global 512 backstop that would have clamped a governed 3072. Separately verified to die for restoring the 4000-character cut on an answer.",
         also=[("src/amoeba/config.py",
                "    max_completion_tokens: int = 3072",
-               "    max_completion_tokens: int = 512  # MUTANT")],
+               "    max_completion_tokens: int = 512  # MUTANT"),
+              ("src/amoeba/arbiter.py",
+               "        capped = int(max_tokens) if max_tokens else platform_cap\n"
+               "        if capped > platform_cap:",
+               "        capped = min(int(max_tokens or platform_cap), platform_cap)\n"
+               "        if False:  # MUTANT: clamp silently")],
+    ),
+    Mutation(
+        "I112", "A fragment is not a conclusion",
+        "src/amoeba/roles.py",
+        '        answered = list(turn.get("answering") or [])',
+        '        answered = list(turn.get("answering") or [])\n'
+        '        if text and answered:  # MUTANT: every bounded turn concludes\n'
+        '            self.sup.call("record_conclusion", claim=text,\n'
+        '                          produced_by="ego",\n'
+        '                          evidence=[{"note": f"turn {turn[\'turn_id\']}"}],\n'
+        '                          operation_id=turn.get("operation_id"))',
+        ["test_the_live_three_turn_answer_is_one_conclusion",
+         "test_an_incomplete_answer_is_not_a_conclusion"],
+        layer="EgoProcess.on_turn / mailbox.complete (when an answer becomes a claim)",
+        note="The primary mutant is the old mechanism exactly: each bounded turn records its own text as a conclusion, which live left four conclusions for one question. The second anchor concludes an incomplete answer, which is a thought the continuation limit stopped rather than a claim Ego made.",
+        also=[("src/amoeba/mailbox.py",
+               '                if finished and row["role"] == "ego":',
+               '                if row["role"] == "ego":  # MUTANT: conclude the unfinished too')],
     ),
     Mutation(
         "I111", "A generation is admitted only if its whole allowance fits",

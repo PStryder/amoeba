@@ -330,56 +330,89 @@ class MemoryRepo:
         mutation_id: str | None = None,
     ) -> tuple[str, Receipt]:
         conclusion_id = new_id("concl")
-        evidence = list(evidence)
 
         def body(m: Mutation) -> None:
-            m.sql(
-                "INSERT INTO conclusions(conclusion_id, claim, uncertainty, alternatives,"
-                " operation_id, produced_by, review_status, model_identity, snapshot_id,"
-                " created_at, state_version) VALUES (?,?,?,?,?,?,?,?,?,?,?)",
-                (conclusion_id, claim, uncertainty, json.dumps(list(alternatives or [])),
-                 operation_id, produced_by, "unreviewed", model_identity, snapshot_id,
-                 time.time(), m.prior_version + 1),
-            )
-            for ev in evidence:
-                m.sql(
-                    "INSERT INTO conclusion_evidence(conclusion_id, event_seq, event_id,"
-                    " blob_sha256, memory_id, note) VALUES (?,?,?,?,?,?)",
-                    (conclusion_id, ev.get("event_seq"), ev.get("event_id"),
-                     ev.get("blob_sha256"), ev.get("memory_id"), ev.get("note")),
-                )
-            if supersedes:
-                # A claim is replaced by the claim that replaces it, rather
-                # than by a separate act of replacement. The old row keeps
-                # its identity: audits and disagreements that named it still
-                # name something.
-                prior = m.sql("SELECT standing FROM conclusions"
-                              " WHERE conclusion_id = ?", (supersedes,)).fetchone()
-                if prior is None:
-                    raise NotFound("conclusion to supersede does not exist",
-                                   conclusion_id=supersedes)
-                m.sql("UPDATE conclusions SET standing = 'superseded',"
-                      " superseded_by = ?, withdrawn_at = ?, withdrawn_by = ?"
-                      " WHERE conclusion_id = ? AND standing = 'active'",
-                      (conclusion_id, time.time(), produced_by, supersedes))
-                m.emit(EventKind.CONCLUSION_SUPERSEDED, {
-                    "conclusion_id": supersedes, "superseded_by": conclusion_id,
-                    "actor": produced_by})
-                self._close_disputes_in(
-                    m, subject_kind="conclusion", subject_id=supersedes,
-                    resolution="superseded", actor=produced_by,
-                    detail=f"replaced by {conclusion_id}")
-            m.emit(EventKind.CONCLUSION_RECORDED, {
-                "conclusion_id": conclusion_id, "claim": claim,
-                "evidence_count": len(evidence), "model_identity": model_identity,
-                "snapshot_id": snapshot_id, "supersedes": supersedes,
-            })
+            self.write_conclusion(
+                m, conclusion_id=conclusion_id, claim=claim,
+                produced_by=produced_by, evidence=evidence,
+                uncertainty=uncertainty, alternatives=alternatives,
+                operation_id=operation_id, model_identity=model_identity,
+                snapshot_id=snapshot_id, supersedes=supersedes)
 
         receipt, _ = self.writer.apply(
             body, actor=produced_by, operation_id=operation_id,
             mutation_id=mutation_id or f"concl:{conclusion_id}",
         )
         return conclusion_id, receipt
+
+    def write_conclusion(
+        self,
+        m: Mutation,
+        *,
+        conclusion_id: str,
+        claim: str,
+        produced_by: str,
+        evidence: Iterable[dict[str, Any]] = (),
+        uncertainty: float | None = None,
+        alternatives: Sequence[str] | None = None,
+        operation_id: str | None = None,
+        model_identity: str | None = None,
+        snapshot_id: str | None = None,
+        supersedes: str | None = None,
+    ) -> str:
+        """Record a conclusion as part of a mutation that is already open.
+
+        So a conclusion can be written in the same transaction as the thing
+        that makes it one. Ego's answer to a request is a conclusion once the
+        interaction's answer is final -- recorded when that answer is, and
+        atomically with it -- rather than once per bounded turn, which turned
+        four fragments of one unfinished reply into four claims for Id to
+        audit. The event names the operation that asked, because that is how
+        an audit finds the conclusion, whoever's mutation wrote it.
+        """
+        evidence = list(evidence)
+        m.sql(
+            "INSERT INTO conclusions(conclusion_id, claim, uncertainty, alternatives,"
+            " operation_id, produced_by, review_status, model_identity, snapshot_id,"
+            " created_at, state_version) VALUES (?,?,?,?,?,?,?,?,?,?,?)",
+            (conclusion_id, claim, uncertainty, json.dumps(list(alternatives or [])),
+             operation_id, produced_by, "unreviewed", model_identity, snapshot_id,
+             time.time(), m.prior_version + 1),
+        )
+        for ev in evidence:
+            m.sql(
+                "INSERT INTO conclusion_evidence(conclusion_id, event_seq, event_id,"
+                " blob_sha256, memory_id, note) VALUES (?,?,?,?,?,?)",
+                (conclusion_id, ev.get("event_seq"), ev.get("event_id"),
+                 ev.get("blob_sha256"), ev.get("memory_id"), ev.get("note")),
+            )
+        if supersedes:
+            # A claim is replaced by the claim that replaces it, rather
+            # than by a separate act of replacement. The old row keeps
+            # its identity: audits and disagreements that named it still
+            # name something.
+            prior = m.sql("SELECT standing FROM conclusions"
+                          " WHERE conclusion_id = ?", (supersedes,)).fetchone()
+            if prior is None:
+                raise NotFound("conclusion to supersede does not exist",
+                               conclusion_id=supersedes)
+            m.sql("UPDATE conclusions SET standing = 'superseded',"
+                  " superseded_by = ?, withdrawn_at = ?, withdrawn_by = ?"
+                  " WHERE conclusion_id = ? AND standing = 'active'",
+                  (conclusion_id, time.time(), produced_by, supersedes))
+            m.emit(EventKind.CONCLUSION_SUPERSEDED, {
+                "conclusion_id": supersedes, "superseded_by": conclusion_id,
+                "actor": produced_by})
+            self._close_disputes_in(
+                m, subject_kind="conclusion", subject_id=supersedes,
+                resolution="superseded", actor=produced_by,
+                detail=f"replaced by {conclusion_id}")
+        m.emit(EventKind.CONCLUSION_RECORDED, {
+            "conclusion_id": conclusion_id, "claim": claim,
+            "evidence_count": len(evidence), "model_identity": model_identity,
+            "snapshot_id": snapshot_id, "supersedes": supersedes,
+        }, operation_id=operation_id)
+        return conclusion_id
 
     def get_conclusion(self, conclusion_id: str) -> dict[str, Any]:
         row = self.conn.execute(

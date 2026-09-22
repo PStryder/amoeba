@@ -53,6 +53,7 @@ from amoeba.rpc import RpcClient, read_or_create_token
 from conftest import start_stack
 from test_persistent_turns import (_answer_of, _claim, _complete,
                                    _queue_lineage, _request)
+from test_prompt_library import _approve_and_select, _author, _Sup
 
 live = pytest.mark.skipif(sys.platform != "win32",
                           reason="live stack fixtures are Windows-only here")
@@ -148,9 +149,11 @@ def test_each_piece_appears_exactly_once(mind):
 
 
 def test_a_resumed_piece_joins_exactly_where_it_was_cut(mind):
-    """The same message continues byte for byte; a visible ask starts a new one.
+    """Pieces join byte for byte, whether resumed or asked for visibly.
 
-    Stripping each piece before joining would weld "self" to " knowledge".
+    Stripping each piece before joining would weld "self" to " knowledge";
+    inserting a separator would add text the model did not write, after
+    telling it that its output is appended directly.
     """
     req = _request(mind)
     t1 = _claim(mind, "ego")
@@ -166,13 +169,13 @@ def test_a_resumed_piece_joins_exactly_where_it_was_cut(mind):
 
     other = _request(mind)
     t3 = _claim(mind, "ego")
-    _cut(mind, t3, "first message", max_continuations=3)
+    _cut(mind, t3, "asked visibly, the first half ", max_continuations=3)
     t4 = _claim(mind, "ego")
     _complete(mind, t4["turn_id"], stop_reason="model_stop",
-              result=_piece("second message", resumed=False),
+              result=_piece("and then the second.", resumed=False),
               max_continuations=3)
     assert _answer_of(mind, other["trigger_id"])[1] == \
-        "first message\n\nsecond message"
+        "asked visibly, the first half and then the second."
 
 
 def test_a_tool_call_cut_in_half_leaves_no_machinery_in_the_answer(mind):
@@ -435,7 +438,7 @@ def test_the_backstop_clamps_no_governed_ceiling():
     assert cfg.max_completion_tokens >= max(FALLBACK_OUTPUT_CEILINGS.values())
     clamp = Arbiter(cfg).clamp_inference(prompt_tokens=100, max_tokens=3072,
                                          deadline=None, budget_tokens=16384)
-    assert clamp["max_tokens"] == 3072 and clamp["clamped"] is False
+    assert clamp["max_tokens"] == 3072
 
 
 def test_the_shipped_config_backstop_clamps_no_governed_ceiling():
@@ -614,8 +617,13 @@ def test_converse_renders_the_live_answer_whole(answering):
         deadline = time.time() + 180
         while True:
             final = call("role_answer", {"trigger_id": trigger_id})
-            if json.loads(final["body"])["result"]["status"] != "queued" and \
-                    json.loads(final["body"])["result"]["status"] != "claimed":
+            # Terminal states only, exactly as the page waits. Between the
+            # turns of a chain the request is "consumed" -- its first turn
+            # has read it -- and the answer is still being written; this
+            # loop once stopped there, and passed only while the whole chain
+            # happened to finish inside one poll.
+            if json.loads(final["body"])["result"]["status"] in (
+                    "completed", "incomplete", "unanswerable", "expired"):
                 break
             assert time.time() < deadline
             time.sleep(0.2)
@@ -643,3 +651,245 @@ def test_converse_renders_the_live_answer_whole(answering):
     assert [t["who"] for t in shown] == ["operator", "ego"]
     assert shown[1]["text"] == expected, "the page did not show the whole answer"
     assert shown[1]["cls"] == "said"
+
+
+
+# ===========================================================================
+# the continuation is told what happens to its output
+# ===========================================================================
+def test_the_continuation_instruction_says_its_output_is_appended(mind):
+    """When a continuation has to be asked visibly, it is told the truth.
+
+    Nothing afterwards rewrites what the model writes, so it has to know its
+    output lands directly after the previous output -- or it will introduce
+    the continuation, recap, and restart, as it did live.
+    """
+    _request(mind)
+    t1 = _claim(mind, "ego")
+    _cut(mind, t1, ALPHA, max_continuations=3)
+    t2 = _claim(mind, "ego")
+    said = t2["triggers"][0]["summary"]
+    assert said in t2["text"], "the instruction is not what the model reads"
+    assert "appended directly" in said
+    for forbidden in ("introduce the continuation", "recap", "restart a section",
+                      "repeat"):
+        assert forbidden in said, forbidden
+    assert len(said) <= mailbox.MAX_SUMMARY, "the instruction would be cut"
+
+
+def test_a_preamble_the_model_writes_anyway_is_kept(mind):
+    """No heuristic rewrites a reply. What the model said is what is delivered."""
+    req = _request(mind)
+    t1 = _claim(mind, "ego")
+    _cut(mind, t1, "Claim 1: inferred. ", max_continuations=3)
+    t2 = _claim(mind, "ego")
+    preamble = "Continuing from where the previous analysis left off:\n\n---\n\n"
+    _complete(mind, t2["turn_id"], stop_reason="model_stop",
+              result=_piece(preamble + "Claim 2: measured.", resumed=False),
+              max_continuations=3)
+    assert _answer_of(mind, req["trigger_id"])[1] == (
+        "Claim 1: inferred. " + preamble + "Claim 2: measured.")
+
+
+# ===========================================================================
+# a conclusion is the answer, not a fragment of it
+# ===========================================================================
+def _conclusions(mind):
+    return [dict(r) for r in mind.db.conn.execute(
+        "SELECT conclusion_id, claim, operation_id, produced_by"
+        " FROM conclusions ORDER BY created_at")]
+
+
+def _evidence_notes(mind, conclusion_id):
+    return [r["note"] for r in mind.db.conn.execute(
+        "SELECT note FROM conclusion_evidence WHERE conclusion_id = ?"
+        " ORDER BY id", (conclusion_id,))]
+
+
+def test_a_fragment_is_not_a_conclusion_and_the_whole_answer_is(mind):
+    """Live, one question left four conclusions -- three of them half-sentences.
+
+    A bounded turn ending is not Ego concluding anything. The conclusion is
+    recorded once, when the interaction's answer is whole and finished, and it
+    cites every turn that produced it.
+    """
+    req = _request(mind)
+    t1 = _claim(mind, "ego")
+    _cut(mind, t1, ALPHA, max_continuations=3)
+    assert _conclusions(mind) == [], "a max_output_tokens fragment was concluded"
+    t2 = _claim(mind, "ego")
+    _cut(mind, t2, BRAVO, resumed=True, max_continuations=3)
+    assert _conclusions(mind) == [], "a continuation fragment was concluded"
+    t3 = _claim(mind, "ego")
+    _complete(mind, t3["turn_id"], stop_reason="model_stop",
+              result=_piece(CHARLIE, resumed=True), max_continuations=3)
+
+    concluded = _conclusions(mind)
+    assert len(concluded) == 1
+    assert concluded[0]["claim"] == (ALPHA + BRAVO + CHARLIE).strip()
+    assert concluded[0]["produced_by"] == "ego"
+    notes = _evidence_notes(mind, concluded[0]["conclusion_id"])
+    assert notes == [f"turn {t1['turn_id']}", f"turn {t2['turn_id']}",
+                     f"turn {t3['turn_id']}", f"trigger {req['trigger_id']}"]
+    # And the answer knows which conclusion it became.
+    assert _answer_record(mind, req["trigger_id"])[1]["conclusion_id"] == \
+        concluded[0]["conclusion_id"]
+
+
+def test_an_incomplete_answer_is_not_a_conclusion(mind):
+    """A thought the continuation limit stopped is not a claim Ego made."""
+    req = _request(mind)
+    turn = _claim(mind, "ego")
+    while True:
+        out = _cut(mind, turn, "still going ", max_continuations=2)
+        if out["continuation"] is None:
+            break
+        turn = _claim(mind, "ego")
+    assert _answer_of(mind, req["trigger_id"])[0] == "incomplete"
+    assert _conclusions(mind) == []
+
+
+def test_ids_answers_are_not_egos_conclusions(mind):
+    req = _request(mind, role="id")
+    turn = _claim(mind, "id")
+    _complete(mind, turn["turn_id"], stop_reason="model_stop",
+              result={"text": "the pool is nominal", "segment": "the pool is nominal"})
+    assert _answer_of(mind, req["trigger_id"])[0] == "answered"
+    assert _conclusions(mind) == []
+
+
+# ===========================================================================
+# one canonical ceiling; the platform cap refuses rather than clamps
+# ===========================================================================
+def test_the_platform_cap_refuses_rather_than_clamps():
+    """At 512, as a silent clamp, it gave Ego 512 of a governed 3072."""
+    from amoeba.errors import InvalidInput
+
+    cfg = ArbiterConfig()
+    cfg.max_completion_tokens = 512
+    with pytest.raises(InvalidInput) as refused:
+        Arbiter(cfg).clamp_inference(prompt_tokens=10, max_tokens=3072,
+                                     deadline=None, budget_tokens=16384)
+    assert "platform cap" in str(refused.value)
+    from amoeba.roles import _is_context_pressure
+
+    assert not _is_context_pressure(refused.value), \
+        "a contradiction must not be mistaken for a full context"
+
+
+def test_a_silent_profile_is_bound_with_the_shipped_ceiling_on_the_record(mind, library):
+    """An approved root that predates the setting gets the shipped value -- visibly.
+
+    The live Ego ran on such a root. The number it was given now appears in
+    the binding as supplied by the Harness, not as a choice anyone made.
+    """
+    from amoeba import prompt_api
+
+    store, resolver = library
+    silent = _author(mind, store, "ego", mode="replace",
+                     text=resolver.resolve_selected("ego").prompt_text,
+                     model_vars={"temperature": 0.7, "top_p": 0.95})
+    _approve_and_select(mind, store, "ego", silent["version_id"])
+    bound = prompt_api.build(_Sup(mind))["bind_profile"](
+        namespace="ego", actor_id="ego", actor_kind="ego")
+    assert bound["backend_arguments"]["max_tokens"] == 3072
+    row = mind.db.conn.execute(
+        "SELECT effective_settings, harness_constraints FROM incarnation_profiles"
+        " WHERE binding_id = ?", (bound["binding_id"],)).fetchone()
+    assert json.loads(row["harness_constraints"]) == {"max_output_tokens": 3072}
+    assert json.loads(row["effective_settings"])["max_output_tokens"] == 3072
+
+
+def test_a_stated_ceiling_is_never_narrowed_by_the_harness(mind, library):
+    from amoeba import prompt_api
+
+    bound = prompt_api.build(_Sup(mind))["bind_profile"](
+        namespace="ego", actor_id="ego", actor_kind="ego")
+    assert bound["backend_arguments"]["max_tokens"] == 3072
+    row = mind.db.conn.execute(
+        "SELECT harness_constraints FROM incarnation_profiles WHERE binding_id = ?",
+        (bound["binding_id"],)).fetchone()
+    assert json.loads(row["harness_constraints"]) == {}
+
+
+def test_binding_refuses_a_profile_above_the_platform_cap(mind, library):
+    from amoeba import prompt_api
+    from amoeba.errors import InvalidInput
+
+    store, resolver = library
+    greedy = _author(mind, store, "ego", mode="replace",
+                     text=resolver.resolve_selected("ego").prompt_text,
+                     model_vars={"temperature": 0.7, "max_output_tokens": 999_999})
+    _approve_and_select(mind, store, "ego", greedy["version_id"])
+    with pytest.raises(InvalidInput) as refused:
+        prompt_api.build(_Sup(mind))["bind_profile"](
+            namespace="ego", actor_id="ego", actor_kind="ego")
+    assert "platform cap" in str(refused.value)
+
+
+class _Log:
+    def __init__(self):
+        self.warnings = []
+
+    def warning(self, msg, *args):
+        self.warnings.append(msg % args if args else msg)
+
+
+def _startup(mind, cap):
+    import copy
+
+    from amoeba.supervisor import Supervisor
+
+    cfg = copy.deepcopy(mind.cfg)
+    cfg.arbiter.max_completion_tokens = cap
+    stub = type("S", (), {})()
+    stub.cfg, stub.mind, stub.log = cfg, mind, _Log()
+    Supervisor._validate_output_ceilings(stub)
+    return stub.log
+
+
+def test_startup_refuses_ceilings_that_contradict_the_platform_cap(mind, library):
+    """Never silently clamp 3072 to 512: refuse to start, and say why."""
+    with pytest.raises(RuntimeError) as refused:
+        _startup(mind, 512)
+    message = str(refused.value)
+    assert "platform cap of 512" in message and "ego@" in message
+    assert "max_completion_tokens" in message
+
+
+def test_startup_accepts_a_consistent_configuration(mind, library):
+    assert _startup(mind, 3072).warnings == []
+
+
+def test_startup_says_aloud_when_a_selected_profile_states_no_ceiling(mind, library):
+    store, resolver = library
+    silent = _author(mind, store, "ego", mode="replace",
+                     text=resolver.resolve_selected("ego").prompt_text,
+                     model_vars={"temperature": 0.7, "top_p": 0.95})
+    _approve_and_select(mind, store, "ego", silent["version_id"])
+    warned = _startup(mind, 3072).warnings
+    assert len(warned) == 1 and "ego@" in warned[0] and "approve" in warned[0]
+
+
+# ===========================================================================
+# the live answer is one conclusion
+# ===========================================================================
+@live
+def test_the_live_three_turn_answer_is_one_conclusion(answering):
+    _inference(answering).call("script_responses", responses=[
+        {"text": ALPHA, "finish_reason": "length"},
+        {"text": BRAVO, "finish_reason": "length", "continues": True},
+        {"text": CHARLIE, "finish_reason": "stop", "continues": True},
+    ])
+    env = answering.call("ego_converse", message="one answer, three turns",
+                         wait=False)
+    state = _await_answer(answering, env["result"]["trigger_id"])
+    assert state["status"] == "completed"
+    recorded = answering.call("history", operation_id=env["operation_id"],
+                              kinds=["conclusion.recorded"], limit=50)
+    assert len(recorded) == 1, "one answer became several conclusions"
+    payload = json.loads(recorded[0]["payload_inline"])
+    concl = answering.call("get_conclusion",
+                           conclusion_id=payload["conclusion_id"])
+    assert concl["claim"] == state["answer"]
+    assert sum(n["note"].startswith("turn ") for n in concl["evidence"]) == 3

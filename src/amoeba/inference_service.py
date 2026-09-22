@@ -397,7 +397,6 @@ class InferenceService:
         # exactly what a caller needs to tell contention from slow inference.
         out["queue_delay_seconds"] = req["started"] - req["queued"]
         out["service_seconds"] = time.perf_counter() - req["started"]
-        out["budget_clamped"] = req["clamp"]["clamped"]
         out["batch_size"] = batch_size
         out["model_generation"] = self.backend.model_generation
         out["is_simulated"] = bool(getattr(self.backend, "is_simulated", False))

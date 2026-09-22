@@ -85,8 +85,15 @@ class Mutation:
         actor: str | None = None,
         causation_id: str | None = None,
         correlation_id: str | None = None,
+        operation_id: str | None = None,
     ) -> str:
-        """Queue an append-only event. Large payloads go to the blob store now."""
+        """Queue an append-only event. Large payloads go to the blob store now.
+
+        `operation_id` names the operation one event belongs to, when that is
+        not the mutation's own. Closing a turn is the Harness's act, but the
+        conclusion recorded as it closes belongs to the operation that asked
+        the question -- and an audit finds a conclusion through its operation.
+        """
         sha: str | None = None
         inline: str | None = None
         if payload is not None:
@@ -104,7 +111,7 @@ class Mutation:
                 payload_inline=inline,
                 actor_id=actor or self.actor,
                 actor_incarnation=self.incarnation,
-                operation_id=self.operation_id,
+                operation_id=operation_id or self.operation_id,
                 causation_id=causation_id if causation_id is not None else self._last_event_id,
                 correlation_id=correlation_id or self.correlation_id,
                 event_id=event_id,
