@@ -189,6 +189,11 @@ class SchedulerConfig:
     # 307 tokens of "No maintained beliefs, conclusions, or memories are
     # recorded" every half hour, carried until the next rebuild.
     heartbeat_quiet_ceiling_tokens: int = 128
+    # Consecutive failed turns before the Harness calls a role unwell and
+    # repairs it. Reachability is not health: a role answered probes for
+    # thirty-seven hours while failing every turn.
+    role_failure_threshold_turns: int = 3
+    role_repairs_per_hour: int = 2
 
     # Id gets one turn at startup so it forms an initial view of the organism
     # it woke up in. Ego does not: a persistent identity that talks to itself

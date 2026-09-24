@@ -23,7 +23,7 @@ from typing import Any, Sequence
 
 from .arbiter import Arbiter, ResourceSnapshot
 from .config import Config, load_config
-from . import heartbeat
+from . import heartbeat, mailbox
 from .filespace import Filespace
 from .errors import (
     BackendUnavailable, InvalidInput, MindError, NotFound, ResourceExhausted,
@@ -192,6 +192,11 @@ class Supervisor:
         # the moment pressure drops, so the ceiling measures one continuous
         # period of strain rather than a lifetime total.
         self._heartbeat_deferred_since: dict[str, float] = {}
+        # Streaks already on the record, and the repairs spent on them, so a
+        # role that cannot think is reported once and restarted a bounded
+        # number of times rather than in a loop.
+        self._not_thinking: dict[str, float | None] = {}
+        self._role_repairs: dict[str, list[float]] = {}
         # NB: guarded by the existing `_sched_lock` above, which is also held
         # across the whole scheduler tick. Sharing it keeps the ordering
         # obvious; it also means a trigger enqueue can wait behind a neuocyte
@@ -1072,6 +1077,12 @@ class Supervisor:
             except Exception:  # noqa: BLE001
                 self.log.exception("supervision pass failed")
             try:
+                # Answering is not thinking: a role can pass every probe
+                # while failing every turn.
+                self._supervise_thinking()
+            except Exception:  # noqa: BLE001
+                self.log.exception("thinking check failed")
+            try:
                 self._schedule_heartbeats()
             except Exception:  # noqa: BLE001
                 self.log.exception("heartbeat scheduling failed")
@@ -1111,6 +1122,65 @@ class Supervisor:
                 reason = (f"unreachable for {time.time() - since:.0f}s "
                           f"while its process object still looked alive")
             self._restart_child(name, reason)
+
+    def _supervise_thinking(self) -> None:
+        """Restart a role that answers but cannot complete a turn.
+
+        Reachability is not health. Live, Id held a session the Harness had
+        closed -- after a rejuvenation Id itself requested -- and failed every
+        turn for thirty-seven hours, reporting itself alive throughout,
+        because nothing asked whether its turns were working. The record knew
+        all along: seventy-five failures and not one successful turn.
+
+        Bounded: the streak is recorded once, the repair is rate limited, and
+        a role that keeps failing after its repairs are spent is left alone
+        and stays visibly unwell rather than being restarted in a loop.
+        """
+        if self.mind is None:
+            return
+        threshold = int(self.cfg.scheduler.role_failure_threshold_turns)
+        if threshold <= 0:
+            return
+        for role in ("ego", "id"):
+            try:
+                streak = mailbox.failing_streak(self.mind.db.conn, role)
+            except Exception:  # noqa: BLE001
+                self.log.debug("could not measure %s's turns", role, exc_info=True)
+                continue
+            if streak["turns"] < threshold:
+                self._not_thinking.pop(role, None)
+                continue
+            if self._not_thinking.get(role) == streak["since"]:
+                continue                     # this streak is already on the record
+            self._not_thinking[role] = streak["since"]
+            self.log.error("%s has failed %d turns in a row (%s)", role,
+                           streak["turns"], streak["stop_reason"])
+            repairs = [t for t in self._role_repairs.get(role, [])
+                       if time.time() - t < 3600.0]
+            allowed = int(self.cfg.scheduler.role_repairs_per_hour)
+            self._emit_not_thinking(role, streak, repaired=len(repairs) < allowed)
+            if len(repairs) >= allowed:
+                self.log.error("%s stays unwell: %d repairs already used this "
+                               "hour", role, len(repairs))
+                continue
+            repairs.append(time.time())
+            self._role_repairs[role] = repairs
+            self._restart_child(role, (f"failed {streak['turns']} turns in a row "
+                                       f"({streak['stop_reason']})"))
+
+    def _emit_not_thinking(self, role: str, streak: dict[str, Any], *,
+                           repaired: bool) -> None:
+        def body(m: Mutation) -> None:
+            m.emit(EventKind.ROLE_NOT_THINKING, {
+                "role": role, "consecutive_failed_turns": streak["turns"],
+                "stop_reason": streak["stop_reason"], "since": streak["since"],
+                "repair": "restarting the role" if repaired else
+                          "repairs for this hour are spent; left running and unwell"})
+
+        try:
+            self.mind.writer.apply(body, actor="supervisor", bump_version=False)
+        except Exception:  # noqa: BLE001
+            self.log.exception("could not record that %s is not thinking", role)
 
     def _child_reachable(self, name: str) -> bool:
         """Is this child answering right now?

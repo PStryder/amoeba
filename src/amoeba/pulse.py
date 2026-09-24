@@ -66,6 +66,7 @@ FAILURE_KINDS: dict[str, str] = {
     EventKind.SANDBOX_DENIED: "sandbox_denied",
     EventKind.FILE_DENIED: "file_denied",
     EventKind.AGENT_CRASHED: "agent_crashed",
+    EventKind.ROLE_NOT_THINKING: "role_not_thinking",
     EventKind.REJUVENATION_REFUSED: "rejuvenation_refused",
     EventKind.ERROR: "error",
 }
@@ -138,6 +139,17 @@ class PulseCollector:
         while self._failures and self._failures[0][0] < cutoff:
             self._failures.popleft()
 
+    def _thinking(self, role: str) -> dict[str, Any]:
+        from . import mailbox
+
+        try:
+            streak = mailbox.failing_streak(self.sup.mind.db.conn, role)
+        except Exception:  # noqa: BLE001
+            return {}
+        return {"consecutive_failed_turns": streak["turns"],
+                "thinking": streak["turns"] < int(
+                    self.sup.cfg.scheduler.role_failure_threshold_turns)}
+
     def _failure_counts(self) -> dict[str, Any]:
         now = time.time()
         out: dict[str, Any] = {"window_seconds": FAILURE_WINDOW_SECONDS}
@@ -208,6 +220,9 @@ class PulseCollector:
                     "max_context_tokens": held.get("budget_tokens"),
                     "pending_signals": r.get("pending_signals"),
                     "prompt_sha256": self.sup.role_prompt_digest.get(role),
+                    # Whether its turns are working, from the Harness's record
+                    # rather than from the role's opinion of itself.
+                    **self._thinking(role),
                 }
             except Exception as exc:  # noqa: BLE001
                 facts["roles"][role] = {"reachable": False,

@@ -165,6 +165,7 @@ class EventKind:
     ROLE_TRIGGER_RECOVERED = "role.trigger_recovered"
     ROLE_TURN_ENDED = "role.turn_ended"
     ROLE_TURN_ABANDONED = "role.turn_abandoned"
+    ROLE_NOT_THINKING = "role.not_thinking"
     ROLE_STRUCTURE_REFUSED = "role.structure_refused"
     ROLE_CONTINUATION_SCHEDULED = "role.continuation_scheduled"
 

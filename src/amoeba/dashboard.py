@@ -388,6 +388,8 @@ const render = {
     const r = card("roles");
     for (const [role,f] of Object.entries(o.roles)) {
       r.appendChild(el("div",null,role+": "+(f.reachable?"reachable":"UNREACHABLE")
+        +(f.thinking===false?" · NOT THINKING ("+f.consecutive_failed_turns
+          +" failed turns)":"")
         +" · inc "+f.incarnation+" · ctx "+(f.context_tokens??"?")
         +"/"+(f.max_context_tokens??"?")));
     }

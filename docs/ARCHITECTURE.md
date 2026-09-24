@@ -1802,6 +1802,39 @@ agrees to it, so a real question sharing the turn is never shortened.
 `test_a_live_quiet_review_is_cheap`,
 `test_context_telemetry_is_compact_for_a_role_by_default`
 
+**I126. Answering is not thinking, and the Harness is the one who knows the
+difference.** Id lost its inference session to a rejuvenation it had
+requested itself (I94) and failed every turn for thirty-seven hours --
+seventy-five of them, not one success. Nothing noticed. The process answered
+every health probe, so supervision saw a healthy child; a role's turns
+failing were not counted as a failure anywhere, so the pulse reported none;
+and the component whose job is to watch the organism was the one that could
+not think.
+
+Health is therefore measured as whether a role's turns are *working*, from
+the Harness's own record rather than from the role's account of itself -- a
+role asked whether it is well is the worst available witness, and this one
+was cheerful throughout. A run of consecutive turns ending in `role_failure`
+or `backend_error` is the signal. A turn stopped by its output ceiling, by
+the tool-turn limit, by a deadline or by context pressure is not: those are a
+mind meeting a known limit, which is the organism working.
+
+What follows is bounded and receipted. The streak is recorded once as
+`role.not_thinking`, which counts as a failure in the pulse and marks the
+role `thinking: false` for the operator. The repair is a restart of the role
+-- the remedy for a process that is alive and useless -- rate limited to
+`role_repairs_per_hour`. A role still failing after its repairs are spent is
+left running and visibly unwell rather than restarted in a loop, because an
+organism thrashing itself is worse than one waiting for a human.
+→ `test_consecutive_failures_are_counted_from_the_record`,
+`test_one_good_turn_ends_the_streak`,
+`test_a_mind_meeting_a_known_limit_is_not_failing`,
+`test_a_role_that_cannot_think_is_recorded_and_repaired`,
+`test_one_streak_is_reported_once_however_often_it_is_checked`,
+`test_repairs_are_bounded_and_the_alarm_outlasts_them`,
+`test_the_pulse_reports_a_role_that_cannot_think`,
+`test_a_role_that_cannot_think_counts_as_a_failure`
+
 **I73. A role is never wedged by a turn it did not close.** One open turn per
 role is a database constraint, so a turn left running blocks every future turn
 for that role — the role heartbeats, reports healthy, and never thinks again

@@ -534,6 +534,34 @@ def owed_lineages(conn, role: str) -> set[Any]:
         "   AND answer_status IS NULL", (role,))}
 
 
+# Ending this way is the turn failing, not the organism working. A turn cut
+# off by its ceiling, or stopped by context pressure, is a healthy mind
+# meeting a known limit; these two are a mind that could not run at all.
+FAILED_STOPS = ("role_failure", "backend_error")
+
+
+def failing_streak(conn, role: str, *, limit: int = 64) -> dict[str, Any]:
+    """Consecutive closed turns that failed, newest first, and what they said.
+
+    The Harness's own count, from its own record. Live, Id lost its inference
+    session to a rejuvenation it had requested itself and failed every turn
+    for thirty-seven hours while answering health probes cheerfully -- a role
+    asked whether it is well is the worst available witness.
+    """
+    streak, first, last_reason = 0, None, ""
+    for row in conn.execute(
+            "SELECT stop_reason, finished_at, result_sha256 FROM role_turns"
+            " WHERE role = ? AND status != 'running' AND finished_at IS NOT NULL"
+            " ORDER BY finished_at DESC LIMIT ?", (role, int(limit))):
+        if row["stop_reason"] not in FAILED_STOPS:
+            break
+        streak += 1
+        first = row["finished_at"]
+        last_reason = last_reason or (row["stop_reason"] or "")
+    return {"role": role, "turns": streak, "since": first,
+            "stop_reason": last_reason}
+
+
 def active_turns(conn, role: str, *, depth: int = 32) -> set[str]:
     """Turns whose thought is still being continued.
 
