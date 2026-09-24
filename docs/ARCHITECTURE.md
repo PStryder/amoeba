@@ -1907,6 +1907,86 @@ now back off to an hour rather than half of one.
 `test_news_already_waiting_is_not_said_twice_even_once_the_cooldown_lapses`,
 `test_a_condition_wake_is_never_deferred_by_pressure`
 
+**I129. An answer that exists is delivered, whatever became of whoever was
+waiting.** An external request is answered by a turn, and that answer lands
+on the trigger -- durably. Publishing it onto the interaction was done by the
+daemon thread that submitted it, and a thread does not survive a restart: a
+recovered thought completed and `io_output` reported `output: null` forever,
+while the record held the answer the whole time.
+
+The association is now durable -- `interactions.trigger_id`, written by the
+Harness at the moment the trigger is enqueued -- and delivery is a function
+of the record rather than of a live thread. A reconciler runs at every
+supervision pass, finds interactions still waiting whose trigger has been
+answered, and publishes; a trigger reported unanswerable fails the
+interaction rather than leaving it open. The thread remains, because it
+delivers sooner, but nothing depends on it surviving.
+
+Exactly once, two ways: the reconciler skips an interaction somebody is
+still waiting on, and the write itself requires a status that is still
+waiting -- which is what makes the race safe when the thread publishes
+between the reconciler's read and its write.
+→ `test_the_interaction_records_which_trigger_answers_it`,
+`test_an_investigation_records_its_trigger_too`,
+`test_an_answer_reaches_a_client_whose_thread_is_gone`,
+`test_delivering_twice_does_not_move_a_finished_interaction`,
+`test_a_thread_publishing_first_is_not_overwritten_by_the_reconciler`,
+`test_an_interaction_nobody_answered_is_left_alone`,
+`test_reconciling_is_not_an_external_capability`
+
+**I130. What a client sent arrives whole, and every kind of request carries
+the same context.** Two ways the path between a client and cognition lost
+part of the request.
+
+The door accepts 32,000 characters. A conversation then stored 16,000 of
+them and an investigation 8,000, silently -- so trailing instructions, which
+is exactly where constraints live, were dropped from otherwise valid
+requests. Storage keeps the whole text now; *rendering* is what bounds it,
+and rendering says how much it left out and which blob holds the rest
+(`mailbox.trigger_body`, I86). More than the door allows is refused at the
+door, not trimmed behind it.
+
+And an investigation was handed neither `interaction_id` nor `attachments`,
+though a conversation was given both: its turn could not resolve the files
+its own request arrived with, and could not return one through
+`ego_surface_result`. A request is a request whichever verb serves it.
+→ `test_a_long_request_is_not_quietly_shortened`,
+`test_an_investigation_keeps_its_constraints`,
+`test_what_is_rendered_says_where_the_rest_is`,
+`test_more_than_the_door_allows_is_refused_not_trimmed`,
+`test_an_investigation_carries_its_request_context`,
+`test_the_investigation_branch_passes_what_it_was_given`
+
+**I131. Starting a new organism does not erase the old one.** Everything in
+the state directory is the record of a mind that ran: what it concluded,
+what it was told, what it did and when. `amoeba reset` therefore moves it
+aside intact, under a timestamped name beside it, and says where it went.
+`--delete` exists and has to be meant -- it refuses without `--yes`, because
+an irreversible instruction that takes one keystroke to give is not an
+instruction anyone gave deliberately. This is I87's stance at the scale of a
+whole organism: evidence is not a cache.
+
+It refuses to run at all while a supervisor owns the directory, judged by
+the supervisor's own lock and its own staleness rule rather than a second
+opinion that could disagree; deleting a database under a live writer leaves
+a half-state nobody can reason about afterwards. It touches nothing outside
+the state directory -- the configured file roots are the operator's own
+directories. And it keeps credentials by default: a reset is about the mind,
+not about the doors it is reached through, and reissuing keys is a separate
+decision (`--rotate-credentials`). A directory holding only the empty
+scaffolding a configuration creates is not an organism, and resetting it
+announces nothing.
+→ `test_the_mind_is_archived_and_the_plumbing_is_kept`,
+`test_rotating_credentials_takes_them_too`,
+`test_a_dry_run_moves_nothing`,
+`test_deleting_really_deletes`,
+`test_deleting_needs_to_be_meant`,
+`test_a_running_organism_is_not_reset`,
+`test_a_lock_whose_holder_is_gone_does_not_stop_a_reset`,
+`test_nothing_outside_the_state_directory_is_touched`,
+`test_an_empty_directory_is_not_an_error`,
+`test_the_command_says_what_it_did_and_where_it_went`
+
 **I73. A role is never wedged by a turn it did not close.** One open turn per
 role is a database constraint, so a turn left running blocks every future turn
 for that role — the role heartbeats, reports healthy, and never thinks again

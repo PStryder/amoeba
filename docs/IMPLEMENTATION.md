@@ -90,6 +90,9 @@ Read this before trusting anything below it.
 | A role that cannot think is detected | **Implemented, tested** | consecutive failed turns measured from the record, recorded once, repaired within a rate limit, shown to the operator — see I126 |
 | Identifiers are obtainable, not guessed | **Implemented, tested** | the digest names what it counts, `audit_dossier()` resolves the next one, refusals say what a value is and where a real one comes from — see I127 |
 | Conditions wake the inward mind | **Implemented, tested** | failure bursts, pool pressure and a wedged peer earn a turn; measured, cooled down, never deferred by pressure — see I128 |
+| External answers delivered from the record | **Implemented, tested** | the interaction records its trigger; a reconciler publishes answers no thread is left waiting for — see I129 |
+| A request reaches cognition whole | **Implemented, tested** | no silent clipping behind the door; investigations carry `interaction_id` and attachments like conversations — see I130 |
+| Reset starts a new organism | **Implemented, tested** | `amoeba reset` archives the old state beside it, refuses while one is running, keeps credentials — see I131 |
 | Roles can invoke what they are offered | **Implemented, tested** | the environment block states the call syntax the loop parses; a malformed attempt is refused and retried, never delivered as an answer — see I113, I115 |
 | A busy role is not restarted as dead | **Implemented, tested** | health probes use their own inference connection, so a long generation cannot fail liveness — see I114 |
 | Per-role output ceilings | **Implemented, tested** | Ego 3072, Id 1024, `ego.neuocyte` 512, `id.neuocyte` 384, one canonical value per bound profile; the platform cap refuses rather than clamps, and startup fails on a contradiction — see I110 |

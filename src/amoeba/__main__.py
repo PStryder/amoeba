@@ -138,15 +138,66 @@ def _shutdown(cfg: Any) -> int:
         client.close()
 
 
+def _reset(cfg: Any, *, delete: bool, dry_run: bool,
+           rotate_credentials: bool, confirmed: bool) -> int:
+    """Start a new organism. The old one is moved aside, not erased.
+
+    Refuses while a supervisor owns the state directory: deleting a database
+    under a live writer leaves a half-state nobody can reason about later.
+    """
+    from . import reset as reset_mod
+
+    live = reset_mod.holder(cfg)
+    if live is not None:
+        print(f"refusing: a supervisor (pid {live.get('pid')}) owns "
+              f"{cfg.state_dir}.\n"
+              f"  stop it first: python -m amoeba shutdown --config <config>")
+        return 2
+    if delete and not (confirmed or dry_run):
+        print("refusing: --delete destroys the record of the organism that ran.\n"
+              "  archive it instead (omit --delete), or pass --yes to mean it.")
+        return 2
+
+    chosen = reset_mod.plan(cfg, rotate_credentials=rotate_credentials)
+    if not chosen["holds_state"]:
+        print(f"nothing to reset: {cfg.state_dir} holds no organism state")
+        return 0
+    out = reset_mod.perform(chosen, delete=delete, dry_run=dry_run)
+    verb = ("would move" if dry_run else
+            "deleted" if out["deleted"] else "archived")
+    print(f"{verb} {len(out['moved'])} item(s) from {cfg.state_dir}:")
+    for name in out["moved"]:
+        print(f"  {name}")
+    if out["archive"]:
+        print(f"the old organism is readable at {out['archive']}")
+    if out["kept"]:
+        print("kept (credentials; --rotate-credentials reissues them):")
+        for name in out["kept"]:
+            print(f"  {name}")
+    if not dry_run:
+        print("the next `supervise` starts a new organism at incarnation 1, "
+              "with the prompt library rebootstrapped from the shipped files.")
+    return 0
+
+
 def main(argv: Sequence[str] | None = None) -> int:
     ap = argparse.ArgumentParser(prog="amoeba")
     ap.add_argument("command",
                     choices=["doctor", "supervise", "mcp", "status", "shutdown",
-                             "ego", "id", "inference", "neuocyte"])
+                             "reset", "ego", "id", "inference", "neuocyte"])
     ap.add_argument("--config", default=os.environ.get("AMOEBA_CONFIG"))
     ap.add_argument("--transport", default="stdio")
     ap.add_argument("--neuocyte-id", default=None)
     ap.add_argument("--work-id", default=None)
+    # `reset`: what to do with the organism that is there now.
+    ap.add_argument("--delete", action="store_true",
+                    help="reset: remove the old state instead of archiving it")
+    ap.add_argument("--rotate-credentials", action="store_true",
+                    help="reset: reissue tokens and API keys as well")
+    ap.add_argument("--dry-run", action="store_true",
+                    help="reset: say what would move, and move nothing")
+    ap.add_argument("--yes", action="store_true",
+                    help="reset: confirm an irreversible --delete")
     args, rest = ap.parse_known_args(list(argv) if argv is not None else None)
     cfg = load_config(args.config)
     cfg_args = ["--config", args.config] if args.config else []
@@ -157,6 +208,10 @@ def main(argv: Sequence[str] | None = None) -> int:
         return _status(cfg)
     if args.command == "shutdown":
         return _shutdown(cfg)
+    if args.command == "reset":
+        return _reset(cfg, delete=args.delete, dry_run=args.dry_run,
+                      rotate_credentials=args.rotate_credentials,
+                      confirmed=args.yes)
     if args.command == "supervise":
         from .supervisor import main as sup_main
         return sup_main(cfg_args)

@@ -1201,7 +1201,7 @@ def build(sup: "Supervisor") -> dict[str, Any]:
                 role="ego", kind="user_input", source="operator",
                 expects_answer=True,
                 summary=message.strip()[:400],
-                payload={"message": message[:16000],
+                payload={"message": message,
                          "conversation_id": conversation_id,
                          # Who is waiting, and what they sent. Ego never
                          # supplies either: both are how the Harness scopes
@@ -1210,6 +1210,9 @@ def build(sup: "Supervisor") -> dict[str, Any]:
                          "interaction_id": interaction_id,
                          "attachments": list(attachments or [])},
                 correlation_id=conversation_id, operation_id=op_id,
+                # NB: `_note_trigger_for` below records this trigger against
+                # the interaction, so the answer can be delivered from the
+                # record rather than by whoever happens to be waiting.
                 # The operation, not the conversation. A conversation is many
                 # interactions, and work delegated while answering this one
                 # comes back tagged with *this* operation -- tagging the
@@ -1218,6 +1221,7 @@ def build(sup: "Supervisor") -> dict[str, Any]:
                 # Continuity across a conversation is Ego's persistent
                 # context, which is what `conversation_id` still correlates.
                 lineage=op_id)
+            _note_trigger_for(interaction_id, queued["trigger_id"])
             out: dict[str, Any] = {"trigger_id": queued["trigger_id"],
                                    "status": "queued",
                                    "conversation_id": conversation_id}
@@ -1260,9 +1264,31 @@ def build(sup: "Supervisor") -> dict[str, Any]:
                               {"message": message, "conversation_id": conversation_id},
                               idempotency_key, run)
 
+    def _note_trigger_for(interaction_id: str | None, trigger_id: str) -> None:
+        """Record which trigger answers an interaction, durably.
+
+        The association existed only inside the thread that was waiting, so a
+        restart left a completed thought with `output: null` forever. Best
+        effort by design: failing to record it must not fail the request,
+        and the reconciler simply has nothing to work from.
+        """
+        if not interaction_id:
+            return
+        try:
+            mind.writer.apply(
+                lambda m: m.sql("UPDATE interactions SET trigger_id = ?"
+                                " WHERE interaction_id = ?",
+                                (trigger_id, interaction_id)),
+                actor="harness", bump_version=False)
+        except Exception:  # noqa: BLE001
+            sup.log.exception("could not record trigger %s for interaction %s",
+                              trigger_id, interaction_id)
+
     def ego_investigate(*, question: str, constraints: str = "",
                         budget_tokens: int | None = None,
                         idempotency_key: str | None = None,
+                        interaction_id: str | None = None,
+                        attachments: Sequence[dict[str, Any]] | None = None,
                         wait: bool = True, wait_seconds: float | None = None
                         ) -> dict[str, Any]:
         """Ask Ego to investigate something.
@@ -1285,11 +1311,24 @@ def build(sup: "Supervisor") -> dict[str, Any]:
                 role="ego", kind="user_input", source="operator",
                 expects_answer=True,
                 summary=framing[:400],
-                payload={"question": question[:8000],
-                         "constraints": constraints[:2000],
+                # Whole, not clipped: the door already refuses more than
+                # `MAX_INPUT_CHARS`, and what gets past it is what was asked.
+                # Rendering bounds the body and says where the rest is
+                # (`mailbox.trigger_body`); storage silently dropping the end
+                # of a request cost investigations their trailing
+                # instructions.
+                payload={"question": question,
+                         "constraints": constraints,
                          "budget_tokens": budget_tokens,
-                         "intent": "investigate"},
+                         "intent": "investigate",
+                         # The same context a conversation carries. Without
+                         # these an investigation could not resolve its own
+                         # request's attachments or return a file through
+                         # `ego_surface_result`.
+                         "interaction_id": interaction_id,
+                         "attachments": list(attachments or [])},
                 operation_id=op_id, lineage=op_id)
+            _note_trigger_for(interaction_id, queued["trigger_id"])
             out: dict[str, Any] = {"trigger_id": queued["trigger_id"],
                                    "status": "queued", "question": question}
             if not wait:

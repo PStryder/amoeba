@@ -1086,6 +1086,12 @@ class Supervisor:
             except Exception:  # noqa: BLE001
                 self.log.exception("thinking check failed")
             try:
+                # An answer that exists belongs to the client that asked,
+                # whatever became of the thread that was waiting for it.
+                self.methods()["io_reconcile"]()
+            except Exception:  # noqa: BLE001
+                self.log.exception("interaction reconcile failed")
+            try:
                 self._wake_on_conditions()
             except Exception:  # noqa: BLE001
                 self.log.exception("condition wake failed")

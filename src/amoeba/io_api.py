@@ -258,8 +258,12 @@ def build(sup: "Supervisor") -> dict[str, Any]:  # noqa: C901
                     " FROM interaction_inputs WHERE interaction_id = ?"
                     " ORDER BY created_at", (interaction_id,))]
             if kind == "investigate":
+                # The same request context a conversation carries. Without
+                # it an investigation could not resolve its own request's
+                # attachments, nor return a file through `ego_surface_result`.
                 out = sup.methods()["ego_investigate"](
-                    question=text, wait_seconds=patience)
+                    question=text, interaction_id=interaction_id,
+                    attachments=attachments, wait_seconds=patience)
             else:
                 out = sup.methods()["ego_converse"](
                     message=text, conversation_id=conversation_id,
@@ -287,24 +291,9 @@ def build(sup: "Supervisor") -> dict[str, Any]:  # noqa: C901
                     "but this interaction carries no answer",
                     interaction_id=interaction_id,
                     trigger_id=(result or {}).get("trigger_id"))
-            payload = {"result": result, "operation_id": out.get("operation_id")
-                       if isinstance(out, dict) else None}
-            digest = mind.blobs.put_json(payload)
-
-            def body(m: Mutation) -> None:
-                m.register_blob(digest, 0, "application/json",
-                                "external_output")
-                m.sql("UPDATE interactions SET status = ?,"
-                      " output_sha256 = ?, output_preview = ?, operation_id = ?,"
-                      " completed_at = ? WHERE interaction_id = ?",
-                      (final, digest, str(answer)[:1000],
-                       payload.get("operation_id"), time.time(),
-                       interaction_id))
-                m.emit(EventKind.INTERACTION_COMPLETED, {
-                    "interaction_id": interaction_id, "client_id": client_id,
-                    "output_sha256": digest, "status": final})
-
-            mind.writer.apply(body, actor=f"client:{client_id}")
+            _publish(interaction_id, client_id, result=result,
+                     operation_id=out.get("operation_id")
+                     if isinstance(out, dict) else None)
         except Exception as exc:  # noqa: BLE001
             def failed(m: Mutation) -> None:
                 m.sql("UPDATE interactions SET status = 'failed', error = ?,"
@@ -323,6 +312,99 @@ def build(sup: "Supervisor") -> dict[str, Any]:  # noqa: C901
             running.pop(interaction_id, None)
             with done:
                 done.notify_all()
+
+    def _publish(interaction_id: str, client_id: str, *,
+                 result: dict[str, Any] | None,
+                 operation_id: str | None) -> str:
+        """Write an answer onto the interaction. Idempotent by status.
+
+        Used by whoever gets there first: the thread waiting on the thought,
+        or the reconciler reading the same answer off the record afterwards.
+        """
+        answer = ""
+        if isinstance(result, dict):
+            answer = (result.get("answer") or result.get("claim")
+                      or result.get("plan") or "")
+        state = result.get("status") if isinstance(result, dict) else None
+        final = "complete" if state == "completed" else "incomplete"
+        payload = {"result": result, "operation_id": operation_id}
+        digest = mind.blobs.put_json(payload)
+
+        def body(m: Mutation) -> None:
+            m.register_blob(digest, 0, "application/json", "external_output")
+            # Only from a status that is still waiting: whoever published
+            # first has said it, and saying it twice would move a finished
+            # interaction's completion time for no reason.
+            m.sql("UPDATE interactions SET status = ?, output_sha256 = ?,"
+                  " output_preview = ?, operation_id = ?, completed_at = ?"
+                  " WHERE interaction_id = ?"
+                  "   AND status IN ('accepted', 'running')",
+                  (final, digest, str(answer)[:1000], operation_id,
+                   time.time(), interaction_id))
+            m.emit(EventKind.INTERACTION_COMPLETED, {
+                "interaction_id": interaction_id, "client_id": client_id,
+                "output_sha256": digest, "status": final})
+
+        mind.writer.apply(body, actor=f"client:{client_id}")
+        return final
+
+    def io_reconcile(*, limit: int = 50) -> dict[str, Any]:
+        """Deliver answers that exist to interactions still waiting for them.
+
+        An external request is answered by a turn, and the answer lands on
+        the trigger -- durably. Publishing it to the interaction was done by
+        the thread that submitted it, which does not survive a restart: a
+        recovered thought completed, and `io_output` said `output: null`
+        forever. The record knew the whole time.
+
+        Harness-only, and safe to run as often as anything likes: it acts on
+        an interaction exactly once, because publishing requires a status
+        that is still waiting.
+        """
+        delivered: list[dict[str, Any]] = []
+        for row in mind.db.conn.execute(
+                "SELECT interaction_id, client_id, trigger_id FROM interactions"
+                " WHERE status IN ('accepted', 'running')"
+                "   AND trigger_id IS NOT NULL"
+                " ORDER BY created_at LIMIT ?", (max(1, int(limit)),)):
+            if row["interaction_id"] in running:
+                continue                 # somebody is still waiting on it
+            try:
+                state = sup.methods()["role_answer"](trigger_id=row["trigger_id"])
+            except Exception:  # noqa: BLE001
+                sup.log.debug("could not read the answer for %s",
+                              row["interaction_id"], exc_info=True)
+                continue
+            status = state.get("status")
+            if status in ("completed", "incomplete"):
+                final = _publish(row["interaction_id"], row["client_id"],
+                                 result=state, operation_id=state.get("operation_id"))
+                delivered.append({"interaction_id": row["interaction_id"],
+                                  "status": final, "from": "the record"})
+            elif status == "unanswerable":
+                _fail(row["interaction_id"], row["client_id"],
+                      "the organism reported this request unanswerable")
+                delivered.append({"interaction_id": row["interaction_id"],
+                                  "status": "failed", "from": "the record"})
+        if delivered:
+            sup.log.info("delivered %d answer(s) nobody was left waiting for",
+                         len(delivered))
+        return {"delivered": delivered, "count": len(delivered)}
+
+    def _fail(interaction_id: str, client_id: str, error: str) -> None:
+        def body(m: Mutation) -> None:
+            m.sql("UPDATE interactions SET status = 'failed', error = ?,"
+                  " completed_at = ? WHERE interaction_id = ?"
+                  "   AND status IN ('accepted', 'running')",
+                  (error[:2000], time.time(), interaction_id))
+            m.emit(EventKind.INTERACTION_FAILED, {
+                "interaction_id": interaction_id, "client_id": client_id,
+                "error": error[:200]})
+
+        try:
+            mind.writer.apply(body, actor=f"client:{client_id}")
+        except Exception:  # noqa: BLE001
+            sup.log.exception("could not record interaction failure")
 
     def _set_status(interaction_id: str, status: str) -> None:
         def body(m: Mutation) -> None:
@@ -407,7 +489,7 @@ def build(sup: "Supervisor") -> dict[str, Any]:  # noqa: C901
         "io_submit": io_submit,
         "io_status": io_status,
         "io_await": io_await,
-        "io_output": io_output,
+        "io_output": io_output, "io_reconcile": io_reconcile,
         "io_list": io_list,
         "io_result": io_result,
     }

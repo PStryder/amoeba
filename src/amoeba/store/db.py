@@ -461,6 +461,11 @@ CREATE TABLE IF NOT EXISTS interactions (
   status          TEXT NOT NULL,          -- accepted | running | complete
                                           --   | incomplete | failed
   operation_id    TEXT,
+  -- The trigger this interaction is waiting on. Recorded when it is
+  -- enqueued, so an answer can be delivered from the record by anything
+  -- that comes along later -- a thread that published it was not durable,
+  -- and a restart left completed thoughts with `output: null` forever.
+  trigger_id      TEXT,
   output_sha256   TEXT,
   output_preview  TEXT,
   error           TEXT,
@@ -819,6 +824,7 @@ class Database:
     # turn, and information belong to a lineage rather than to whoever is
     # nearby. Table, column, and the DDL fragment to add it with.
     _OWNERSHIP_COLUMNS = (
+        ("interactions", "trigger_id", "TEXT"),
         ("role_triggers", "expects_answer", "INTEGER NOT NULL DEFAULT 0"),
         ("role_triggers", "answer_sha256", "TEXT"),
         ("role_triggers", "answer_status", "TEXT"),
