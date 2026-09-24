@@ -289,17 +289,29 @@ def test_path_escape_through_the_harness_is_refused(stack: LiveStack):
 # Context homeostasis
 # ===========================================================================
 def test_context_report_is_measured_not_estimated(stack: LiveStack):
-    r = stack.call("context_report")
+    r = stack.call("context_report", detail="full")
     assert r["backend_available"] is True
     assert r["pool_capacity"] > 0
     assert r["pressure"] in ("nominal", "elevated", "high", "critical")
     assert isinstance(r["sessions"], list)
 
 
+def test_context_telemetry_is_compact_for_a_role_by_default(stack: LiveStack):
+    """457 tokens a heartbeat went on per-session rows nobody asked for."""
+    summary = stack.call("context_report")
+    assert summary["detail"] == "summary" and "sessions" not in summary
+    assert summary["pool_capacity"] > 0
+    assert {r["role"] for r in summary["roles"]} <= {"ego", "id"}
+    full = stack.call("context_report", detail="full")
+    assert isinstance(full["sessions"], list) and full["sessions"]
+    assert "sessions" not in stack.call("context_assess")["report"]
+    assert stack.call("context_assess", detail="full")["report"]["sessions"] is not None
+
+
 def test_assessment_performs_no_action(stack: LiveStack):
-    before = stack.call("context_report")
+    before = stack.call("context_report", detail="full")
     out = stack.call("context_assess")
-    after = stack.call("context_report")
+    after = stack.call("context_report", detail="full")
     assert "performs no action" in out["note"]
     assert after["sessions"] and len(after["sessions"]) == len(before["sessions"])
 

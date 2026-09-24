@@ -1738,6 +1738,44 @@ boundaries the Harness writes legitimately.
 `test_a_refused_attempt_is_recorded_and_a_harness_boundary_is_not`,
 `test_structure_is_what_the_transcript_cannot_show`
 
+**I125. A review that reports no change is only as true as the watermark it
+was built from.** Id is woken by conclusions, messages, work it owns and the
+operator. Nothing wakes it for a failure, for resource pressure, or for a
+contradiction nobody announced, so the heartbeat is the only sense for
+unannounced state -- which is why it exists, why it cannot simply be made
+rarer, and why making it cheap is delicate. Measured live, one review cost
+2315 tokens: five tool calls, 1793 tokens of results, all re-reading state
+that had not moved, carried until the next rebuild discarded them. The cause
+was a trigger that said "nothing has woken you, check the organism's internal
+state" and carried no information, so Id paid five calls to find a row of
+zeros.
+
+The review now arrives knowing what changed. The digest is built from an
+event watermark -- every event since the previous review, counted by kind --
+and that completeness is load-bearing: a digest that reports only what its
+author remembered to include would blind a mind in precisely the way it
+cannot detect. A tail too long to itemise is reported as a count, never
+dropped; no watermark is a *first review*, not a quiet organism; and standing
+obligations are reported even when nothing happened, so an organism where
+nothing moved but something is owed is not called quiet.
+
+It measures and never interprets: "two conclusions recorded, one unaudited"
+is a fact, and "nothing worth your attention" would be the Harness doing Id's
+job. Id keeps every sense it had and is told to check anything it doubts. A
+review with nothing to report carries an output ceiling
+(`heartbeat_quiet_ceiling_tokens`), and only when every trigger in the bundle
+agrees to it, so a real question sharing the turn is never shortened.
+→ `test_every_kind_since_the_watermark_is_counted`,
+`test_what_is_not_itemised_is_still_counted`,
+`test_a_first_review_does_not_claim_a_quiet_organism`,
+`test_what_is_owed_is_reported_even_when_nothing_happened`,
+`test_the_watermark_is_read_from_the_previous_review`,
+`test_the_digest_measures_and_does_not_interpret`,
+`test_a_quiet_review_carries_a_ceiling_and_a_busy_one_does_not`,
+`test_a_claimed_turn_carries_the_ceiling_its_inputs_agreed`,
+`test_a_live_quiet_review_is_cheap`,
+`test_context_telemetry_is_compact_for_a_role_by_default`
+
 **I73. A role is never wedged by a turn it did not close.** One open turn per
 role is a database constraint, so a turn left running blocks every future turn
 for that role — the role heartbeats, reports healthy, and never thinks again

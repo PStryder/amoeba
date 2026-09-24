@@ -185,6 +185,10 @@ class SchedulerConfig:
     # paying full price for discovering that nothing happened.
     id_heartbeat_max_seconds: float = 1800.0
     id_heartbeat_backoff: float = 2.0
+    # What a review with nothing to report may spend on saying so. Measured:
+    # 307 tokens of "No maintained beliefs, conclusions, or memories are
+    # recorded" every half hour, carried until the next rebuild.
+    heartbeat_quiet_ceiling_tokens: int = 128
 
     # Id gets one turn at startup so it forms an initial view of the organism
     # it woke up in. Ego does not: a persistent identity that talks to itself

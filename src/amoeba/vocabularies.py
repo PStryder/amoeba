@@ -15,6 +15,7 @@ from __future__ import annotations
 
 from .ego_api import MESSAGE_KINDS, REVIEW_SUBJECTS
 from .homeostasis import RECONSTITUTION_MODES
+from .harness_api import CONTEXT_DETAILS
 from .id_api import FINDING_KINDS, SEVERITIES, TARGET_ROLES
 from .prompt_api import INCARNATION_DETAILS, VERDICTS as PROMPT_VERDICTS
 from .promptlib.model import PROMPT_MODES
@@ -44,6 +45,10 @@ ARGUMENT_VOCABULARIES: dict[tuple[str, str], tuple[tuple[str, ...], str, str]] =
                                             "PROMPT_MODES"),
     ("prompt_incarnations", "detail"): (INCARNATION_DETAILS, "prompt_api.py",
                                         "INCARNATION_DETAILS"),
+    ("context_report", "detail"): (CONTEXT_DETAILS, "harness_api.py",
+                                   "CONTEXT_DETAILS"),
+    ("context_assess", "detail"): (CONTEXT_DETAILS, "harness_api.py",
+                                   "CONTEXT_DETAILS"),
 }
 
 

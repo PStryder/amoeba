@@ -1781,6 +1781,26 @@ MUTATIONS: list[Mutation] = [
                "    for attempt in []:  # MUTANT: no provenance")],
     ),
     Mutation(
+        "I125", "A review that reports no change is only as true as its watermark",
+        "src/amoeba/heartbeat.py",
+        '            "SELECT kind, COUNT(*) AS n FROM events WHERE seq > ?"\n            " GROUP BY kind ORDER BY n DESC", (int(since),))}',
+        '            "SELECT kind, COUNT(*) AS n FROM events WHERE seq > ?"\n            "   AND kind LIKE \'role.%\'"  # MUTANT: only what we thought mattered\n            " GROUP BY kind ORDER BY n DESC", (int(since),))}',
+        ["test_every_kind_since_the_watermark_is_counted",
+         "test_what_is_not_itemised_is_still_counted",
+         "test_a_live_quiet_review_is_cheap"],
+        layer="heartbeat.measure / the heartbeat trigger (what a review is told changed)",
+        note="The primary mutant reports only the kinds somebody chose, which is how a cheap review blinds the one mind that watches for what nobody announced. Separately verified to die for a dropped tail, for a first review claiming quiet, for owed work not counting, for a watermark that restarts with the process, for a ceiling that binds a bundled question, and for a trigger that carries no digest at all.",
+        also=[("src/amoeba/heartbeat.py",
+               '        "other_events": total - sum(shown.values()),',
+               '        "other_events": 0,  # MUTANT: the tail vanishes'),
+              ("src/amoeba/heartbeat.py",
+               '        "first_review": since is None,',
+               '        "first_review": False,  # MUTANT: unknown reads as zero'),
+              ("src/amoeba/mailbox.py",
+               "        if not isinstance(value, int) or value <= 0:\n            return None",
+               "        if not isinstance(value, int) or value <= 0:\n            continue  # MUTANT: one ceiling binds the bundle")],
+    ),
+    Mutation(
         "I111", "A generation is admitted only if its whole allowance fits",
         "src/amoeba/arbiter.py",
         "        if prompt_tokens + capped > ceiling:",
@@ -1832,6 +1852,12 @@ def main() -> int:
             # them afterwards, including on failure.
             elsewhere: dict[str, tuple[str, str]] = {}
             for entry in m.also:
+                if len(entry) == 3 and entry[0] == m.path:
+                    # Naming the primary's own file would read it back from
+                    # disk unmutated and write it again afterwards, quietly
+                    # undoing the primary mutation and reporting the
+                    # invariant WEAK for a reason that was never tested.
+                    entry = entry[1:]
                 if len(entry) == 3:
                     rel, old, new = entry
                     other = ROOT / rel

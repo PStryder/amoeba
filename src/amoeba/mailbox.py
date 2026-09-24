@@ -234,6 +234,36 @@ def open_turn(conn, role: str) -> dict[str, Any] | None:
 # ---------------------------------------------------------------------------
 # bundling
 # ---------------------------------------------------------------------------
+def trigger_payload(trigger: dict[str, Any], blobs: Any = None) -> dict[str, Any]:
+    """The trigger's stored payload, or an empty one when there is none."""
+    digest = trigger.get("payload_sha256")
+    if not digest or blobs is None:
+        return {}
+    try:
+        payload = blobs.get_json(digest)
+    except Exception:  # noqa: BLE001 - unreadable content is not fatal here
+        return {}
+    return payload if isinstance(payload, dict) else {}
+
+
+def output_ceiling_for(triggers: Sequence[dict[str, Any]], blobs: Any = None
+                       ) -> int | None:
+    """The smallest ceiling every trigger in this bundle agrees to.
+
+    All of them, or none: a quiet heartbeat bundled with a real question must
+    not shorten the answer to the question. In practice a heartbeat is only
+    ever enqueued when nothing else is waiting, so this is a guard rather
+    than a common case.
+    """
+    ceilings = []
+    for t in triggers:
+        value = trigger_payload(t, blobs).get("output_ceiling")
+        if not isinstance(value, int) or value <= 0:
+            return None
+        ceilings.append(value)
+    return min(ceilings) if ceilings else None
+
+
 def trigger_body(trigger: dict[str, Any], blobs: Any = None) -> str:
     """What this trigger actually says, not the preview of it.
 
@@ -414,8 +444,10 @@ def claim(m: Mutation, mind: "Mind", *, role: str, incarnation: int | None,
                 "summary": t["summary"], "payload_sha256": t["payload_sha256"],
                 "operation_id": t["operation_id"],
                 "created_at": t["created_at"]} for t in admitted]
+    ceiling = output_ceiling_for(admitted, mind.blobs)
     body = {"bundle_id": bundle_id, "role": role, "triggers": members,
-            "left_behind": left_behind, "text": text}
+            "left_behind": left_behind, "text": text,
+            "output_ceiling": ceiling}
     bundle_blob = m.put_json(body, schema="amoeba.trigger_bundle/1")
     bundle_sha = sha256_hex(_canon(body))
 
@@ -476,7 +508,10 @@ def claim(m: Mutation, mind: "Mind", *, role: str, incarnation: int | None,
             "answering": answering, "owes_answer": bool(answering),
             "bundle_sha256": bundle_sha, "bundle_blob": bundle_blob,
             "parent_turn": parent, "operation_id": operation,
-            "lineage": turn_lineage, "resume": resume}
+            "lineage": turn_lineage, "resume": resume,
+            # A ceiling this turn's inputs carry, when every one of them
+            # agrees to it. Narrows the role's own ceiling; never widens it.
+            "output_ceiling": ceiling}
 
 
 # ---------------------------------------------------------------------------

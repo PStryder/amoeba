@@ -813,6 +813,10 @@ class RoleProcess:
             out = self._turn(
                 turn["text"], trigger=f"turn {turn_id}",
                 environment=environment, resume=turn.get("resume"),
+                # A ceiling the Harness attached to this turn's inputs -- a
+                # quiet review needs no room for an essay. It narrows the
+                # profile's ceiling and never widens it.
+                max_tokens=turn.get("output_ceiling"),
                 deadline=time.time() + self.cfg.scheduler.turn_wall_seconds)
             stop_reason = self._stop_reason_for(out)
             tool_calls = out.get("tool_call_count", 0)

@@ -23,6 +23,7 @@ from typing import Any, Sequence
 
 from .arbiter import Arbiter, ResourceSnapshot
 from .config import Config, load_config
+from . import heartbeat
 from .filespace import Filespace
 from .errors import (
     BackendUnavailable, InvalidInput, MindError, NotFound, ResourceExhausted,
@@ -614,17 +615,33 @@ class Supervisor:
                 return
 
             overdue = self._heartbeat_deferred_since.pop(role, None)
+            deferred = round(now - overdue, 1) if overdue else 0.0
+            # What actually changed, measured from an event watermark, so the
+            # review does not begin by spending five tool calls to discover a
+            # row of zeros. Measurement only: what it means is Id's to say.
+            digest = heartbeat.measure(
+                self.mind.db.conn, role,
+                since=heartbeat.watermark_of(self.mind.db.conn, self.mind.blobs, role))
+            body = heartbeat.render(digest, interval_seconds=interval,
+                                    deferred_seconds=deferred)
+            payload = {"reason": "periodic_homeostatic_review",
+                       "interval_seconds": interval,
+                       # Said plainly, because a review that ran late under
+                       # strain is a different fact from one that ran on
+                       # time, and Id is the component that should know.
+                       "deferred_for_pressure_seconds": deferred,
+                       "message": body,
+                       "measured_to_seq": digest["seq"],
+                       "events_since": digest["events"]}
+            if heartbeat.quiet(digest):
+                # Nothing happened and nothing is owed. A ceiling, not an
+                # instruction: Id may still say whatever it likes, and if it
+                # needs more room the turn continues as any other does.
+                payload["output_ceiling"] = int(sched.heartbeat_quiet_ceiling_tokens)
             self.methods()["role_enqueue_trigger"](
                 role=role, kind="heartbeat", source="scheduler",
-                summary=("periodic homeostatic review: nothing has woken you, "
-                         "check the organism's internal state"),
-                payload={"reason": "periodic_homeostatic_review",
-                         "interval_seconds": interval,
-                         # Said plainly, because a review that ran late under
-                         # strain is a different fact from one that ran on
-                         # time, and Id is the component that should know.
-                         "deferred_for_pressure_seconds": (
-                             round(now - overdue, 1) if overdue else 0.0)},
+                summary="periodic homeostatic review",
+                payload=payload,
                 # About the organism, not about anybody's question.
                 ambient=True)
         except Exception:  # noqa: BLE001

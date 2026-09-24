@@ -69,7 +69,7 @@ def test_the_overview_shows_measured_context(stack):
     _converse(stack, "anything")
     time.sleep(2.5)                                    # past the pulse's cache
     overview = stack.call("operator_overview")
-    measured = stack.call("context_report")
+    measured = stack.call("context_report", detail="full")
     ego = overview["roles"]["ego"]
     held = {s["session_id"]: s for s in measured["sessions"]}[ego["session_id"]]
     assert isinstance(ego["context_tokens"], int) and ego["context_tokens"] > 0, ego

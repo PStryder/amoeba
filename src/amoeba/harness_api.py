@@ -43,6 +43,10 @@ MAX_PROMOTED_BYTES = 16 * 1024 * 1024
 # the sandbox, which is where it belongs.
 
 
+# How much of a context reading a caller wants.
+CONTEXT_DETAILS = ("summary", "full")
+
+
 def build(sup: "Supervisor") -> dict[str, Any]:  # noqa: C901
     mind = sup.mind
     assert mind is not None
@@ -1051,13 +1055,45 @@ def build(sup: "Supervisor") -> dict[str, Any]:  # noqa: C901
                 "tools": reg.schemas(role=role),
                 "prompt_block": reg.prompt_block(role=role)}
 
-    def context_report() -> dict[str, Any]:
-        """Measured context occupancy for the running roles."""
-        return sup.homeostasis.measure().to_dict()
+    def context_report(*, detail: str = "summary") -> dict[str, Any]:
+        """Measured context occupancy for the running roles.
 
-    def context_assess() -> dict[str, Any]:
+        The per-session rows are the bulk of it and are rarely the question:
+        live, this cost Id 457 tokens a heartbeat to learn its own occupancy.
+        `summary` answers that; `full` is the same reading it always was.
+        """
+        if detail not in CONTEXT_DETAILS:
+            raise InvalidInput("unknown detail", detail=detail,
+                               allowed=list(CONTEXT_DETAILS))
+        report = sup.homeostasis.measure().to_dict()
+        return report if detail == "full" else _context_summary(report)
+
+    def _context_summary(report: dict[str, Any]) -> dict[str, Any]:
+        """The pool, and what each persistent role is holding. Measured, not judged."""
+        roles = [{"role": s.get("role"), "tokens": s.get("budgeted_tokens",
+                                                         s.get("n_past")),
+                  "budget": s.get("budget_tokens"),
+                  "fraction": round((s.get("budgeted_tokens") or s.get("n_past") or 0)
+                                    / max(1, s.get("budget_tokens") or 1), 3)}
+                 for s in report.get("sessions") or []
+                 if s.get("role") in ("ego", "id")]
+        others = len(report.get("sessions") or []) - len(roles)
+        return {k: report[k] for k in ("pool_tokens_used", "pool_capacity",
+                                       "occupancy", "pressure", "measured_at",
+                                       "backend_available") if k in report} | {
+            "roles": roles, "other_sessions": others, "detail": "summary",
+            "sessions_omitted": "pass detail=full for every session and its basis"}
+
+    def context_assess(*, detail: str = "summary") -> dict[str, Any]:
         """Whether a role's context is healthy enough to keep reasoning in."""
-        return sup.homeostasis.assess()
+        if detail not in CONTEXT_DETAILS:
+            raise InvalidInput("unknown detail", detail=detail,
+                               allowed=list(CONTEXT_DETAILS))
+        out = sup.homeostasis.assess()
+        if detail == "full":
+            return out
+        return {**out, "report": _context_summary(out.get("report") or {}),
+                "detail": "summary"}
 
     def context_rejuvenate(*, role: str, reason: str, mode: str = "rebuild",
                            operation_id: str | None = None) -> dict[str, Any]:
