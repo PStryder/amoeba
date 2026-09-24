@@ -198,6 +198,175 @@ def test_the_investigation_branch_passes_what_it_was_given(mind):
     assert "attachments=attachments" in branch
 
 
+def test_two_requests_can_hold_the_same_attachment(mind):
+    """Exercising the live surface, two submissions naming one input lost it.
+
+    The input row carried a single interaction id and `io_submit` moved it, so
+    the second request took the file away from the first and neither turn
+    could resolve it. An input is admitted once and referred to since.
+    """
+    import base64
+
+    told: list[tuple[str, list[str]]] = []
+
+    def fake_converse(*, message, conversation_id=None, interaction_id=None,
+                      attachments=(), wait_seconds=None, **kw):
+        told.append((interaction_id, [a["input_id"] for a in attachments]))
+        return {"result": {"answer": "ok", "status": "completed"}}
+
+    verbs = _sup(mind, methods={"ego_converse": fake_converse}).methods()
+    admitted = verbs["io_attach_input"](
+        filename="notes.txt", client_id="client_a", media_type="text/plain",
+        content_base64=base64.b64encode(b"the reading was 4.2s").decode())
+    input_id = admitted["input_id"]
+
+    first = verbs["io_submit"](text="what does it say?", client_id="client_a",
+                               input_ids=[input_id])
+    second = verbs["io_submit"](text="and again?", client_id="client_a",
+                                input_ids=[input_id])
+
+    deadline = time.time() + 30
+    while time.time() < deadline and len(told) < 2:
+        time.sleep(0.05)
+
+    carried = dict(told)
+    assert carried.get(first["interaction_id"]) == [input_id], (
+        "the first request lost its attachment to the second")
+    assert carried.get(second["interaction_id"]) == [input_id]
+
+
+def test_an_attachment_is_referred_to_not_moved(mind):
+    """The record of where a file came from is history, and is not rewritten."""
+    import base64
+
+    def fake_converse(**kw):
+        return {"result": {"answer": "ok", "status": "completed"}}
+
+    verbs = _sup(mind, methods={"ego_converse": fake_converse}).methods()
+    admitted = verbs["io_attach_input"](
+        filename="notes.txt", client_id="client_a",
+        content_base64=base64.b64encode(b"x").decode())
+    verbs["io_submit"](text="q", client_id="client_a",
+                       input_ids=[admitted["input_id"]])
+    time.sleep(0.2)
+
+    row = mind.db.conn.execute(
+        "SELECT interaction_id FROM interaction_inputs WHERE input_id = ?",
+        (admitted["input_id"],)).fetchone()
+    assert row["interaction_id"] is None, (
+        "the input row was rewritten to point at the request that used it")
+
+
+# ---------------------------------------------------------------------------
+# What comes back, and what may go in
+# ---------------------------------------------------------------------------
+@pytest.mark.parametrize("kind, result", [
+    ("converse", {"answer": "the drift was 4.2 seconds", "status": "completed"}),
+    ("investigate", {"claim": "the drift is real", "status": "completed",
+                     "answer": {"nested": "shape"}}),
+])
+def test_an_answer_is_in_the_same_place_whatever_was_asked(mind, kind, result):
+    """An investigation's reply used to be somewhere a conversation's never was."""
+    interaction_id = _interaction(mind, kind=kind)
+    verbs = _sup(mind).methods()
+    payload = {"result": result, "operation_id": None}
+    digest = mind.blobs.put_json(payload)
+    mind.writer.apply(lambda m: (
+        m.register_blob(digest, 0, "application/json", "external_output"),
+        m.sql("UPDATE interactions SET status = 'complete', output_sha256 = ?"
+              " WHERE interaction_id = ?", (digest, interaction_id))),
+        actor="test", bump_version=False)
+
+    out = verbs["io_output"](interaction_id=interaction_id, client_id="client_a")
+    assert isinstance(out["answer"], str) and out["answer"].strip(), (
+        f"a {kind} left the client nothing to read at the top level")
+    assert out["output"]["result"] == result, "the recorded thought is unchanged"
+
+
+@pytest.mark.parametrize("bad", ["notes\x00.txt", "bell\x07.txt", "del\x7f.txt",
+                                 "line\nbreak.txt"])
+def test_a_filename_may_not_carry_control_characters(mind, bad):
+    """A NUL truncates the name wherever it is handed to C: the record and the
+    filesystem would then disagree about what arrived."""
+    import base64
+
+    verbs = _sup(mind).methods()
+    with pytest.raises(InvalidInput):
+        verbs["io_attach_input"](
+            filename=bad, client_id="client_a",
+            content_base64=base64.b64encode(b"x").decode())
+
+
+# ---------------------------------------------------------------------------
+# What a client is told it may call, and what it is told when it calls wrong
+# ---------------------------------------------------------------------------
+def test_every_advertised_verb_says_how_to_call_it(mind):
+    """`io_await` was advertised with no way to learn it takes a timeout."""
+    verbs = _sup(mind).methods()
+    caps = verbs["io_capabilities"](client_id="client_a")
+
+    assert set(caps["verbs"]) == set(caps["calls"]), (
+        "a verb is advertised that discovery cannot describe")
+    await_args = {p["name"]: p for p in caps["calls"]["io_await"]["takes"]}
+    assert "timeout_seconds" in await_args, "io_await's timeout is undiscoverable"
+    assert await_args["timeout_seconds"]["required"] is False
+    assert await_args["timeout_seconds"]["default"] == 30.0
+    assert await_args["interaction_id"]["required"] is True
+
+
+def test_discovery_does_not_ask_for_what_the_credential_decides(mind):
+    """`client_id` is bound from the key; naming it invites a call that fails."""
+    verbs = _sup(mind).methods()
+    caps = verbs["io_capabilities"](client_id="client_a")
+    for name, call in caps["calls"].items():
+        assert all(p["name"] != "client_id" for p in call["takes"]), name
+
+
+def test_a_described_call_is_one_the_check_accepts(mind):
+    """Discovery and dispatch read the same annotations, so they agree."""
+    from amoeba.argcheck import call_problem
+
+    verbs = _sup(mind).methods()
+    caps = verbs["io_capabilities"](client_id="client_a")
+    for name, call in caps["calls"].items():
+        required = {p["name"]: "x" for p in call["takes"] if p["required"]}
+        problem = call_problem(verbs[name], {**required, "client_id": "client_a"},
+                               method=name)
+        assert problem is None, f"{name}: {problem}"
+
+
+def test_a_call_that_cannot_be_made_names_the_verb_not_the_harness(mind):
+    """Live, omitting `text` was answered with `build.<locals>.io_submit()`."""
+    from amoeba.argcheck import call_problem
+
+    verbs = _sup(mind).methods()
+    problem = call_problem(verbs["io_submit"], {"client_id": "client_a"},
+                           method="io_submit")
+    assert problem and "text" in problem
+    assert "<locals>" not in problem and "build" not in problem
+
+
+def test_a_list_argument_given_as_a_string_is_refused_before_it_is_walked(mind):
+    """`input_ids="inp_1"` iterated characters and refused `no such input: "i"`."""
+    from amoeba.argcheck import call_problem
+
+    verbs = _sup(mind).methods()
+    problem = call_problem(verbs["io_submit"],
+                           {"text": "hello", "input_ids": "inp_1",
+                            "client_id": "client_a"}, method="io_submit")
+    assert problem and "input_ids" in problem
+
+
+def test_an_argument_the_verb_does_not_take_is_named(mind):
+    from amoeba.argcheck import call_problem
+
+    verbs = _sup(mind).methods()
+    problem = call_problem(verbs["io_status"],
+                           {"interaction_id": "ixn_1", "client_id": "c",
+                            "patience": 5}, method="io_status")
+    assert problem and "patience" in problem
+
+
 # ---------------------------------------------------------------------------
 # 3. What the door accepts, cognition receives
 # ---------------------------------------------------------------------------

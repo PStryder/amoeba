@@ -675,12 +675,18 @@ def build(sup: "Supervisor") -> dict[str, Any]:
         nobody, and the digest is how the bytes are reached by something that
         can actually use them.
         """
+        mine = _interaction_of_turn(turn_id)
         row = mind.db.conn.execute(
             "SELECT input_id, interaction_id, filename, sha256, bytes,"
             " media_type FROM interaction_inputs WHERE input_id = ?",
             (input_id,)).fetchone()
-        mine = _interaction_of_turn(turn_id)
-        if row is None or not mine or row["interaction_id"] != mine:
+        # Referred to by this request, or admitted against it. An input the
+        # client later used for a second question is still this one's.
+        linked = mine is not None and bool(mind.db.conn.execute(
+            "SELECT 1 FROM interaction_input_links"
+            " WHERE interaction_id = ? AND input_id = ?",
+            (mine, input_id)).fetchone())
+        if row is None or not mine or not (linked or row["interaction_id"] == mine):
             # Deliberately one answer for "no such input" and "not yours": the
             # difference is only useful to somebody probing for other clients'
             # identifiers.

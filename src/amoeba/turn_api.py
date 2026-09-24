@@ -363,7 +363,7 @@ def build(sup: "Supervisor") -> dict[str, Any]:  # noqa: C901
         """
         try:
             return len(sup.client("inference").call(
-                "tokenize", text=text, add_special=False, parse_special=True))
+                "tokenize", text=text, add_special=False, parse_special=False))
         except Exception:  # noqa: BLE001
             sup.log.debug("counting a tool result in characters", exc_info=True)
             return len(text)

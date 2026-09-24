@@ -119,9 +119,13 @@ class DeterministicBackend:
         for part in MARKER_RE.split(text):
             if not part:
                 continue
-            words.extend([part] if MARKER_RE.fullmatch(part) else part.split())
+            words.extend([part] if parse_special and MARKER_RE.fullmatch(part)
+                         else part.split())
         span = max(1, self.vocab_size - FIRST_TEXT_ID)
-        return [MARKER_IDS[w] if w in MARKER_IDS else
+        # With specials off, marker characters are characters: they get an
+        # ordinary text id like any other word, and no reserved marker id.
+        # A simulator that could not express that could not test I132.
+        return [MARKER_IDS[w] if parse_special and w in MARKER_IDS else
                 int(hashlib.sha256(w.encode()).hexdigest()[:6], 16) % span + FIRST_TEXT_ID
                 for w in words] or [FIRST_TEXT_ID]
 

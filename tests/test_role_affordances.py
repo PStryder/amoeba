@@ -271,10 +271,8 @@ class _Session:
         self.fed = []
 
     def call(self, method, **kw):
-        if method == "apply_chat_template":
-            return kw["messages"][0]["content"]
-        if method == "ingest_text":
-            self.fed.append(kw["text"])
+        if method == "ingest_messages":
+            self.fed.append(kw["messages"][0]["content"])
         return {}
 
 

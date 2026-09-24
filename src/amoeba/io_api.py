@@ -44,6 +44,7 @@ import threading
 import time
 from typing import TYPE_CHECKING, Any, Sequence
 
+from .argcheck import signature_of
 from .errors import (DeadlineExceeded, InvalidInput, NotFound,
                      ResourceExhausted)
 from .ids import new_id, sha256_hex
@@ -59,12 +60,33 @@ MAX_ATTACHMENT_BYTES = 8 * 1024 * 1024
 MAX_ATTACHMENTS = 8
 KINDS = ("converse", "investigate")
 
+# Bound from the credential at the adapter, discarded if a caller sends it.
+# Describing it as a parameter would be inviting a call that cannot be made.
+CREDENTIAL_BOUND = frozenset({"client_id"})
+
 # The entire external surface, named once. Discovery advertises exactly this;
 # anything absent from it is absent from the adapter, not merely undocumented.
 EXTERNAL_VERBS = (
     "io_capabilities", "io_submit", "io_status", "io_await", "io_output",
     "io_attach_input", "io_result", "io_list",
 )
+
+
+def answer_of(result: Any) -> str:
+    """What Amoeba said, whatever shape the thought had.
+
+    A conversation answers, an investigation claims, a plan plans. A client
+    should not have to know which kind of thinking produced its reply in
+    order to read it, so this is the one place that decides, and every
+    surface that reports an answer uses it.
+    """
+    if not isinstance(result, dict):
+        return ""
+    for key in ("answer", "claim", "plan"):
+        value = result.get(key)
+        if isinstance(value, str) and value.strip():
+            return value
+    return ""
 
 
 def _text(value: str, field: str, *, limit: int = MAX_INPUT_CHARS) -> str:
@@ -108,6 +130,15 @@ def build(sup: "Supervisor") -> dict[str, Any]:  # noqa: C901
             "protocol_version": PROTOCOL_VERSION,
             "surface": "external_io",
             "verbs": list(EXTERNAL_VERBS),
+            # Read from the handlers themselves, so a verb cannot be
+            # advertised with parameters it does not take. Live, `io_await`
+            # was named here with no way to discover that it waits on
+            # `timeout_seconds`, which made an advertised verb unusable
+            # without reading the source.
+            "calls": {name: {
+                "takes": signature_of(methods[name], skip=CREDENTIAL_BOUND),
+                "summary": (methods[name].__doc__ or "").strip().split("\n")[0]}
+                for name in EXTERNAL_VERBS if name in methods},
             "kinds": list(KINDS),
             "limits": {"max_input_chars": MAX_INPUT_CHARS,
                        "max_attachment_bytes": MAX_ATTACHMENT_BYTES,
@@ -121,6 +152,15 @@ def build(sup: "Supervisor") -> dict[str, Any]:  # noqa: C901
                      "the caller controlling anything"),
         }
 
+    # An input belongs to a request if that request referred to it, or if it
+    # was admitted against it. The second half is history: rows written before
+    # inputs could be shared carry their binding in the input row itself.
+    INPUTS_OF_INTERACTION = (
+        "SELECT input_id, filename, media_type, bytes, sha256, created_at"
+        " FROM interaction_inputs WHERE input_id IN ("
+        "  SELECT input_id FROM interaction_input_links WHERE interaction_id = ?"
+        " ) OR interaction_id = ? ORDER BY created_at")
+
     def io_attach_input(*, filename: str, content_base64: str,
                         client_id: str, media_type: str | None = None,
                         interaction_id: str | None = None) -> dict[str, Any]:
@@ -133,6 +173,13 @@ def build(sup: "Supervisor") -> dict[str, Any]:  # noqa: C901
         that happens later, if at all.
         """
         name = _text(filename, "filename", limit=255)
+        # A control character in a label is never meant: it is either a
+        # mistake or an attempt to make what is logged differ from what is
+        # stored. A NUL in particular truncates the name in anything that
+        # hands it to C, so the record and the filesystem would disagree.
+        if any(ch < " " or ch == "\x7f" for ch in name):
+            raise InvalidInput("attachment names are labels, not control codes",
+                               hint="send a printable filename")
         if "/" in name or "\\" in name or name.startswith("."):
             raise InvalidInput(
                 "attachment names are labels, not paths",
@@ -161,6 +208,12 @@ def build(sup: "Supervisor") -> dict[str, Any]:  # noqa: C901
                   " state_version) VALUES (?,?,?,?,?,?,?,?,?)",
                   (input_id, interaction_id, client_id, name, digest, len(data),
                    media_type, time.time(), m.prior_version + 1))
+            if interaction_id:
+                m.sql("INSERT OR IGNORE INTO interaction_input_links("
+                      "interaction_id, input_id, client_id, created_at,"
+                      " state_version) VALUES (?,?,?,?,?)",
+                      (interaction_id, input_id, client_id, time.time(),
+                       m.prior_version + 1))
             m.emit(EventKind.INTERACTION_INPUT_ATTACHED, {
                 "input_id": input_id, "interaction_id": interaction_id,
                 "client_id": client_id, "filename": name, "sha256": digest,
@@ -209,9 +262,13 @@ def build(sup: "Supervisor") -> dict[str, Any]:  # noqa: C901
                    digest, body_text[:500], "accepted", time.time(),
                    m.prior_version + 1))
             for input_id in input_ids:
-                m.sql("UPDATE interaction_inputs SET interaction_id = ?"
-                      " WHERE input_id = ? AND client_id = ?",
-                      (interaction_id, input_id, client_id))
+                # A reference, not a move. Two requests may name the same
+                # file, and the older one still has it afterwards.
+                m.sql("INSERT OR IGNORE INTO interaction_input_links("
+                      "interaction_id, input_id, client_id, created_at,"
+                      " state_version) VALUES (?,?,?,?,?)",
+                      (interaction_id, input_id, client_id, time.time(),
+                       m.prior_version + 1))
             m.emit(EventKind.INTERACTION_ACCEPTED, {
                 "interaction_id": interaction_id, "client_id": client_id,
                 "surface": surface, "kind": kind,
@@ -253,10 +310,8 @@ def build(sup: "Supervisor") -> dict[str, Any]:  # noqa: C901
                 {"input_id": r["input_id"], "filename": r["filename"],
                  "media_type": r["media_type"], "bytes": r["bytes"],
                  "sha256": r["sha256"]}
-                for r in mind.db.conn.execute(
-                    "SELECT input_id, filename, media_type, bytes, sha256"
-                    " FROM interaction_inputs WHERE interaction_id = ?"
-                    " ORDER BY created_at", (interaction_id,))]
+                for r in mind.db.conn.execute(INPUTS_OF_INTERACTION,
+                                              (interaction_id, interaction_id))]
             if kind == "investigate":
                 # The same request context a conversation carries. Without
                 # it an investigation could not resolve its own request's
@@ -270,10 +325,7 @@ def build(sup: "Supervisor") -> dict[str, Any]:  # noqa: C901
                     interaction_id=interaction_id, attachments=attachments,
                     wait_seconds=patience)
             result = out.get("result") if isinstance(out, dict) else None
-            answer = ""
-            if isinstance(result, dict):
-                answer = (result.get("answer") or result.get("claim")
-                          or result.get("plan") or "")
+            answer = answer_of(result)
             # "Complete" has to mean answered. Reporting an empty answer as a
             # completed interaction tells the client, permanently, that
             # nothing was the organism's reply.
@@ -321,10 +373,7 @@ def build(sup: "Supervisor") -> dict[str, Any]:  # noqa: C901
         Used by whoever gets there first: the thread waiting on the thought,
         or the reconciler reading the same answer off the record afterwards.
         """
-        answer = ""
-        if isinstance(result, dict):
-            answer = (result.get("answer") or result.get("claim")
-                      or result.get("plan") or "")
+        answer = answer_of(result)
         state = result.get("status") if isinstance(result, dict) else None
         final = "complete" if state == "completed" else "incomplete"
         payload = {"result": result, "operation_id": operation_id}
@@ -448,8 +497,13 @@ def build(sup: "Supervisor") -> dict[str, Any]:  # noqa: C901
             "SELECT result_id, artifact_id, sha256, filename, media_type, bytes"
             " FROM interaction_results WHERE interaction_id = ? AND client_id = ?",
             (interaction_id, client_id))]
+        # `output` is the thought as it was recorded, whatever shape it has.
+        # `answer` is where a client reads the reply, and it is in the same
+        # place for every kind: an investigation's `claim` used to be found
+        # somewhere a conversation's `answer` never was.
         return {"interaction_id": interaction_id, "status": row["status"],
                 "kind": row["kind"], "output": payload, "error": row["error"],
+                "answer": answer_of((payload or {}).get("result")) or None,
                 "results": results, "timed_out": False}
 
     def io_list(*, client_id: str, limit: int = 20) -> dict[str, Any]:
@@ -483,7 +537,7 @@ def build(sup: "Supervisor") -> dict[str, Any]:  # noqa: C901
                 "bytes": len(data), "sha256": digest,
                 "content_base64": base64.b64encode(data).decode("ascii")}
 
-    return {
+    methods = {
         "io_capabilities": io_capabilities,
         "io_attach_input": io_attach_input,
         "io_submit": io_submit,
@@ -493,6 +547,7 @@ def build(sup: "Supervisor") -> dict[str, Any]:  # noqa: C901
         "io_list": io_list,
         "io_result": io_result,
     }
+    return methods
 
 
 def surface_result(sup: "Supervisor", *, interaction_id: str, sha256: str,

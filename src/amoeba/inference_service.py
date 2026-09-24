@@ -23,6 +23,7 @@ import time
 from pathlib import Path
 from typing import Any, Sequence
 
+from . import framing
 from .arbiter import Arbiter
 from .config import Config, load_config
 from .errors import BackendUnavailable, CapabilityUnsupported, MindError
@@ -117,6 +118,10 @@ class InferenceService:
                 messages, add_assistant=add_assistant),
             "ingest": self.ingest,
             "ingest_text": self.ingest_text,
+            "ingest_messages": self.ingest_messages,
+            "tokenize_segments": lambda segments: self.tokenize_segments(
+                segments=segments),
+            "render_tokens": self.render_tokens,
             "generate": self.generate,
             "chat": self.chat,
             "generate_batched": self.generate_batched,
@@ -261,6 +266,51 @@ class InferenceService:
                     parse_special: bool = True) -> dict[str, Any]:
         toks = self.backend.tokenize(text, add_special=False, parse_special=parse_special)
         n = self.backend.ingest(session_id, toks)
+        return {"session_id": session_id, "n_past": n, "tokens_added": len(toks)}
+
+    # ------------------------------------------------------------------
+    # Framed ingestion: how a message reaches a session
+    # ------------------------------------------------------------------
+    # Rendering a template and tokenizing the whole result with specials
+    # parsed cannot tell the Harness's markers from a client's. Everything
+    # that puts a message into a session goes through here instead, so
+    # structure comes from the template and content stays content. See
+    # `framing`, and I132.
+    def render_segments(self, messages: Sequence[dict[str, str]], *,
+                        add_assistant: bool = True) -> list[framing.Segment]:
+        contents = [str(m.get("content", "")) for m in messages]
+        marks = framing.marks(len(messages), framing.nonce_for(contents))
+        rendered = self.backend.apply_chat_template(
+            framing.framed(messages, marks), add_assistant=add_assistant)
+        return framing.segments(rendered, marks, contents)
+
+    def tokenize_segments(self, *, segments: Sequence[Any]) -> list[int]:
+        """Tokenize each run under its own rule, and join the ids.
+
+        Joining ids rather than text is the point: no seam between a frame and
+        the content beside it is ever handed to the tokenizer as one string.
+        """
+        rows = [s if isinstance(s, dict)
+                else {"text": s.text, "special": s.special} for s in segments]
+        out: list[int] = []
+        for seg in framing.from_payload(rows):
+            if not seg.text:
+                continue
+            out.extend(self.backend.tokenize(seg.text, add_special=False,
+                                             parse_special=seg.special))
+        return out
+
+    def render_tokens(self, *, messages: Sequence[dict[str, str]],
+                      add_assistant: bool = True) -> list[int]:
+        return self.tokenize_segments(
+            segments=self.render_segments(messages, add_assistant=add_assistant))
+
+    def ingest_messages(self, *, session_id: str,
+                        messages: Sequence[dict[str, str]],
+                        add_assistant: bool = True,
+                        compute_logits: bool = True) -> dict[str, Any]:
+        toks = self.render_tokens(messages=messages, add_assistant=add_assistant)
+        n = self.backend.ingest(session_id, toks, compute_logits=compute_logits)
         return {"session_id": session_id, "n_past": n, "tokens_added": len(toks)}
 
     def generate(self, *, session_id: str, max_tokens: int = 256, temperature: float = 0.0,
@@ -409,8 +459,7 @@ class InferenceService:
         """Render a chat turn with the model's own template, ingest and generate."""
         if reset:
             self.backend.reset_session(session_id)
-        rendered = self.backend.apply_chat_template(messages, add_assistant=add_assistant)
-        toks = self.backend.tokenize(rendered, add_special=False, parse_special=True)
+        toks = self.render_tokens(messages=messages, add_assistant=add_assistant)
         self.backend.ingest(session_id, toks)
         out = self.generate(session_id=session_id, max_tokens=max_tokens,
                             temperature=temperature, seed=seed, stop_strings=stop_strings)

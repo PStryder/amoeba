@@ -143,3 +143,79 @@ def argument_problem(handler: Any, arguments: dict[str, Any],
                         break
             return f"argument {name!r} must be {_describe(text)}, got {got}"
     return None
+
+
+def _public(name: str) -> str:
+    """A verb's name as its caller knows it, never as Python spells it.
+
+    Handlers are closures, so Python calls them `build.<locals>.io_submit`.
+    Live, a client that omitted `text` was told exactly that: an internal
+    layout it cannot act on and has no business seeing.
+    """
+    return name.rsplit(".", 1)[-1].replace("<locals>", "").strip(".")
+
+
+def call_problem(handler: Any, arguments: dict[str, Any], *, method: str,
+                 skip: frozenset[str] = frozenset()) -> str | None:
+    """Why this call cannot be made at all, phrased in the caller's terms.
+
+    Checked before dispatch, so a mistake in a call is a refusal rather than a
+    TypeError from inside the handler -- and so the refusal names the verb the
+    caller used and the argument it got wrong.
+    """
+    try:
+        params = inspect.signature(handler).parameters
+    except (TypeError, ValueError):
+        return None
+    name = _public(method)
+    takes_extra = any(p.kind is inspect.Parameter.VAR_KEYWORD
+                      for p in params.values())
+    named = {n for n, p in params.items()
+             if p.kind in (inspect.Parameter.KEYWORD_ONLY,
+                           inspect.Parameter.POSITIONAL_OR_KEYWORD)}
+    if not takes_extra:
+        unknown = sorted(set(arguments) - named - set(skip))
+        if unknown:
+            return (f"{name} does not take {unknown[0]!r}; "
+                    f"it takes: {', '.join(sorted(named)) or 'no arguments'}")
+    missing = [n for n in params
+               if n not in arguments and n not in skip
+               and params[n].default is inspect.Parameter.empty
+               and params[n].kind in (inspect.Parameter.KEYWORD_ONLY,
+                                      inspect.Parameter.POSITIONAL_OR_KEYWORD)]
+    if missing:
+        return f"{name} needs {missing[0]!r}"
+    return argument_problem(handler, arguments, skip=frozenset(skip))
+
+
+def describe_annotation(annotation: Any) -> str:
+    """What a parameter takes, in the words a refusal would use.
+
+    The same reading of the same annotations that `argument_problem` judges
+    by, so discovery cannot describe a verb differently from the check that
+    will reject the call.
+    """
+    if annotation is inspect.Parameter.empty:
+        return "anything"
+    return _describe(str(annotation))
+
+
+def signature_of(handler: Any, *, skip: frozenset[str] = frozenset()
+                 ) -> list[dict[str, Any]]:
+    """A verb's parameters as a caller needs them: name, kind, whether required."""
+    try:
+        params = inspect.signature(handler).parameters
+    except (TypeError, ValueError):
+        return []
+    out = []
+    for name, p in params.items():
+        if name in skip or p.kind in (inspect.Parameter.VAR_KEYWORD,
+                                      inspect.Parameter.VAR_POSITIONAL):
+            continue
+        required = p.default is inspect.Parameter.empty
+        row = {"name": name, "takes": describe_annotation(p.annotation),
+               "required": required}
+        if not required and isinstance(p.default, (str, int, float, bool, type(None))):
+            row["default"] = p.default
+        out.append(row)
+    return out

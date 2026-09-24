@@ -770,9 +770,16 @@ $amoebaRequest
 ```
 
 Use a UTF-8 text file and replace the example path. Uploads are limited to
-8 MiB per attachment and eight attachment IDs per submission. Admission
-preserves bytes; it does not promise that an entire large document will fit
-into a model's reading budget.
+8 MiB per attachment and eight attachment IDs per submission, and the whole
+request body to 12 MiB — a larger body is refused with HTTP 413, which a client
+sending `Expect: 100-continue` is told before it uploads. A filename is a
+label, not a path: separators, leading dots and control characters are refused.
+Admission preserves bytes; it does not promise that an entire large document
+will fit into a model's reading budget.
+
+The same `input_id` may be named by more than one submission. Asking a second
+question about a file you already sent does not take it away from the first
+request, and both can still read it.
 
 Collect the result later:
 
@@ -783,8 +790,10 @@ $amoebaAnswer | ConvertTo-Json -Depth 20
 
 If its status is `accepted` or `running`, wait and repeat the output call.
 `complete` is a finished answer, `incomplete` is a partial answer, and `failed`
-carries an error. When `results` lists a file, fetch it using the returned
-result ID:
+carries an error. Read the reply from the top-level `answer` field, which is in
+the same place for every kind of request; `output` holds the thought as it was
+recorded, whose shape differs between a conversation and an investigation. When
+`results` lists a file, fetch it using the returned result ID:
 
 ```powershell
 $amoebaFile = Invoke-AmoebaExternal 'io_result' @{ result_id = 'YOUR_RESULT_ID' }
@@ -1015,6 +1024,10 @@ features:
 - **Poll for external completion.** The event stream publishes acceptance
   only, not the rest of the lifecycle; use `io_status`/`io_output` or their MCP
   counterparts.
+- **Ask the surface what it takes.** `io_capabilities` returns a `calls` entry
+  for every advertised verb, listing each parameter, whether it is required and
+  its default, read from the handlers themselves. It is the reliable way to
+  learn, for example, that `io_await` waits on `timeout_seconds`.
 - **Treat one instance as one cognitive trust domain.** Separate interaction
   IDs and client keys do not isolate everything a persistent model has already
   seen.

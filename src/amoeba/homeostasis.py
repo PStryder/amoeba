@@ -57,6 +57,7 @@ import time
 from dataclasses import dataclass, field
 from typing import Any, Callable, Sequence
 
+from . import framing
 from . import reconstitution as rc
 from .results import issue_result, issued_digest
 from .tools import DEFAULT_RESULT_BUDGET_TOKENS, project_result
@@ -427,11 +428,10 @@ class ContextHomeostasis:
         text = source(role) if callable(source) else None
         if not text:
             return None
-        rendered = inf.call("apply_chat_template",
-                            messages=[{"role": "system", "content": text}],
-                            add_assistant=False)
-        return list(inf.call("tokenize", text=rendered, add_special=False,
-                             parse_special=True))
+        return list(inf.call(
+            "render_tokens",
+            messages=[{"role": "system", "content": text}],
+            add_assistant=False))
 
     def _rebuild(self, role: str, session_id: str, tokens: Sequence[int],
                  inf: Any) -> dict[str, Any]:
@@ -467,8 +467,7 @@ class ContextHomeostasis:
                     continue
                 text, changed = rc.strip_environment(m.text)
                 if changed:
-                    new = list(inf.call("tokenize", text=text, add_special=False,
-                                        parse_special=True))
+                    new = self._retokenize(text, mk, inf)
                     environment_tokens += m.n - len(new)
                     environments_removed += 1
                     m.tokens, m.text, m.rewritten = new, text, True
@@ -502,7 +501,7 @@ class ContextHomeostasis:
                     if total <= target:
                         break
                     done = self._project_message(role, units[i].messages[j],
-                                                 budget=bound, inf=inf)
+                                                 budget=bound, inf=inf, mk=mk)
                     if done:
                         total -= done["saved"]
                         projected.append(done)
@@ -536,8 +535,24 @@ class ContextHomeostasis:
             },
         }
 
+    def _retokenize(self, text: str, mk: dict[str, Any], inf: Any) -> list[int]:
+        """A message's text back to tokens, with the frame the only structure.
+
+        A rebuild decodes tokens it already holds and tokenizes the text
+        again. If the body of a message contains the *characters* of a chat
+        marker -- which is exactly what a client's text now becomes -- reading
+        the whole message back with specials parsed would turn those
+        characters into a real boundary on the way in. So the header and the
+        terminator are tokenized as the template's, and everything between
+        them as what it is. See I132.
+        """
+        segs = framing.message_segments(
+            text, start_text=mk["start_text"], end_text=mk["end_text"])
+        return list(inf.call("tokenize_segments",
+                             segments=framing.as_payload(segs)))
+
     def _project_message(self, role: str, m: rc.Message, *, budget: int,
-                         inf: Any) -> dict[str, Any] | None:
+                         inf: Any, mk: dict[str, Any]) -> dict[str, Any] | None:
         """Re-render one tool-result message as a bounded projection.
 
         From the exact result, always: a message that already holds a
@@ -565,13 +580,14 @@ class ContextHomeostasis:
                                actor="supervisor")[:16]
 
         def count(text: str) -> int:
+            # A projection is content being measured, so it is measured the
+            # way it will be tokenized: as text, not as possible structure.
             return len(inf.call("tokenize", text=text, add_special=False,
-                                parse_special=True))
+                                parse_special=False))
 
         view = project_result(payload, budget_tokens=budget, count=count, ref=ref)
         text = before + view["text"] + after
-        tokens = list(inf.call("tokenize", text=text, add_special=False,
-                               parse_special=True))
+        tokens = self._retokenize(text, mk, inf)
         if len(tokens) >= m.n:
             return None
         saved = m.n - len(tokens)

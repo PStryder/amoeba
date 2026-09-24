@@ -53,6 +53,16 @@ if TYPE_CHECKING:
 
 PROTOCOL_VERSION = "1.0.0"
 MAX_BODY_BYTES = 12 * 1024 * 1024
+
+
+class BodyTooLarge(ValueError):
+    """A request body past the limit. Distinct, because "too large" and
+    "not JSON" are different things to be told, and the client that sent
+    twelve megabytes of valid JSON was told the second one."""
+
+    def __init__(self, length: int) -> None:
+        super().__init__("request body too large")
+        self.length = length
 JSONRPC = "2.0"
 
 # JSON-RPC 2.0 reserved codes, plus ours.
@@ -286,6 +296,27 @@ def _make_handler(api: ApiServer) -> type[BaseHTTPRequestHandler]:  # noqa: C901
             except Exception:  # noqa: BLE001
                 self.close_connection = True
 
+        def handle_expect_100(self) -> bool:  # noqa: N802
+            """Refuse an oversized body before the client sends it.
+
+            A body past the limit cannot be answered readably once it is in
+            flight: the refusal is written while the client is still writing,
+            and the client sees the connection abort rather than the reason.
+            A client that asks first is told first -- which is what
+            `Expect: 100-continue` is for.
+            """
+            try:
+                length = int(self.headers.get("Content-Length") or 0)
+            except ValueError:
+                length = 0
+            if length > MAX_BODY_BYTES:
+                self._body_consumed = True
+                self.close_connection = True
+                self._send(413, {"error": "request body too large",
+                                 "bytes": length, "limit": MAX_BODY_BYTES})
+                return False
+            return super().handle_expect_100()
+
         def _send(self, code: int, payload: Any, *, ctype: str = "application/json"
                   ) -> None:
             # Before the response, not after: the body has to leave the socket
@@ -309,7 +340,7 @@ def _make_handler(api: ApiServer) -> type[BaseHTTPRequestHandler]:  # noqa: C901
                 # thing this limit refuses to do.
                 self.close_connection = True
                 self._body_consumed = True
-                raise ValueError("request body too large")
+                raise BodyTooLarge(length)
             self._body_consumed = True
             return json.loads(self.rfile.read(length) or b"null")
 
@@ -385,6 +416,10 @@ def _make_handler(api: ApiServer) -> type[BaseHTTPRequestHandler]:  # noqa: C901
                                        http=401)
             try:
                 req = self._body()
+            except BodyTooLarge as big:
+                return self._rpc_error(INVALID_PARAMS, "request body too large",
+                                       http=413, bytes=big.length,
+                                       limit=MAX_BODY_BYTES)
             except Exception:  # noqa: BLE001
                 return self._rpc_error(PARSE_ERROR, "invalid JSON")
             if not isinstance(req, dict) or req.get("jsonrpc") != JSONRPC:
@@ -461,6 +496,10 @@ def _make_handler(api: ApiServer) -> type[BaseHTTPRequestHandler]:  # noqa: C901
                     "operator session required in X-Amoeba-Operator", http=401)
             try:
                 req = self._body()
+            except BodyTooLarge as big:
+                return self._rpc_error(INVALID_PARAMS, "request body too large",
+                                       http=413, bytes=big.length,
+                                       limit=MAX_BODY_BYTES)
             except Exception:  # noqa: BLE001
                 return self._rpc_error(PARSE_ERROR, "invalid JSON")
             req_id = req.get("id") if isinstance(req, dict) else None

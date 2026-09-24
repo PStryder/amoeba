@@ -128,6 +128,21 @@ class ChatInference:
             return tokenize(kw["text"], kw.get("parse_special", True))
         if method == "apply_chat_template":
             return render(kw["messages"], kw.get("add_assistant", False))
+        if method == "tokenize_segments":
+            out = []
+            for seg in kw["segments"]:
+                out.extend(tokenize(seg["text"], seg["special"]))
+            return out
+        if method == "render_tokens":
+            from amoeba import framing
+            contents = [str(m.get("content", "")) for m in kw["messages"]]
+            marks = framing.marks(len(contents), framing.nonce_for(contents))
+            rendered = render(framing.framed(kw["messages"], marks),
+                              kw.get("add_assistant", False))
+            out = []
+            for seg in framing.segments(rendered, marks, contents):
+                out.extend(tokenize(seg.text, seg.special))
+            return out
         if method == "capabilities":
             return {"model_generation": "gen_test", "kv_mode": "shared_prefix"}
         raise AssertionError(f"unexpected call {method}")

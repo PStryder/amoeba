@@ -493,6 +493,22 @@ CREATE TABLE IF NOT EXISTS interaction_inputs (
 CREATE INDEX IF NOT EXISTS ix_interaction_input
   ON interaction_inputs(interaction_id);
 
+-- Which requests refer to which admitted input. An input is admitted once and
+-- referred to, rather than moved: a client may ask a second question about a
+-- file it already sent, and the first request does not lose the file when it
+-- does. `interaction_inputs.interaction_id` remains the binding the input was
+-- admitted with, which is history and is not rewritten.
+CREATE TABLE IF NOT EXISTS interaction_input_links (
+  interaction_id TEXT NOT NULL,
+  input_id       TEXT NOT NULL,
+  client_id      TEXT NOT NULL,
+  created_at     REAL NOT NULL,
+  state_version  INTEGER NOT NULL,
+  PRIMARY KEY (interaction_id, input_id)
+);
+CREATE INDEX IF NOT EXISTS ix_input_link_input
+  ON interaction_input_links(input_id);
+
 -- Results deliberately surfaced outward. An artifact is readable by a client
 -- only if it appears here: knowing an artifact id is not authority to fetch it,
 -- and there is no route from an identifier to the blob store.

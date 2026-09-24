@@ -1228,6 +1228,33 @@ def test_an_attachment_reaches_the_turn_and_can_be_read(tmp_path: Path):
         stack.stop()
 
 
+def test_a_second_question_does_not_take_the_file_from_the_first(tmp_path: Path):
+    """One file, two questions -- and the first request keeps it.
+
+    Found by exercising the external surface: submitting twice with the same
+    input id left neither turn able to read it, because the input was moved
+    rather than referred to.
+    """
+    import base64
+
+    stack = start_stack(tmp_path)
+    try:
+        input_id, _first = _submit_with_attachment(
+            stack, client="alice", text="what does the reading say?",
+            filename="reading.txt", body="the drift was 4.2 seconds")
+        stack.call("io_submit", text="and what does it mean?",
+                   client_id="alice", input_ids=[input_id])
+
+        turn = _turn_answering(stack, "what does the reading say?")
+        assert turn, "the first request never reached a turn"
+        read = stack.call("ego_read_attachment", input_id=input_id,
+                          turn_id=turn["turn_id"])
+        assert "4.2 seconds" in read["text"], (
+            "the second question took the file from the first")
+    finally:
+        stack.stop()
+
+
 def test_ego_cannot_read_an_attachment_from_another_request(tmp_path: Path):
     """The isolation claim, over the dispatcher rather than over a table.
 

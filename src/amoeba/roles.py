@@ -311,13 +311,10 @@ class RoleProcess:
         The role's broader working context accumulates from here; it is not a
         curated shared-memory summary.
         """
-        rendered = self.inf.call(
-            "apply_chat_template",
+        self.inf.call(
+            "ingest_messages", session_id=self.session_id,
             messages=[{"role": "system", "content": self._system_text()}],
-            add_assistant=False,
-        )
-        self.inf.call("ingest_text", session_id=self.session_id, text=rendered,
-                      parse_special=True)
+            add_assistant=False)
 
     # ------------------------------------------------------------------
     # ------------------------------------------------------------------
@@ -469,13 +466,11 @@ class RoleProcess:
                 body = json.dumps(res.get("result"), default=str)
         else:
             body = f"refused: {res.get('reason')}"
-        rendered = self.inf.call(
-            "apply_chat_template",
+        self.inf.call(
+            "ingest_messages", session_id=self.session_id,
             messages=[{"role": "user",
                        "content": TOOL_RESULT_BLOCK.format(name=name, result=body)}],
             add_assistant=True)
-        self.inf.call("ingest_text", session_id=self.session_id, text=rendered,
-                      parse_special=True)
 
     def _turn(self, user_text: str, *, trigger: str = "", max_tokens: int | None = None,
               temperature: float | None = None, max_tool_turns: int | None = None,
@@ -655,13 +650,10 @@ class RoleProcess:
         if seed is None:
             seed = int(settings.get("seed", 1234))
         if not skip_input:
-            rendered = self.inf.call(
-                "apply_chat_template",
+            self.inf.call(
+                "ingest_messages", session_id=self.session_id,
                 messages=[{"role": "user", "content": user_text}],
-                add_assistant=True,
-            )
-            self.inf.call("ingest_text", session_id=self.session_id, text=rendered,
-                          parse_special=True)
+                add_assistant=True)
         out = self.inf.call("generate", session_id=self.session_id,
                             max_tokens=max_tokens, temperature=temperature,
                             seed=seed)

@@ -1920,6 +1920,53 @@ MUTATIONS: list[Mutation] = [
                "            pass  # MUTANT: the old organism is simply gone")],
     ),
     Mutation(
+        "I132", "Content may never introduce structural tokens into session state",
+        "src/amoeba/inference_service.py",
+        "            out.extend(self.backend.tokenize(seg.text, add_special=False,\n                                             parse_special=seg.special))",
+        "            out.extend(self.backend.tokenize(seg.text, add_special=False,\n                                             parse_special=True))  # MUTANT: the live injection",
+        ["test_a_clients_markers_never_become_control_tokens",
+         "test_a_tool_result_cannot_launder_structure",
+         "test_the_system_prompt_is_framed_too"],
+        layer="InferenceService framed ingestion / homeostasis rebuild (what content may become)",
+        note="The primary mutant is the live defect: a client sent <|im_start|> and got a real control token in Ego's session, 65 markers in the text and 65 in the tokens. Separately verified to die for content the planner labels as structure, for a rebuild that re-tokenizes a decoded message whole, for a template whose content mark went missing being tokenized anyway, and for a simulator that cannot express specials being off -- which would make every other test here vacuous.",
+        also=[("src/amoeba/framing.py",
+               "        out.append(Segment(content, False))",
+               "        out.append(Segment(content, True))  # MUTANT: content owns structure"),
+              ("src/amoeba/homeostasis.py",
+               '        segs = framing.message_segments(\n            text, start_text=mk["start_text"], end_text=mk["end_text"])\n        return list(inf.call("tokenize_segments",\n                             segments=framing.as_payload(segs)))',
+               '        return list(inf.call("tokenize", text=text, add_special=False,\n                             parse_special=True))  # MUTANT: re-forged on rebuild'),
+              ("src/amoeba/framing.py",
+               '        if not sep:\n            raise FramingError("the template did not render a content mark")',
+               "        if not sep:\n            pieces.append(rest)  # MUTANT: fall back to the whole string\n            continue"),
+              ("src/amoeba/backends/deterministic.py",
+               "            words.extend([part] if parse_special and MARKER_RE.fullmatch(part)\n                         else part.split())",
+               "            words.extend([part] if MARKER_RE.fullmatch(part)\n                         else part.split())  # MUTANT: the simulator cannot say no")],
+    ),
+    Mutation(
+        "I133", "An admitted input is referred to by requests, never moved between them",
+        "src/amoeba/io_api.py",
+        '''                m.sql("INSERT OR IGNORE INTO interaction_input_links("
+                      "interaction_id, input_id, client_id, created_at,"
+                      " state_version) VALUES (?,?,?,?,?)",
+                      (interaction_id, input_id, client_id, time.time(),
+                       m.prior_version + 1))''',
+        '''                m.sql("UPDATE interaction_inputs SET interaction_id = ?"
+                      " WHERE input_id = ? AND client_id = ?",
+                      (interaction_id, input_id, client_id))  # MUTANT: the theft''',
+        ["test_an_attachment_is_referred_to_not_moved",
+         "test_two_requests_can_hold_the_same_attachment"],
+        layer="io_submit binding / ego_read_attachment resolution (who a file belongs to)",
+        note="The primary mutant is the live defect: two submissions naming one input id left neither able to read it, because the input row carried a single interaction id and the second submission rewrote it. Separately verified to die for a resolution that consults only the input row, which is the same defect read from the other end.",
+        also=[("src/amoeba/io_api.py",
+               '''        "SELECT input_id, filename, media_type, bytes, sha256, created_at"
+        " FROM interaction_inputs WHERE input_id IN ("
+        "  SELECT input_id FROM interaction_input_links WHERE interaction_id = ?"
+        " ) OR interaction_id = ? ORDER BY created_at")''',
+               '''        "SELECT input_id, filename, media_type, bytes, sha256, created_at"
+        " FROM interaction_inputs WHERE interaction_id = ?"
+        " AND ? IS NOT NULL ORDER BY created_at")  # MUTANT: only the input row''')],
+    ),
+    Mutation(
         "I111", "A generation is admitted only if its whole allowance fits",
         "src/amoeba/arbiter.py",
         "        if prompt_tokens + capped > ceiling:",

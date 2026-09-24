@@ -15,6 +15,7 @@ local user's process from driving the mind.
 from __future__ import annotations
 
 import json
+import re
 import os
 import secrets
 import socket
@@ -24,9 +25,14 @@ import time
 from pathlib import Path
 from typing import Any, Callable
 
+from .argcheck import call_problem
 from .errors import MindError
 
 MAX_LINE = 32 * 1024 * 1024
+
+
+# "build.<locals>.io_submit() missing ..." -> "io_submit() missing ..."
+_INTERNAL_NAME = re.compile(r"\b[\w.]*<locals>\.")
 
 
 class RpcError(MindError):
@@ -100,14 +106,24 @@ class _Handler(socketserver.StreamRequestHandler):
                                   "message": f"unknown method {method!r}",
                                   "details": {"scope": getattr(self, "scope", None)}}})
             return
+        problem = call_problem(handler, params if isinstance(params, dict) else {},
+                               method=str(method))
+        if problem:
+            self._send({"id": req_id, "ok": False,
+                        "error": {"code": "invalid_input", "message": problem,
+                                  "details": {"method": method}}})
+            return
         try:
             result = handler(**params) if params else handler()
             self._send({"id": req_id, "ok": True, "result": result})
         except MindError as exc:
             self._send({"id": req_id, "ok": False, "error": exc.to_dict()})
         except TypeError as exc:
+            # A shape the check above could not read. The caller still gets
+            # the sentence, with the Harness's own layout taken out of it.
             self._send({"id": req_id, "ok": False,
-                        "error": {"code": "invalid_input", "message": str(exc),
+                        "error": {"code": "invalid_input",
+                                  "message": _INTERNAL_NAME.sub("", str(exc)),
                                   "details": {"method": method}}})
         except Exception as exc:  # noqa: BLE001
             self.server.on_error(method, exc)

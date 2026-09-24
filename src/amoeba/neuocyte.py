@@ -295,12 +295,9 @@ class Neuocyte:
         tools_block, tool_names = self._tools_block(item)
         prompt = self._profile_block() + WORKER_INSTRUCTION.format(
             objective=item["objective"], board=board_block, tools=tools_block)
-        rendered = self.inf.call(
-            "apply_chat_template",
-            messages=[{"role": "user", "content": prompt}], add_assistant=True,
-        )
-        self.inf.call("ingest_text", session_id=self.session_id, text=rendered,
-                      parse_special=True)
+        self.inf.call("ingest_messages", session_id=self.session_id,
+                      messages=[{"role": "user", "content": prompt}],
+                      add_assistant=True)
         out, tool_trace = self._generate_with_tools(
             item, budget=budget, deadline=deadline,
             max_turns=self.cfg.arbiter.max_tool_turns)
@@ -445,12 +442,10 @@ class Neuocyte:
         rendered = "\n".join(
             f"- ({m['kind']} from {m['from_role']}) {m['body']}"
             for m in messages)
-        text = self.inf.call(
-            "apply_chat_template",
+        self.inf.call(
+            "ingest_messages", session_id=self.session_id,
             messages=[{"role": "user", "content": MESSAGE_BLOCK.format(
                 messages=rendered)}], add_assistant=True)
-        self.inf.call("ingest_text", session_id=self.session_id, text=text,
-                      parse_special=True)
         self.log.info("%s collected %d work message(s)", self.neuocyte_id,
                       len(messages))
         return [{"message_id": m["message_id"], "from_role": m["from_role"],
@@ -474,13 +469,11 @@ class Neuocyte:
             body = f"the tool ran but failed: {res.get('error')}"
         else:
             body = f"refused: {res.get('reason')}"
-        rendered = self.inf.call(
-            "apply_chat_template",
+        self.inf.call(
+            "ingest_messages", session_id=self.session_id,
             messages=[{"role": "user",
                        "content": TOOL_RESULT_BLOCK.format(name=name, result=body)}],
             add_assistant=True)
-        self.inf.call("ingest_text", session_id=self.session_id, text=rendered,
-                      parse_special=True)
 
     def _tools_block(self, item: dict[str, Any]) -> tuple[str, list[str]]:
         """Describe the tools this work item actually permits.
@@ -612,12 +605,9 @@ class Neuocyte:
             objective=item["objective"],
             state=json.dumps(state, indent=2, default=str)[:2500],
         )
-        rendered = self.inf.call(
-            "apply_chat_template",
-            messages=[{"role": "user", "content": prompt}], add_assistant=True,
-        )
-        self.inf.call("ingest_text", session_id=self.session_id, text=rendered,
-                      parse_special=True)
+        self.inf.call("ingest_messages", session_id=self.session_id,
+                      messages=[{"role": "user", "content": prompt}],
+                      add_assistant=True)
         out, tool_trace = self._generate_with_tools(
             item, budget=budget, deadline=deadline,
             max_turns=self.cfg.arbiter.max_tool_turns)

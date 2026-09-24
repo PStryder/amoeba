@@ -230,6 +230,34 @@ def test_an_attachment_name_is_a_label_not_a_path(net, bad):
     assert "error" in res, f"{bad!r} was accepted as a filename"
 
 
+def test_a_body_past_the_limit_is_refused_readably(net):
+    """A refusal the client cannot read is not a refusal.
+
+    Live, a 12 MiB body got a socket abort with no readable error: the
+    response was written while the client was still uploading. A client that
+    asks first -- `Expect: 100-continue` -- is told before it sends.
+    """
+    import http.client
+
+    from amoeba.http_api import MAX_BODY_BYTES
+
+    host, port = net.base.split("//", 1)[1].split(":")
+    conn = http.client.HTTPConnection(host, int(port), timeout=30)
+    try:
+        conn.putrequest("POST", "/rpc")
+        conn.putheader("Content-Type", "application/json")
+        conn.putheader("Authorization", f"Bearer {net.api_key}")
+        conn.putheader("Content-Length", str(MAX_BODY_BYTES + 1))
+        conn.putheader("Expect", "100-continue")
+        conn.endheaders()
+        response = conn.getresponse()
+        assert response.status == 413, response.status
+        body = json.loads(response.read())
+        assert "too large" in json.dumps(body)
+    finally:
+        conn.close()
+
+
 def test_a_client_can_stream_its_own_progress(net):
     """SSE carries this client's interactions, not the event log."""
     import threading
