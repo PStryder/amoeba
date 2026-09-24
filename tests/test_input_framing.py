@@ -176,8 +176,8 @@ def test_a_rebuild_does_not_re_forge_markers_from_text(mind):
     """
     conv = Conversation("You are a test mind. " * 8)
     for i in range(6):
-        conv.turn(f"question {i} {LIVE}", pad=200,
-                  calls=[("history", [{"seq": j} for j in range(10)])])
+        conv.turn_holding_literal_markers(
+            f"question {i}", marker_text=LIVE, pad=200)
     inf = ChatInference(sessions=[{"session_id": "sess_a", "role": "ego",
                                    "n_past": len(conv.tokens), "prefix_len": 0,
                                    "snapshot_id": None}],
@@ -194,11 +194,21 @@ def test_a_rebuild_does_not_re_forge_markers_from_text(mind):
     out = h.rejuvenate(role="ego", reason="t", mode="rebuild")
     rebuilt = inf.tokens[out["new_session_id"]]
 
-    text = detokenize(rebuilt)
-    # Whatever survived says it, and no marker in a body became structure:
-    # every special token in the rebuilt stream opens or closes a message.
-    assert text.count(START) == len([t for t in rebuilt if t == 1])
-    assert text.count(END) == len([t for t in rebuilt if t == 2])
+    # Every structural token in the rebuilt stream opens or closes a message
+    # the Harness framed. Counting the decoded text instead would prove
+    # nothing: `detokenize` renders a control token *as* its marker string,
+    # so the characters and the tokens move together whatever happens.
+    opened = len([t for t in rebuilt if t == 1])
+    closed = len([t for t in rebuilt if t == 2])
+    assert opened == closed, "a frame was opened and never closed"
+
+    # The characters are still there -- they were never the problem.
+    body = detokenize(rebuilt)
+    assert LIVE in body, "the client's text did not survive the rebuild"
+    # ...and they did not become boundaries: a rebuilt message per frame, no
+    # more. Each kept message contributes exactly one opening token.
+    assert opened == body.count(START) - body.count(LIVE) * LIVE.count(START), (
+        "marker characters in a message body became structure on the way back in")
 
 
 def test_the_governed_prompt_is_rebuilt_through_the_frame(mind):

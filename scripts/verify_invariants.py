@@ -1224,9 +1224,11 @@ MUTATIONS: list[Mutation] = [
         "src/amoeba/io_api.py",
         '            settled = state in ("completed", "incomplete")',
         "            settled = True  # MUTANT: call it complete regardless",
-        ["test_an_unanswered_interaction_is_not_reported_complete",
+        ["test_a_wait_that_expires_leaves_the_request_recoverable",
+         "test_a_request_outlives_the_death_of_the_role_that_must_answer_it",
          "test_an_answered_interaction_carries_its_answer"],
         layer="io_api._run (when an interaction is called complete)",
+        note="Negated deterministically rather than by killing a role: the supervisor heals a dead Ego and the healed Ego answers, so that scenario can no longer produce an unanswered interaction. Calling an unsettled result complete publishes silence as the organism's reply, which the stubbed wait catches without racing the healer.",
     ),
     Mutation(
         "I80", "An answer belongs to the request that asked for it",
@@ -1899,7 +1901,8 @@ MUTATIONS: list[Mutation] = [
          "test_a_wait_that_expires_leaves_the_request_recoverable",
          "test_an_expired_request_is_settled_rather_than_left_waiting",
          "test_a_settled_answer_is_found_behind_a_queue_of_unsettled_ones",
-         "test_an_expired_wait_is_not_a_client_facing_state"],
+         "test_an_expired_wait_is_not_a_client_facing_state",
+         "test_a_thread_publishing_first_is_not_overwritten_by_the_reconciler"],
         layer="io_api.io_reconcile / role_enqueue_trigger (who publishes an answer, and what stays reachable)",
         note="The primary mutant is the reported defect: a restarted interaction whose thought completed and whose output stayed null. Separately verified to die for an association written outside the enqueue that a crash could lose, for a delivery timeout recorded as a failure (which puts the request beyond the reconciler while the thought is still running), for an expired request left waiting forever at the head of the queue, for a scan narrow enough that slow requests hide settled ones, and for a write that lands on an interaction somebody already finished.",
         also=[("src/amoeba/turn_api.py",
@@ -1967,7 +1970,10 @@ MUTATIONS: list[Mutation] = [
         "            out.extend(self.backend.tokenize(seg.text, add_special=False,\n                                             parse_special=True))  # MUTANT: the live injection",
         ["test_a_clients_markers_never_become_control_tokens",
          "test_a_tool_result_cannot_launder_structure",
-         "test_the_system_prompt_is_framed_too"],
+         "test_the_system_prompt_is_framed_too",
+         "test_a_rebuild_does_not_re_forge_markers_from_text",
+         "test_the_governed_prompt_is_rebuilt_through_the_frame",
+         "test_a_mark_the_template_dropped_is_refused"],
         layer="InferenceService framed ingestion / homeostasis rebuild (what content may become)",
         note="The primary mutant is the live defect: a client sent <|im_start|> and got a real control token in Ego's session, 65 markers in the text and 65 in the tokens. Separately verified to die for content the planner labels as structure, for a rebuild that re-tokenizes a decoded message whole, for a template whose content mark went missing being tokenized anyway, and for a simulator that cannot express specials being off -- which would make every other test here vacuous.",
         also=[("src/amoeba/framing.py",
@@ -1980,13 +1986,15 @@ MUTATIONS: list[Mutation] = [
                '        if not sep:\n            raise FramingError("the template did not render a content mark")',
                "        if not sep:\n            pieces.append(rest)  # MUTANT: fall back to the whole string\n            continue"),
               ("src/amoeba/backends/deterministic.py",
-               "            words.extend([part] if parse_special and MARKER_RE.fullmatch(part)\n                         else part.split())",
-               "            words.extend([part] if MARKER_RE.fullmatch(part)\n                         else part.split())  # MUTANT: the simulator cannot say no")],
+               "        return [MARKER_IDS[w] if parse_special and w in MARKER_IDS else",
+               "        return [MARKER_IDS[w] if w in MARKER_IDS else  # MUTANT: the simulator cannot say no")],
     ),
     Mutation(
         "I133", "An admitted input is referred to by requests, never moved between them",
         "src/amoeba/io_api.py",
-        '''                m.sql("INSERT OR IGNORE INTO interaction_input_links("
+        '''                # A reference, not a move. Two requests may name the same
+                # file, and the older one still has it afterwards.
+                m.sql("INSERT OR IGNORE INTO interaction_input_links("
                       "interaction_id, input_id, client_id, created_at,"
                       " state_version) VALUES (?,?,?,?,?)",
                       (interaction_id, input_id, client_id, time.time(),
@@ -2051,10 +2059,18 @@ def apply_trial(edits: dict[str, tuple[str, str]]) -> dict[str, str] | str:
     originals: dict[str, str] = {}
     for rel, (old, new) in edits.items():
         text = (ROOT / rel).read_text(encoding="utf-8")
-        if old not in text:
+        seen = text.count(old)
+        if seen != 1:
             for done, orig in originals.items():
                 (ROOT / done).write_text(orig, encoding="utf-8")
-            return f"anchor not found in {rel}"
+            if seen == 0:
+                return f"anchor not found in {rel}"
+            # `replace(old, new, 1)` would edit whichever came first, which is
+            # not necessarily the one the claim is about. I133's primary
+            # matched two byte-identical INSERTs and mutated `io_attach_input`
+            # while its tests were about `io_submit`: the guarantee was
+            # reported defended by a mutation that never touched it.
+            return (f"anchor matches {seen} places in {rel}; it must name one")
         originals[rel] = text
         (ROOT / rel).write_text(text.replace(old, new, 1), encoding="utf-8")
     return originals
@@ -2068,6 +2084,13 @@ def main() -> int:
     args = ap.parse_args()
     wanted = {x.strip() for x in args.only.split(",") if x.strip()}
     muts = [m for m in MUTATIONS if not wanted or m.invariant in wanted]
+    missing = wanted - {m.invariant for m in MUTATIONS}
+    if missing:
+        print(f"no such invariant: {', '.join(sorted(missing))}")
+        return 2
+    if not muts:
+        print("nothing to verify")
+        return 2
 
     backup = Path(tempfile.mkdtemp(prefix="inv_backup_"))
     touched = {m.path for m in muts}
@@ -2123,3 +2146,7 @@ def main() -> int:
     for m, label, _, why in skipped:
         print(f"  SKIP {m.invariant} [{label}]: {why}")
     return 1 if weak or skipped else 0
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())

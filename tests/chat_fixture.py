@@ -82,6 +82,34 @@ class Conversation:
         return t
 
 
+    def turn_holding_literal_markers(self, question: str, *, marker_text: str,
+                                     pad: int = 0) -> dict[str, Any]:
+        """A turn whose body holds marker CHARACTERS as ordinary tokens.
+
+        This is what the ingestion path produces for a client's text since
+        I132: the characters are in the session, the structure is not. A
+        rebuild decodes those tokens and tokenizes the text again, which is
+        the second chance for them to become real boundaries -- so a test of
+        that needs a session where they are not boundaries to begin with.
+        `turn()` cannot make one: it tokenizes everything with specials on.
+        """
+        start = len(self.tokens)
+        env = ENV_FULL if not self.declared else ENV_REF
+        self.declared = True
+        # Frame: the substrate's, parsed as structure.
+        self.tokens.extend(tokenize(f"{START}user\n", True))
+        # Body: content, including marker characters, as plain text.
+        self.tokens.extend(tokenize(
+            f"{env}<turn_input>\n{question} {marker_text}\n"
+            f"{'.' * pad}</turn_input>", False))
+        self.tokens.extend(tokenize(f"{END}\n{START}assistant\n", True))
+        self.tokens.extend(tokenize("An answer.", False))
+        self.tokens.extend(tokenize(f"{END}\n", True))
+        t = {"start": start, "end": len(self.tokens)}
+        self.turns.append(t)
+        return t
+
+
 class ChatInference:
     """Enough of the inference service for homeostasis, with real structure."""
 

@@ -842,9 +842,18 @@ authority strip is unchanged.
 turn boundary. An interaction whose wait elapsed used to be marked complete
 with an empty answer — telling the client, permanently, that nothing was the
 organism's reply. The worker is asynchronous by construction, so it waits for
-the answer across however many continuation turns the thought needs, and fails
-truthfully if it never arrives rather than reporting silence as a result.
-→ `test_an_unanswered_interaction_is_not_reported_complete`
+the answer across however many continuation turns the thought needs, and
+never reports silence as a result.
+
+It does not fail the request when its own patience runs out, either. That was
+the shape until 2026-09-24, and it cost exactly what I129 describes: a role
+killed mid-request is healed by the supervisor and the healed role answers,
+but the submitting thread had already recorded `failed`, which is terminal, so
+the answer arrived at a request that had been told there would not be one. The
+wait ending is a fact about the watcher (`interaction.wait_expired`), not about
+the request.
+→ `test_a_wait_that_expires_leaves_the_request_recoverable`,
+`test_a_request_outlives_the_death_of_the_role_that_must_answer_it`
 
 **I80. An answer belongs to the request that asked for it.** A turn is a unit
 of work, not a unit of accountability. Marking the *turn* answered let one

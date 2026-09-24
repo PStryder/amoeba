@@ -1102,18 +1102,24 @@ def test_id_can_actually_call_the_effectors_that_name_a_target(tmp_path: Path):
         stack.stop()
 
 
-def test_an_unanswered_interaction_is_not_reported_complete(tmp_path: Path):
-    """I79. "Complete" means answered.
+def test_a_request_outlives_the_death_of_the_role_that_must_answer_it(tmp_path: Path):
+    """A request is owed an answer for as long as the organism can give one.
 
-    An interaction whose answer never arrived used to be marked complete with
-    an empty one -- telling the client, permanently, that nothing was the
-    organism's reply.
+    This was written to prove that an interaction nobody answered is never
+    reported complete with an empty answer (I79), and it made that case by
+    killing Ego so no answer *could* arrive. It cannot make that case any
+    more: the supervisor heals a dead role and the healed Ego answers. What
+    used to happen next was the defect -- the submitting thread's patience
+    elapsed first, the interaction was recorded `failed`, and `failed` is
+    terminal, so the real answer arrived at a request that had already been
+    told there would not be one.
 
-    Ego is stopped before the input is submitted, so no answer *can* arrive.
-    That removes the timing race: an earlier version of this test shortened
-    the patience instead, and against a fast deterministic backend the answer
-    sometimes beat it anyway, which made the distinction unobservable and the
-    test pass for the wrong reason.
+    So what this now holds is the stronger thing: the request survives the
+    death of the role that owes it an answer, and gets the answer. I79's own
+    claim -- that `complete` is never reported without one -- is still
+    asserted here, and is negated deterministically by
+    `test_a_wait_that_expires_leaves_the_request_recoverable`, which does not
+    depend on winning a race against the healer.
     """
     stack = start_stack(tmp_path, scheduler={"turn_wall_seconds": 0.3,
                                              "max_continuations": 0,
@@ -1133,19 +1139,20 @@ def test_an_unanswered_interaction_is_not_reported_complete(tmp_path: Path):
                             client_id=client)
             return st if st["status"] in ("complete", "failed") else None
 
-        done = _wait_for(settled, timeout=60.0)
-        assert done, "the interaction never settled at all"
+        done = _wait_for(settled, timeout=120.0)
+        assert done, ("the request never settled: the role was never healed, "
+                      "or its answer never reached the interaction")
 
         out = stack.call("io_output", interaction_id=interaction,
                          client_id=client)
         result = (out.get("output") or {}).get("result") or {}
         answer = (result.get("answer") or result.get("claim") or "")
 
-        assert done["status"] == "failed", (
-            "an interaction nobody answered was reported "
-            f"{done['status']!r} with answer {answer!r}")
-        assert out.get("error"), "a failed interaction with no reason"
-        assert "queued" in out["error"] or "answer" in out["error"]
+        assert done["status"] == "complete", (
+            f"the request was reported {done['status']!r} although the "
+            f"organism recovered and could answer it: {out.get('error')!r}")
+        # I79, still: complete is never a word for silence.
+        assert answer.strip(), "reported complete with no answer in it"
     finally:
         stack.stop()
 
