@@ -183,7 +183,10 @@ class SchedulerConfig:
     # After a heartbeat turn that found nothing, wait longer before the next
     # one, up to this ceiling. A quiet organism should get quieter, not keep
     # paying full price for discovering that nothing happened.
-    id_heartbeat_max_seconds: float = 1800.0
+    # Raised once conditions could wake Id on their own (I128): the clock
+    # is no longer the detection latency for failures, pressure or a wedged
+    # peer, so a quiet organism may leave its inward mind alone for longer.
+    id_heartbeat_max_seconds: float = 3600.0
     id_heartbeat_backoff: float = 2.0
     # What a review with nothing to report may spend on saying so. Measured:
     # 307 tokens of "No maintained beliefs, conclusions, or memories are
@@ -193,6 +196,14 @@ class SchedulerConfig:
     # repairs it. Reachability is not health: a role answered probes for
     # thirty-seven hours while failing every turn.
     role_failure_threshold_turns: int = 3
+    # Conditions worth waking the inward mind for, besides the clock. Without
+    # these the heartbeat interval was the detection latency for everything
+    # nobody announces -- and the heartbeat is deferred under pressure, so the
+    # organism looked at itself least often when it was most strained.
+    condition_wakes: bool = True
+    failure_wake_threshold: int = 5
+    pressure_wake_level: str = "critical"
+    condition_wake_cooldown_seconds: float = 900.0
     role_repairs_per_hour: int = 2
 
     # Id gets one turn at startup so it forms an initial view of the organism

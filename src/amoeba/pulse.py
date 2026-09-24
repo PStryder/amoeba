@@ -150,6 +150,12 @@ class PulseCollector:
                 "thinking": streak["turns"] < int(
                     self.sup.cfg.scheduler.role_failure_threshold_turns)}
 
+    def failures_last(self, window: str = "last_5m") -> dict[str, int]:
+        """Failure counts in one window, for a caller deciding whether to act."""
+        self._drain_failures()
+        counts = self._failure_counts().get(window) or {}
+        return {k: v for k, v in counts.items() if isinstance(v, int)}
+
     def _failure_counts(self) -> dict[str, Any]:
         now = time.time()
         out: dict[str, Any] = {"window_seconds": FAILURE_WINDOW_SECONDS}

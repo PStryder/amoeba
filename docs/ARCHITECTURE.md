@@ -1869,6 +1869,44 @@ would turn a mind's mistake into the Harness's claim.
 `test_when_nothing_is_waiting_it_says_so_plainly`,
 `test_the_digest_names_the_conclusion_it_is_counting`
 
+**I128. The organism is not blind when it is strained.** Id was woken by
+conclusions, messages, work it owns, board posts on that work, and the
+operator. Nothing woke it for a failure, for resource pressure, or for the
+other role being wedged, so the heartbeat's interval was the detection
+latency for everything the inward mind exists to catch -- and the heartbeat
+is *deferred* while the pool is under pressure, so the organism looked at
+itself least often exactly when it was most strained.
+
+A few measured conditions now earn a turn of their own: a burst of failures
+in the last five minutes, pool pressure at or above a configured level, and
+the other role failing turns in a row (I126). Each wake carries the
+measurement and says nothing about what it means, because that is Id's to
+decide, and each says so: *what it means is yours to say*.
+
+Bounded so a bad hour costs a handful of turns rather than a wake storm: a
+cooldown per condition, and nothing is queued twice while the same condition
+still sits unread in the mailbox -- matched on the trigger's `source_ref`,
+not by looking for a marker inside prose. An absent pressure measurement
+wakes nobody, because unknown is not evidence. And a role is never woken
+about its own inability to think: it could not answer, and that case is the
+Harness's own alarm.
+
+These are event-driven, so the pressure gate never holds them back: that
+gate exists to stop a *discretionary* review adding load while the pool is
+tight, and pressure is the reason to wake rather than a reason to stay
+quiet. Because the clock is no longer the only sense, the idle review may
+now back off to an hour rather than half of one.
+→ `test_a_burst_of_failures_wakes_the_inward_mind`,
+`test_a_failure_or_two_does_not`,
+`test_pressure_wakes_it_at_the_configured_level`,
+`test_unknown_pressure_is_not_pressure`,
+`test_the_other_role_being_wedged_wakes_it`,
+`test_a_role_is_never_woken_about_its_own_wedging`,
+`test_a_wake_measures_and_does_not_interpret`,
+`test_the_wake_is_queued_once_and_then_held_by_the_cooldown`,
+`test_news_already_waiting_is_not_said_twice_even_once_the_cooldown_lapses`,
+`test_a_condition_wake_is_never_deferred_by_pressure`
+
 **I73. A role is never wedged by a turn it did not close.** One open turn per
 role is a database constraint, so a turn left running blocks every future turn
 for that role — the role heartbeats, reports healthy, and never thinks again

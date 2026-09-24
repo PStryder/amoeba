@@ -23,7 +23,7 @@ from typing import Any, Sequence
 
 from .arbiter import Arbiter, ResourceSnapshot
 from .config import Config, load_config
-from . import heartbeat, mailbox
+from . import conditions, heartbeat, mailbox
 from .filespace import Filespace
 from .errors import (
     BackendUnavailable, InvalidInput, MindError, NotFound, ResourceExhausted,
@@ -196,6 +196,9 @@ class Supervisor:
         # role that cannot think is reported once and restarted a bounded
         # number of times rather than in a loop.
         self._not_thinking: dict[str, float | None] = {}
+        # When each condition last woke a role, so a bad hour costs a handful
+        # of turns rather than a wake storm.
+        self._condition_woke: dict[tuple[str, str], float] = {}
         self._role_repairs: dict[str, list[float]] = {}
         # NB: guarded by the existing `_sched_lock` above, which is also held
         # across the whole scheduler tick. Sharing it keeps the ordering
@@ -1083,6 +1086,10 @@ class Supervisor:
             except Exception:  # noqa: BLE001
                 self.log.exception("thinking check failed")
             try:
+                self._wake_on_conditions()
+            except Exception:  # noqa: BLE001
+                self.log.exception("condition wake failed")
+            try:
                 self._schedule_heartbeats()
             except Exception:  # noqa: BLE001
                 self.log.exception("heartbeat scheduling failed")
@@ -1167,6 +1174,50 @@ class Supervisor:
             self._role_repairs[role] = repairs
             self._restart_child(role, (f"failed {streak['turns']} turns in a row "
                                        f"({streak['stop_reason']})"))
+
+    def _wake_on_conditions(self) -> None:
+        """Wake the inward mind for what nobody else will tell it.
+
+        Event-driven, so the pressure gate never holds it back: that gate
+        exists to stop a *discretionary* review adding load, and pressure is
+        the reason to wake, not a reason to stay quiet.
+        """
+        sched = self.cfg.scheduler
+        if not sched.condition_wakes or self.mind is None:
+            return
+        streaks = {r: mailbox.failing_streak(self.mind.db.conn, r)["turns"]
+                   for r in ("ego", "id")}
+        found = conditions.detect(
+            "id",
+            failures=self.pulse.failures_last("last_5m"),
+            pressure=self.homeostasis.last_pressure(),
+            streaks=streaks,
+            failure_threshold=int(sched.failure_wake_threshold),
+            pressure_level=str(sched.pressure_wake_level),
+            failure_turns=int(sched.role_failure_threshold_turns))
+        now = time.time()
+        cooldown = float(sched.condition_wake_cooldown_seconds)
+        for condition in found:
+            when = self._condition_woke.get(("id", condition.key))
+            if when is not None and now - when < cooldown:
+                continue
+            if mailbox.pending_of_kind(self.mind.db.conn, "id", "attention",
+                                       condition.key):
+                continue
+            self._condition_woke[("id", condition.key)] = now
+            self.log.info("waking id: %s", condition.text)
+            try:
+                self.methods()["role_enqueue_trigger"](
+                    role="id", kind="attention", source="harness",
+                    source_ref=condition.key,
+                    summary=condition.text[:200],
+                    payload={"condition": condition.key,
+                             "message": conditions.render(condition),
+                             "measured": condition.measured},
+                    ambient=True)
+            except Exception:  # noqa: BLE001
+                self.log.debug("could not wake id for %s", condition.key,
+                               exc_info=True)
 
     def _emit_not_thinking(self, role: str, streak: dict[str, Any], *,
                            repaired: bool) -> None:

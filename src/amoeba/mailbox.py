@@ -85,6 +85,7 @@ TRIGGER_KINDS = (
     "operator_message",    # the operator talking to this role
     "continuation",        # the Harness deciding a turn was not finished
     "heartbeat",           # Id's periodic homeostatic review
+    "attention",           # a measured condition worth a turn of its own
     "startup",             # the organism came up
     "conclusion_recorded", # Ego put a claim into the auditable record
 )
@@ -560,6 +561,23 @@ def failing_streak(conn, role: str, *, limit: int = 64) -> dict[str, Any]:
         last_reason = last_reason or (row["stop_reason"] or "")
     return {"role": role, "turns": streak, "since": first,
             "stop_reason": last_reason}
+
+
+def pending_of_kind(conn, role: str, kind: str, marker: str | None = None) -> bool:
+    """Is a trigger of this kind already waiting, optionally naming `marker`?
+
+    A condition still in the mailbox has already been said; saying it again
+    would spend a turn on news the role has not read yet. Matched on
+    `source_ref` -- what caused this trigger -- rather than by looking for the
+    marker inside prose, which matches whatever the wording happens to say.
+    """
+    sql = ("SELECT 1 FROM role_triggers WHERE target_role = ? AND kind = ?"
+           "   AND status IN ('queued', 'claimed')")
+    args: tuple[Any, ...] = (role, kind)
+    if marker is not None:
+        sql += " AND source_ref = ?"
+        args += (marker,)
+    return conn.execute(sql + " LIMIT 1", args).fetchone() is not None
 
 
 def active_turns(conn, role: str, *, depth: int = 32) -> set[str]:
