@@ -47,10 +47,8 @@ class FakeInference:
         self.generate_calls: list[dict] = []
 
     def call(self, method: str, **params):
-        if method == "apply_chat_template":
-            return params["messages"][0]["content"]
-        if method == "ingest_text":
-            self.ingested.append(params["text"])
+        if method == "ingest_messages":
+            self.ingested.append(params["messages"][0]["content"])
             return {"ok": True}
         if method == "generate":
             self.generate_calls.append(params)

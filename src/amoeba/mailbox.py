@@ -265,7 +265,8 @@ def output_ceiling_for(triggers: Sequence[dict[str, Any]], blobs: Any = None
     return min(ceilings) if ceilings else None
 
 
-def trigger_body(trigger: dict[str, Any], blobs: Any = None) -> str:
+def trigger_body(trigger: dict[str, Any], blobs: Any = None,
+                 issue: Any = None) -> str:
     """What this trigger actually says, not the preview of it.
 
     The summary is a bounded label for operator listings. The body is the
@@ -280,6 +281,7 @@ def trigger_body(trigger: dict[str, Any], blobs: Any = None) -> str:
     digest = trigger.get("payload_sha256")
     if not digest or blobs is None:
         return trigger.get("summary") or ""
+    issue = issue or (lambda _field, _text: None)
     try:
         payload = blobs.get_json(digest)
     except Exception:                      # unreadable content is reportable
@@ -291,9 +293,18 @@ def trigger_body(trigger: dict[str, Any], blobs: Any = None) -> str:
         value = payload.get(field)
         if isinstance(value, str) and value.strip():
             if len(value) > MAX_BODY_CHARS:
+                # A digest is not a handle. Naming the content store told a
+                # role where its instructions were without giving it any way
+                # to get there: `result_read` only honours a reference that
+                # was issued to it, and this one never was. So one is.
+                ref = issue(field, value)
+                rest = len(value) - MAX_BODY_CHARS
+                where = (f'read the rest with result_read(result_ref="{ref}", '
+                         f'path="{field}", offset={MAX_BODY_CHARS})'
+                         if ref else f"the whole request is stored as {digest[:12]}")
                 body = (value[:MAX_BODY_CHARS]
-                        + f"\n  [truncated at {MAX_BODY_CHARS} characters; "
-                          f"{len(value) - MAX_BODY_CHARS} more in {digest[:12]}]")
+                        + f"\n  [shown: the first {MAX_BODY_CHARS} of "
+                          f"{len(value)} characters; {rest} more -- {where}]")
             else:
                 body = value
             break
@@ -318,7 +329,8 @@ def trigger_body(trigger: dict[str, Any], blobs: Any = None) -> str:
 
 
 def render_bundle(triggers: Sequence[dict[str, Any]], *, role: str,
-                  left_behind: int = 0, blobs: Any = None) -> str:
+                  left_behind: int = 0, blobs: Any = None,
+                  issue: Any = None) -> str:
     """The bundle as the text a role actually reads.
 
     Causal type is preserved per trigger rather than flattened into anonymous
@@ -335,7 +347,7 @@ def render_bundle(triggers: Sequence[dict[str, Any]], *, role: str,
     for i, t in enumerate(triggers, start=1):
         ref = f" ref={t['source_ref']}" if t.get("source_ref") else ""
         lines.append(f"{i}. [{t['kind']}] from {t['source']}{ref}")
-        body = trigger_body(t, blobs)
+        body = trigger_body(t, blobs, issue)
         if body:
             lines.extend("   " + line for line in body.splitlines())
     lines.append("</turn_input>")
@@ -438,8 +450,23 @@ def claim(m: Mutation, mind: "Mind", *, role: str, incarnation: int | None,
 
     turn_id = new_id("turn")
     bundle_id = new_id("bnd")
+    def issue_body(field: str, value: str) -> str:
+        """Issue the whole text to this role, in this same commit.
+
+        Written on the mutation that is building the turn, so a role cannot
+        be shown a reference that a later failure leaves unbacked.
+        """
+        data = json.dumps({field: value}).encode("utf-8")
+        blob = mind.blobs.put(data)
+        m.register_blob(blob, len(data), "application/json", "tool_result_full")
+        m.conn.execute(
+            "INSERT OR IGNORE INTO issued_results(result_ref, issued_to,"
+            " sha256, tool, created_at) VALUES (?, ?, ?, ?, ?)",
+            (blob[:16], role, blob, "turn_input", time.time()))
+        return blob[:16]
+
     text = render_bundle(admitted, role=role, left_behind=left_behind,
-                         blobs=mind.blobs)
+                         blobs=mind.blobs, issue=issue_body)
     members = [{"trigger_id": t["trigger_id"], "kind": t["kind"],
                 "source": t["source"], "source_ref": t["source_ref"],
                 "summary": t["summary"], "payload_sha256": t["payload_sha256"],

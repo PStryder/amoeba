@@ -1,16 +1,31 @@
 """Does each invariant's test actually fail when the invariant is broken?
 
 A test that passes is weak evidence. A test that *fails when the guarantee is
-removed* is the real thing. This applies one targeted mutation per invariant --
-each a minimal edit that negates precisely that claim -- runs only the tests
-named for it, and requires them to fail.
+removed* is the real thing. This applies targeted mutations -- each a minimal
+edit that negates precisely one claim -- runs only the tests named for that
+invariant, and requires them to fail.
 
 A mutation that leaves its tests green is the finding: that test does not
 express the claim, whatever its name says.
 
+**One mutant per run.** An invariant declares a primary mutation and any
+number of `also` mutations, and each is applied *on its own*. This used to
+write all of them at once and run the tests a single time, which asks only
+whether removing everything together broke something -- a question one lethal
+mutant answers on behalf of every inert one beside it. Demonstrated on
+2026-09-24: an `also` entry that rewrote `SCAN_MULTIPLE = 20` as the same
+line with a comment after it was reported GOOD. So an invariant is reported
+defended only when *every* mutant it declares was individually lethal, which
+is what the `note` fields have always claimed.
+
+A trial is lethal if at least one named test fails under it. Mutants
+defending different halves of a claim therefore need not each break every
+test, only their own.
+
 Source is always restored, including on interrupt.
 
     .\\.venv\\Scripts\\python.exe scripts\\verify_invariants.py [--only I7,I8]
+                                                       [--primaries-only]
 """
 
 from __future__ import annotations
@@ -1180,7 +1195,7 @@ MUTATIONS: list[Mutation] = [
     Mutation(
         "I76", "A role reads the request, not a preview of it",
         "src/amoeba/mailbox.py",
-        '        body = trigger_body(t, blobs)',
+        '        body = trigger_body(t, blobs, issue)',
         '        body = t.get("summary") or ""  # MUTANT: preview only',
         ["test_a_turn_shows_the_request_not_a_preview",
          "test_an_oversized_body_says_that_it_was_truncated"],
@@ -1289,12 +1304,16 @@ MUTATIONS: list[Mutation] = [
         "    view = project_result(payload, budget_tokens=budget_tokens, count=count,\n                          ref=ref, retrieve=retrieve)\n",
         "    view = {\"text\": text[:budget_tokens], \"tokens\": budget_tokens, \"listing\": None, \"omitted\": []}  # MUTANT: cut in silence\n",
         ["test_an_oversized_result_is_projected_whole_and_says_what_it_left_out",
-         "test_the_neuocyte_feeds_back_the_bounded_text_it_was_given"],
+         "test_the_neuocyte_feeds_back_the_bounded_text_it_was_given",
+         "test_the_rest_of_a_long_request_can_actually_be_read"],
         layer="tools.deliver_tool_result (what a mind is shown of a result)",
         note="The mutant is the old behaviour: a character cut, with nothing said. Also defended on the cognitive path, which must render the bounded text rather than re-serializing the whole result.",
         also=[("src/amoeba/neuocyte.py",
                '            body = res.get("result_text")',
-               '            body = None  # MUTANT: ignore what the Harness bounded')],
+               '            body = None  # MUTANT: ignore what the Harness bounded'),
+              ("src/amoeba/mailbox.py",
+               "                ref = issue(field, value)",
+               "                ref = None  # MUTANT: name the store, issue nothing")],
     ),
     Mutation(
         "I87", "Evidence is never pruned; the working set is",
@@ -1322,7 +1341,7 @@ MUTATIONS: list[Mutation] = [
     Mutation(
         "I89", "Ego chooses what crosses the external boundary, never whose",
         "src/amoeba/supervisor_api.py",
-        '        if row is None or not mine or row["interaction_id"] != mine:',
+        '        if row is None or not mine or not (linked or row["interaction_id"] == mine):',
         "        if row is None:  # MUTANT: any client's attachment will do",
         ["test_ego_cannot_read_an_attachment_from_another_request"],
         layer="ego_read_attachment (scoping an input to the turn's interaction)",
@@ -1875,12 +1894,29 @@ MUTATIONS: list[Mutation] = [
         "            if False:  # MUTANT: output: null, forever",
         ["test_an_answer_reaches_a_client_whose_thread_is_gone",
          "test_delivering_twice_does_not_move_a_finished_interaction",
-         "test_the_interaction_records_which_trigger_answers_it"],
-        layer="io_api.io_reconcile / supervisor_api._note_trigger_for (who publishes an answer)",
-        note="The primary mutant is the reported defect: a restarted interaction whose thought completed and whose output stayed null. Separately verified to die for an association nobody records, and for a write that lands on an interaction somebody already finished.",
-        also=[("src/amoeba/supervisor_api.py",
-               "        if not interaction_id:\n            return\n        try:\n            mind.writer.apply(",
-               "        if True:  # MUTANT: the association lives in a local variable\n            return\n        try:\n            mind.writer.apply("),
+         "test_the_interaction_records_which_trigger_answers_it",
+         "test_a_trigger_and_the_interaction_it_answers_are_one_commit",
+         "test_a_wait_that_expires_leaves_the_request_recoverable",
+         "test_an_expired_request_is_settled_rather_than_left_waiting",
+         "test_a_settled_answer_is_found_behind_a_queue_of_unsettled_ones",
+         "test_an_expired_wait_is_not_a_client_facing_state"],
+        layer="io_api.io_reconcile / role_enqueue_trigger (who publishes an answer, and what stays reachable)",
+        note="The primary mutant is the reported defect: a restarted interaction whose thought completed and whose output stayed null. Separately verified to die for an association written outside the enqueue that a crash could lose, for a delivery timeout recorded as a failure (which puts the request beyond the reconciler while the thought is still running), for an expired request left waiting forever at the head of the queue, for a scan narrow enough that slow requests hide settled ones, and for a write that lands on an interaction somebody already finished.",
+        also=[("src/amoeba/turn_api.py",
+               "            if answers_interaction:",
+               "            if False:  # MUTANT: the association is written separately, or not at all"),
+              ("src/amoeba/io_api.py",
+               '                    "from the record when the thought settles", interaction_id)\n                _wait_expired(interaction_id, client_id, patience)\n                return',
+               '                    "from the record when the thought settles", interaction_id)\n                _wait_expired(interaction_id, client_id, patience)\n                raise RuntimeError(  # MUTANT: a delivery timeout is terminal\n                    "no answer yet")'),
+              ("src/amoeba/io_api.py",
+               "                _wait_expired(interaction_id, client_id, patience)",
+               "                pass  # MUTANT: the watcher gives up unrecorded"),
+              ("src/amoeba/io_api.py",
+               '            elif status == "expired":',
+               '            elif False:  # MUTANT: expired requests wait forever'),
+              ("src/amoeba/io_api.py",
+               "                (max(1, int(limit)) * SCAN_MULTIPLE,)):",
+               "                (max(1, int(limit)),)):  # MUTANT: the oldest hide the rest"),
               ("src/amoeba/io_api.py",
                '                  " WHERE interaction_id = ?"\n                  "   AND status IN (\'accepted\', \'running\')",',
                '                  " WHERE interaction_id = ?",  # MUTANT: publish again')],
@@ -1909,10 +1945,15 @@ MUTATIONS: list[Mutation] = [
         "    live = reset_mod.holder(cfg)\n    if False:  # MUTANT: reset under a live writer",
         ["test_a_running_organism_is_not_reset",
          "test_deleting_needs_to_be_meant",
-         "test_the_mind_is_archived_and_the_plumbing_is_kept"],
+         "test_the_mind_is_archived_and_the_plumbing_is_kept",
+         "test_a_supervisor_cannot_start_while_a_reset_runs",
+         "test_a_reset_refuses_while_a_supervisor_holds_the_directory"],
         layer="amoeba reset (what becomes of the organism that ran)",
         note="The primary mutant resets a live organism, deleting a database under its own writer. Separately verified to die for a delete that needs no confirming, for credentials taken with the mind, for a dry run with consequences, and for an archive that is never written.",
         also=[("src/amoeba/reset.py",
+               "    lock.acquire()                      # raises if a live supervisor owns it",
+               "    pass  # MUTANT: check for an owner, do not become one"),
+              ("src/amoeba/reset.py",
                "        if is_credential(entry.name) and not rotate_credentials:",
                "        if False:  # MUTANT: reissue everything, always"),
               ("src/amoeba/reset.py",
@@ -1987,9 +2028,43 @@ def run_tests(names: list[str]) -> tuple[bool, str]:
     return r.returncode == 0, (r.stdout or "")[-400:]
 
 
+def trials_for(m: "Mutation") -> list[tuple[str, dict[str, tuple[str, str]]]]:
+    """Every mutant this invariant declares, each on its own.
+
+    One trial per mutant rather than one trial per invariant. Applying them
+    together only ever asked whether removing *all* of them broke something,
+    which a single lethal mutant answers on behalf of every inert one beside
+    it -- and the notes claim each was separately verified.
+    """
+    out = [("primary", {m.path: (m.old, m.new)})]
+    for i, entry in enumerate(m.also, start=1):
+        if len(entry) == 3:
+            rel, old, new = entry
+        else:
+            rel, (old, new) = m.path, entry
+        out.append((f"also[{i}] {rel}", {rel: (old, new)}))
+    return out
+
+
+def apply_trial(edits: dict[str, tuple[str, str]]) -> dict[str, str] | str:
+    """Write one mutant. Returns the originals to restore, or why it could not."""
+    originals: dict[str, str] = {}
+    for rel, (old, new) in edits.items():
+        text = (ROOT / rel).read_text(encoding="utf-8")
+        if old not in text:
+            for done, orig in originals.items():
+                (ROOT / done).write_text(orig, encoding="utf-8")
+            return f"anchor not found in {rel}"
+        originals[rel] = text
+        (ROOT / rel).write_text(text.replace(old, new, 1), encoding="utf-8")
+    return originals
+
+
 def main() -> int:
     ap = argparse.ArgumentParser()
     ap.add_argument("--only", default="", help="comma-separated invariant ids")
+    ap.add_argument("--primaries-only", action="store_true",
+                    help="skip the secondary mutants (faster, and says less)")
     args = ap.parse_args()
     wanted = {x.strip() for x in args.only.split(",") if x.strip()}
     muts = [m for m in MUTATIONS if not wanted or m.invariant in wanted]
@@ -2001,87 +2076,50 @@ def main() -> int:
             if len(entry) == 3:
                 touched.add(entry[0])
     for rel in touched:
-        dest = backup / rel.replace("/", "__")
-        shutil.copy2(ROOT / rel, dest)
+        shutil.copy2(ROOT / rel, backup / rel.replace("/", "__"))
 
-    results = []
+    results = []          # (mutation, label, verdict, detail)
     try:
         for m in muts:
-            target = ROOT / m.path
-            original = target.read_text(encoding="utf-8")
-            if m.old not in original:
-                results.append((m, "SKIP", "mutation anchor not found"))
-                print(f"SKIP {m.invariant}: anchor not found in {m.path}")
-                continue
-            mutated = original.replace(m.old, m.new, 1)
-            # (path, old, new) entries edit another file; restore every one of
-            # them afterwards, including on failure.
-            elsewhere: dict[str, tuple[str, str]] = {}
-            for entry in m.also:
-                if len(entry) == 3 and entry[0] == m.path:
-                    # Naming the primary's own file would read it back from
-                    # disk unmutated and write it again afterwards, quietly
-                    # undoing the primary mutation and reporting the
-                    # invariant WEAK for a reason that was never tested.
-                    entry = entry[1:]
-                if len(entry) == 3:
-                    rel, old, new = entry
-                    other = ROOT / rel
-                    text = elsewhere.get(rel, (other.read_text(encoding="utf-8"),))[0] \
-                        if rel in elsewhere else other.read_text(encoding="utf-8")
-                    if old not in text:
-                        mutated = None
-                        results.append((m, "SKIP",
-                                        f"secondary anchor not found in {rel}"))
-                        print(f"SKIP {m.invariant}: secondary anchor not found "
-                              f"in {rel}")
-                        break
-                    elsewhere[rel] = (text, text.replace(old, new, 1))
+            trials = trials_for(m)
+            if args.primaries_only:
+                trials = trials[:1]
+            for label, edits in trials:
+                originals = apply_trial(edits)
+                if isinstance(originals, str):
+                    results.append((m, label, "SKIP", originals))
+                    print(f"SKIP {m.invariant:8s} {label}: {originals}")
+                    continue
+                try:
+                    survived, tail = run_tests(m.tests)
+                finally:
+                    for rel, orig in originals.items():
+                        (ROOT / rel).write_text(orig, encoding="utf-8")
+                if survived:
+                    results.append((m, label, "WEAK", tail))
+                    print(f"WEAK {m.invariant:8s} {label}: tests PASSED with the "
+                          f"guarantee removed -> {m.tests}")
                 else:
-                    old, new = entry
-                    if old not in mutated:
-                        results.append((m, "SKIP",
-                                        f"secondary anchor not found: {old[:40]}"))
-                        print(f"SKIP {m.invariant}: secondary anchor not found")
-                        mutated = None
-                        break
-                    mutated = mutated.replace(old, new, 1)
-            if mutated is None:
-                continue
-            target.write_text(mutated, encoding="utf-8")
-            for rel, (_orig, new_text) in elsewhere.items():
-                (ROOT / rel).write_text(new_text, encoding="utf-8")
-            try:
-                passed, tail = run_tests(m.tests)
-            finally:
-                target.write_text(original, encoding="utf-8")
-                for rel, (orig_text, _new) in elsewhere.items():
-                    (ROOT / rel).write_text(orig_text, encoding="utf-8")
-            if passed:
-                results.append((m, "WEAK", tail))
-                print(f"WEAK {m.invariant:8s} tests PASSED with the guarantee removed "
-                      f"-> {m.tests}")
-            else:
-                results.append((m, "GOOD", ""))
-                print(f"GOOD {m.invariant:8s} {m.claim}")
+                    results.append((m, label, "GOOD", ""))
+                    print(f"GOOD {m.invariant:8s} {label}")
     finally:
         for rel in touched:
             shutil.copy2(backup / rel.replace("/", "__"), ROOT / rel)
         shutil.rmtree(backup, ignore_errors=True)
         print("\nsource restored")
 
-    good = [r for r in results if r[1] == "GOOD"]
-    weak = [r for r in results if r[1] == "WEAK"]
-    skipped = [r for r in results if r[1] == "SKIP"]
+    weak = [r for r in results if r[2] == "WEAK"]
+    skipped = [r for r in results if r[2] == "SKIP"]
+    # An invariant is defended only if every mutant it declares was lethal.
+    bad = {r[0].invariant for r in results if r[2] != "GOOD"}
+    defended = {m.invariant for m in muts} - bad
+
     print(f"\n{'='*70}")
-    print(f"{len(good)} invariants defended, {len(weak)} WEAK, {len(skipped)} skipped")
-    for m, _, _ in weak:
-        print(f"  WEAK {m.invariant}: {m.claim}")
+    print(f"{len(results)} mutants run: {len(defended)} invariants fully defended, "
+          f"{len(weak)} WEAK mutant(s), {len(skipped)} skipped")
+    for m, label, _, tail in weak:
+        print(f"  WEAK {m.invariant} [{label}]: {m.claim}")
         print(f"       layer: {m.layer}")
-        if m.note:
-            print(f"       note: {m.note}")
-    return 1 if weak else 0
-
-
-if __name__ == "__main__":
-    raise SystemExit(main())
+    for m, label, _, why in skipped:
+        print(f"  SKIP {m.invariant} [{label}]: {why}")
+    return 1 if weak or skipped else 0

@@ -23,6 +23,7 @@ from __future__ import annotations
 
 import shutil
 import time
+from contextlib import contextmanager
 from pathlib import Path
 from typing import Any
 
@@ -36,18 +37,48 @@ def is_credential(name: str) -> bool:
     return name in CREDENTIALS or name.startswith(CREDENTIAL_PREFIXES)
 
 
+# The lock is how ownership is decided, so it is never something a reset
+# moves: a reset that archived the lock it was holding would be archiving
+# its own claim on the directory.
+LOCK_NAME = "supervisor.lock"
+
+
+def _lock(cfg: Any) -> Any:
+    from .supervisor import SingleInstanceLock
+
+    return SingleInstanceLock(Path(cfg.state_dir) / LOCK_NAME)
+
+
 def holder(cfg: Any) -> dict[str, Any] | None:
     """The live supervisor owning this state directory, if there is one.
 
     The supervisor's own lock and its own staleness rule, rather than a
-    second opinion that could disagree with it.
+    second opinion that could disagree with it. This answers "is it worth
+    starting?" and nothing more -- a check is not ownership, and `perform`
+    takes the lock rather than trusting this.
     """
-    from .supervisor import SingleInstanceLock
-
-    lock = SingleInstanceLock(Path(cfg.state_dir) / "supervisor.lock")
+    lock = _lock(cfg)
     if not lock.path.exists() or lock._is_stale():
         return None
     return lock._holder() or {"pid": None}
+
+
+@contextmanager
+def owned(cfg: Any) -> Any:
+    """Hold the state directory for the whole reset, or do nothing at all.
+
+    Checking for a supervisor and then moving the database is two steps with
+    a gap in it, and a supervisor that starts inside that gap has its
+    database archived out from under it. The lock a supervisor would have to
+    take is taken here instead, for the duration: whoever holds it owns the
+    directory, and the loser is refused rather than raced.
+    """
+    lock = _lock(cfg)
+    lock.acquire()                      # raises if a live supervisor owns it
+    try:
+        yield lock
+    finally:
+        lock.release()
 
 
 def plan(cfg: Any, *, rotate_credentials: bool = False) -> dict[str, Any]:
@@ -56,6 +87,8 @@ def plan(cfg: Any, *, rotate_credentials: bool = False) -> dict[str, Any]:
     archive = state.parent / f"{state.name}.reset-{time.strftime('%Y%m%d-%H%M%S')}"
     move, keep = [], []
     for entry in sorted(state.iterdir()) if state.exists() else []:
+        if entry.name == LOCK_NAME:
+            continue                    # ours for the duration; see `owned`
         if is_credential(entry.name) and not rotate_credentials:
             keep.append(entry)
         else:

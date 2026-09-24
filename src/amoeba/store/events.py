@@ -137,6 +137,10 @@ class EventKind:
     INTERACTION_COMPLETED = "interaction.completed"
     INTERACTION_FAILED = "interaction.failed"
     INTERACTION_INPUT_ATTACHED = "interaction.input_attached"
+    # The internal watcher gave up, not the request. Evidence about this
+    # organism's pace, for the operator; the interaction is still running and
+    # its answer still arrives, from the record.
+    INTERACTION_WAIT_EXPIRED = "interaction.wait_expired"
     INTERACTION_RESULT_SURFACED = "interaction.result_surfaced"
     EXTERNAL_DENIED = "external.denied"
     # Operator governance: human decisions, recorded like any other.

@@ -133,6 +133,55 @@ def test_a_lock_whose_holder_is_gone_does_not_stop_a_reset(tmp_path):
     assert reset.holder(_Cfg(state)) is None
 
 
+def test_a_supervisor_cannot_start_while_a_reset_runs(tmp_path):
+    """Checking for an owner and then moving the database is two steps.
+
+    Reviewed on 2026-09-24: a supervisor starting inside that gap had its
+    database archived out from under it. The lock a supervisor would have to
+    take is taken by the reset instead, for the whole operation.
+    """
+    from amoeba.errors import ResourceExhausted
+    from amoeba.supervisor import SingleInstanceLock
+
+    state = _organism(tmp_path)
+    cfg = _Cfg(state)
+    assert reset.holder(cfg) is None, "nothing owns it yet"
+
+    with reset.owned(cfg):
+        # Exactly what a supervisor starting mid-reset would attempt.
+        with pytest.raises(ResourceExhausted):
+            SingleInstanceLock(state / "supervisor.lock").acquire()
+
+    # And it is given back afterwards.
+    lock = SingleInstanceLock(state / "supervisor.lock")
+    lock.acquire()
+    lock.release()
+
+
+def test_a_reset_refuses_while_a_supervisor_holds_the_directory(tmp_path):
+    from amoeba.errors import ResourceExhausted
+    from amoeba.supervisor import SingleInstanceLock
+
+    state = _organism(tmp_path)
+    held = SingleInstanceLock(state / "supervisor.lock")
+    held.acquire()
+    try:
+        with pytest.raises(ResourceExhausted):
+            with reset.owned(_Cfg(state)):
+                pass
+    finally:
+        held.release()
+    assert (state / "mind.sqlite3").exists()
+
+
+def test_the_lock_a_reset_holds_is_not_archived(tmp_path):
+    """Archiving your own claim on the directory would end the exclusion."""
+    state = _organism(tmp_path)
+    with reset.owned(_Cfg(state)):
+        chosen = reset.plan(_Cfg(state))
+        assert all(e.name != "supervisor.lock" for e in chosen["move"])
+
+
 def test_deleting_needs_to_be_meant(tmp_path, capsys):
     state = _organism(tmp_path)
     code = cli(["reset", "--config", str(_config(tmp_path, state)), "--delete"])

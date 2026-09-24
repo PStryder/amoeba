@@ -236,8 +236,9 @@ def test_an_oversized_body_says_that_it_was_truncated(mind):
             summary="big", payload={"message": message}),
         actor="test", bump_version=False)
     turn = _claim(mind, "ego")
-    assert "[truncated at" in turn["text"]
-    assert "5000 more in" in turn["text"], "it does not say what was withheld"
+    assert "of 13000 characters" in turn["text"]
+    assert "5000 more" in turn["text"], "it does not say what was withheld"
+    assert 'result_ref="' in turn["text"], "it does not say how to read the rest"
 
 
 def test_a_trigger_with_no_payload_still_renders(mind):

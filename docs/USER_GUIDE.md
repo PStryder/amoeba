@@ -790,7 +790,8 @@ $amoebaAnswer | ConvertTo-Json -Depth 20
 
 If its status is `accepted` or `running`, wait and repeat the output call.
 `complete` is a finished answer, `incomplete` is a partial answer, and `failed`
-carries an error. Read the reply from the top-level `answer` field, which is in
+carries an error. A request can stay `running` longer than the wait that
+submitted it; that is the thought still working, not a lost request. Read the reply from the top-level `answer` field, which is in
 the same place for every kind of request; `output` holds the thought as it was
 recorded, whose shape differs between a conversation and an investigation. When
 `results` lists a file, fetch it using the returned result ID:
@@ -873,6 +874,8 @@ folder beside the state directory — `Amoeba\state.reset-20260924-113000`, for
 example — and prints where the old organism is readable.
 
 - It **refuses while a supervisor owns the state directory**. Stop it first.
+  It also takes that ownership itself for the whole operation, so a
+  supervisor cannot start part-way through a reset and lose its database.
 - **Credentials are kept**: `control.token`, `scope.*.token`,
   `operator.session` and `api_clients.json` stay, so existing clients keep
   working. Add `--rotate-credentials` to reissue them too.
@@ -1013,11 +1016,12 @@ features:
   a role reads a bounded rendering of about 8,000 characters, which states how
   much it withheld and which stored copy holds the rest. Put what matters
   early, or split very long material.
-- **An external submission can time out while its thought continues.** If the
-  wait exceeds the submission's patience, the interaction is recorded as
-  `failed` even though the queued thought may still be running. Restarts no
-  longer strand answers — those are delivered from the record — but a
-  `failed` interaction is terminal and will not collect a later answer.
+- **An external submission can outlive the wait that was watching it.** If
+  the wait exceeds the submission's patience, nobody is left waiting, but the
+  request stays open: the thought is still running, so the interaction stays
+  `running` and its answer is delivered from the record once it settles — the
+  same path that recovers answers across a restart. Keep polling `io_status`
+  or `io_output`. A `failed` interaction is terminal; a slow one is not.
 - **MCP attachment submission is incomplete.** `amoeba_attach` stores bytes,
   but `amoeba_ask` and `amoeba_submit` have no attachment-ID argument. Use the
   HTTP recipe in section 12 for file-based questions.

@@ -214,10 +214,8 @@ class _FakeInference:
             self.generations += 1
             text = self.replies.pop(0) if self.replies else "FINDING: done"
             return {"text": text, "completion_tokens": 100}
-        if method == "apply_chat_template":
-            return params["messages"][0]["content"]
-        if method == "ingest_text":
-            self.ingested.append(params["text"])
+        if method == "ingest_messages":
+            self.ingested.append(params["messages"][0]["content"])
             return {"ok": True}
         raise AssertionError(f"unexpected inference call {method}")
 

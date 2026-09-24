@@ -397,7 +397,9 @@ def build(sup: "Supervisor") -> dict[str, Any]:  # noqa: C901
                              operation_id: str | None = None,
                              expects_answer: bool = False,
                              lineage: str | None = None,
-                             ambient: bool = False) -> dict[str, Any]:
+                             ambient: bool = False,
+                             answers_interaction: str | None = None
+                             ) -> dict[str, Any]:
         """Record that something happened which a role may need to think about.
 
         Queueing is not waking and not consumption. The trigger becomes a
@@ -412,14 +414,25 @@ def build(sup: "Supervisor") -> dict[str, Any]:  # noqa: C901
         "owned by nobody", which is deliberately *not* the same as ambient --
         such a trigger waits for a turn that is not already serving somebody.
         """
-        receipt, out = mind.writer.apply(
-            lambda m: mailbox.enqueue(
+        def enqueue(m: Any) -> dict[str, Any]:
+            queued = mailbox.enqueue(
                 m, role=role, kind=kind, source=source, summary=summary,
                 source_ref=source_ref, payload=payload,
                 correlation_id=correlation_id, causal_parent=causal_parent,
                 operation_id=operation_id, expects_answer=expects_answer,
-                lineage=lineage, ambient=ambient),
-            actor=source or "harness", operation_id=operation_id,
+                lineage=lineage, ambient=ambient)
+            if answers_interaction:
+                # In the same commit as the trigger. Written afterwards, a
+                # crash in between left a thought that completed and an
+                # interaction with no link to it: recoverable work the
+                # reconciler could not see, and a client waiting forever.
+                m.sql("UPDATE interactions SET trigger_id = ?"
+                      " WHERE interaction_id = ?",
+                      (queued["trigger_id"], answers_interaction))
+            return queued
+
+        receipt, out = mind.writer.apply(
+            enqueue, actor=source or "harness", operation_id=operation_id,
             bump_version=False)
         sup.note_trigger(role)
         return {**out, "receipt_id": receipt.receipt_id}

@@ -179,12 +179,16 @@ def test_the_operator_cannot_post_as_ego_or_id(tmp_path):
             with pytest.raises(Exception) as caught:
                 stack.call("operator_backchannel", message="I am Ego.",
                            **{forged: "ego"})
-            assert "unexpected keyword" in str(caught.value), forged
+            # Refused, and told which argument was refused. Calls are
+            # checked before dispatch now, so the wording is the Harness's
+            # own rather than Python's; what matters is that there is no
+            # parameter to misuse and the forgery never lands.
+            assert forged in str(caught.value), forged
 
         # And there is no recipient to choose either: the room is the address.
         with pytest.raises(Exception) as caught:
             stack.call("operator_backchannel", message="x", to_role="ego")
-        assert "unexpected keyword" in str(caught.value)
+        assert "to_role" in str(caught.value)
 
         out = stack.call("operator_backchannel", message="plainly the operator")
         assert [e["author"] for e in out["entries"]

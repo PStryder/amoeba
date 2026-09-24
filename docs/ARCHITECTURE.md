@@ -926,7 +926,16 @@ because it is the side that can store what does not fit and therefore name a
 copy something actually holds, and what it shows says how much was left out
 and how to reach it. The cognitive processes render what they are given and
 cut nothing. How the bound is applied -- never by cutting -- is I123.
+The same rule governs a request too long to render (I76). It was shown
+bounded and told where the whole thing was -- by naming the content store --
+which is not a handle: `result_read` honours only a reference that was issued
+to the reading role, and that one never was, so a trailing instruction was
+visible in the record and unreachable by the mind meant to follow it. The
+reference is now issued on the same mutation that builds the turn, so a role
+is never shown a reference a later failure would leave unbacked, and a stored
+string can be read a window at a time exactly as a stored list can.
 → `test_an_oversized_result_is_projected_whole_and_says_what_it_left_out`,
+`test_the_rest_of_a_long_request_can_actually_be_read`,
 `test_the_copy_a_projection_names_is_really_there`,
 `test_a_projection_claims_no_copy_it_was_not_given`,
 `test_the_neuocyte_feeds_back_the_bounded_text_it_was_given`,
@@ -1926,7 +1935,47 @@ Exactly once, two ways: the reconciler skips an interaction somebody is
 still waiting on, and the write itself requires a status that is still
 waiting -- which is what makes the race safe when the thread publishes
 between the reconciler's read and its write.
+
+Reviewed on 2026-09-24, three ways remained for a recoverable answer to
+become unrecoverable, and each is now closed:
+
+* The association was written *after* the enqueue, in its own best-effort
+  commit. A crash in between left a trigger that would be answered and an
+  interaction with no link to it -- work the reconciler could not see. The
+  link is now part of the enqueue's own mutation, so a trigger that exists
+  is a trigger the record can find its way back to.
+* A *delivery* timeout was recorded as a failure. But the thought is still
+  Amoeba's to finish, and `failed` is terminal: it put the request beyond
+  the reconciler, which by design only looks at requests still waiting. A
+  wait that expires now leaves the request waiting, because that is what it
+  is doing.
+* A trigger reported `expired` was ignored, so those interactions waited
+  forever -- and sat at the head of the queue the reconciler reads, where a
+  handful of them could hide every settled answer behind them. Expiry now
+  settles the interaction, and the pass scans considerably further than it
+  delivers, so what is oldest cannot decide what is reachable.
+
+The watcher giving up is recorded as `interaction.wait_expired` and nothing
+else. It was tempting to give the interaction a status for it -- `detached`,
+say -- but the fact is about *our* thread, not about the request: no client
+is blocked on `io_submit`, which returns an id immediately, and a client can
+do nothing differently for knowing which of our threads is watching. Status
+says what the interaction is, and it is still running. Whether watchers keep
+timing out is a question about this organism's pace, which is what the
+ledger is for.
+
+`deferred` is deliberately not used anywhere. It is the right word for a
+state this organism does not yet have -- work the Harness has decided not to
+run *yet*, shed under pressure or held behind a dependency -- and spending
+it on a thread that stopped watching would leave nothing to call the real
+thing. It is not declared as a constant either: a status nothing sets is a
+promise the organism cannot keep (`test_nothing_is_declared_and_unwired`).
 → `test_the_interaction_records_which_trigger_answers_it`,
+`test_a_trigger_and_the_interaction_it_answers_are_one_commit`,
+`test_the_link_is_written_inside_the_enqueue`,
+`test_a_wait_that_expires_leaves_the_request_recoverable`,
+`test_an_expired_request_is_settled_rather_than_left_waiting`,
+`test_a_settled_answer_is_found_behind_a_queue_of_unsettled_ones`,
 `test_an_investigation_records_its_trigger_too`,
 `test_an_answer_reaches_a_client_whose_thread_is_gone`,
 `test_delivering_twice_does_not_move_a_finished_interaction`,
@@ -1942,8 +1991,8 @@ The door accepts 32,000 characters. A conversation then stored 16,000 of
 them and an investigation 8,000, silently -- so trailing instructions, which
 is exactly where constraints live, were dropped from otherwise valid
 requests. Storage keeps the whole text now; *rendering* is what bounds it,
-and rendering says how much it left out and which blob holds the rest
-(`mailbox.trigger_body`, I86). More than the door allows is refused at the
+and rendering says how much it left out and hands the role a reference it
+can actually read the rest with (`mailbox.trigger_body`, I86). More than the door allows is refused at the
 door, not trimmed behind it.
 
 And an investigation was handed neither `interaction_id` nor `attachments`,
@@ -1968,7 +2017,14 @@ whole organism: evidence is not a cache.
 
 It refuses to run at all while a supervisor owns the directory, judged by
 the supervisor's own lock and its own staleness rule rather than a second
-opinion that could disagree; deleting a database under a live writer leaves
+opinion that could disagree. Judged is not enough: checking for an owner and
+then moving the database are two steps, and a supervisor starting inside that
+gap had its database archived out from under it (reviewed 2026-09-24). The
+reset therefore *takes* the lock a supervisor would have to take, and holds
+it across deciding and doing, so the two of them are ordered rather than
+raced; the lock is the one thing a reset never archives, since archiving its
+own claim would end the exclusion it depends on. Deleting a database under a
+live writer leaves
 a half-state nobody can reason about afterwards. It touches nothing outside
 the state directory -- the configured file roots are the operator's own
 directories. And it keeps credentials by default: a reset is about the mind,
@@ -1977,6 +2033,9 @@ decision (`--rotate-credentials`). A directory holding only the empty
 scaffolding a configuration creates is not an organism, and resetting it
 announces nothing.
 → `test_the_mind_is_archived_and_the_plumbing_is_kept`,
+`test_a_supervisor_cannot_start_while_a_reset_runs`,
+`test_a_reset_refuses_while_a_supervisor_holds_the_directory`,
+`test_the_lock_a_reset_holds_is_not_archived`,
 `test_rotating_credentials_takes_them_too`,
 `test_a_dry_run_moves_nothing`,
 `test_deleting_really_deletes`,

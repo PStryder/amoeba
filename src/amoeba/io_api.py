@@ -45,7 +45,7 @@ import time
 from typing import TYPE_CHECKING, Any, Sequence
 
 from .argcheck import signature_of
-from .errors import (DeadlineExceeded, InvalidInput, NotFound,
+from .errors import (InvalidInput, NotFound,
                      ResourceExhausted)
 from .ids import new_id, sha256_hex
 from .store.events import EventKind
@@ -59,6 +59,11 @@ MAX_INPUT_CHARS = 32_000
 MAX_ATTACHMENT_BYTES = 8 * 1024 * 1024
 MAX_ATTACHMENTS = 8
 KINDS = ("converse", "investigate")
+
+# How much further than `limit` a reconciliation pass will look. Delivering is
+# bounded; finding what to deliver is not allowed to be blocked by whatever
+# happens to be oldest.
+SCAN_MULTIPLE = 20
 
 # Bound from the credential at the adapter, discarded if a caller sends it.
 # Describing it as a parameter would be inviting a call that cannot be made.
@@ -337,12 +342,17 @@ def build(sup: "Supervisor") -> dict[str, Any]:  # noqa: C901
             settled = state in ("completed", "incomplete")
             final = "complete" if state == "completed" else "incomplete"
             if not settled:
-                raise DeadlineExceeded(
-                    "Ego did not answer within this interaction's patience; "
-                    "the input remains queued and will still be processed, "
-                    "but this interaction carries no answer",
-                    interaction_id=interaction_id,
-                    trigger_id=(result or {}).get("trigger_id"))
+                # The thought is still Amoeba's to finish, so this
+                # interaction is still owed an answer. Recording it failed
+                # made a *delivery* timeout terminal and put the interaction
+                # beyond the reconciler's reach, which only looks at requests
+                # still waiting -- so a thought that completed a minute later
+                # could never reach the client that asked.
+                sup.log.info(
+                    "no longer waiting on %s; its answer will be delivered "
+                    "from the record when the thought settles", interaction_id)
+                _wait_expired(interaction_id, client_id, patience)
+                return
             _publish(interaction_id, client_id, result=result,
                      operation_id=out.get("operation_id")
                      if isinstance(out, dict) else None)
@@ -411,11 +421,18 @@ def build(sup: "Supervisor") -> dict[str, Any]:  # noqa: C901
         that is still waiting.
         """
         delivered: list[dict[str, Any]] = []
+        # Scanned wider than it acts. Requests that are genuinely still being
+        # thought about stay in the waiting set for as long as that takes, and
+        # taking only the oldest `limit` of them meant a few slow ones at the
+        # front could hide every settled answer behind them forever.
         for row in mind.db.conn.execute(
                 "SELECT interaction_id, client_id, trigger_id FROM interactions"
                 " WHERE status IN ('accepted', 'running')"
                 "   AND trigger_id IS NOT NULL"
-                " ORDER BY created_at LIMIT ?", (max(1, int(limit)),)):
+                " ORDER BY created_at LIMIT ?",
+                (max(1, int(limit)) * SCAN_MULTIPLE,)):
+            if len(delivered) >= max(1, int(limit)):
+                break
             if row["interaction_id"] in running:
                 continue                 # somebody is still waiting on it
             try:
@@ -435,10 +452,42 @@ def build(sup: "Supervisor") -> dict[str, Any]:  # noqa: C901
                       "the organism reported this request unanswerable")
                 delivered.append({"interaction_id": row["interaction_id"],
                                   "status": "failed", "from": "the record"})
+            elif status == "expired":
+                # The organism gave up delivering this one. Left waiting, it
+                # waits forever: the client is told, and the request stops
+                # occupying the queue the reconciler reads.
+                _fail(row["interaction_id"], row["client_id"],
+                      "the request expired before it could be answered")
+                delivered.append({"interaction_id": row["interaction_id"],
+                                  "status": "failed", "from": "the record"})
         if delivered:
             sup.log.info("delivered %d answer(s) nobody was left waiting for",
                          len(delivered))
         return {"delivered": delivered, "count": len(delivered)}
+
+    def _wait_expired(interaction_id: str, client_id: str,
+                      patience: float) -> None:
+        """Record that the watcher stopped watching. Nothing else changes.
+
+        Not a status: the interaction is still running and the thought is
+        still Amoeba's to finish. What ended is the internal thread that
+        would have published the answer sooner, and whether that keeps
+        happening is a question about this organism's pace -- so it is
+        written down where the operator reads what happened, rather than
+        shown to a client who can do nothing differently with it.
+        """
+        def body(m: Mutation) -> None:
+            m.emit(EventKind.INTERACTION_WAIT_EXPIRED, {
+                "interaction_id": interaction_id, "client_id": client_id,
+                "patience_seconds": round(float(patience), 1),
+                "note": ("the thought is still running; its answer will be "
+                         "delivered from the record when it settles")})
+
+        try:
+            mind.writer.apply(body, actor="harness", bump_version=False)
+        except Exception:  # noqa: BLE001
+            sup.log.debug("could not record the expired wait for %s",
+                          interaction_id, exc_info=True)
 
     def _fail(interaction_id: str, client_id: str, error: str) -> None:
         def body(m: Mutation) -> None:

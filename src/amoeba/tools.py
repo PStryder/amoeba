@@ -243,6 +243,14 @@ def read_result_path(full: Any, path: str | None, *, offset: int = 0,
         stop = len(obj) if limit is None else start + max(0, int(limit))
         return {"path": path or "", "offset": start, "of": len(obj),
                 "items": obj[start:stop]}
+    if isinstance(obj, str) and (offset or limit is not None):
+        # The same affordance a list has. Long text is the case that needed
+        # it: a request shortened for reading is read back a window at a
+        # time, rather than all of it or none of it.
+        start = max(0, int(offset))
+        stop = len(obj) if limit is None else start + max(0, int(limit))
+        return {"path": path or "", "offset": start, "of": len(obj),
+                "value": obj[start:stop]}
     return {"path": path or "", "value": obj}
 
 

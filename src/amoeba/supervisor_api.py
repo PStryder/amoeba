@@ -1216,9 +1216,10 @@ def build(sup: "Supervisor") -> dict[str, Any]:
                          "interaction_id": interaction_id,
                          "attachments": list(attachments or [])},
                 correlation_id=conversation_id, operation_id=op_id,
-                # NB: `_note_trigger_for` below records this trigger against
-                # the interaction, so the answer can be delivered from the
-                # record rather than by whoever happens to be waiting.
+                # Recorded against the interaction in this same commit, so
+                # the answer can be delivered from the record rather than by
+                # whoever happens to be waiting.
+                answers_interaction=interaction_id,
                 # The operation, not the conversation. A conversation is many
                 # interactions, and work delegated while answering this one
                 # comes back tagged with *this* operation -- tagging the
@@ -1227,7 +1228,6 @@ def build(sup: "Supervisor") -> dict[str, Any]:
                 # Continuity across a conversation is Ego's persistent
                 # context, which is what `conversation_id` still correlates.
                 lineage=op_id)
-            _note_trigger_for(interaction_id, queued["trigger_id"])
             out: dict[str, Any] = {"trigger_id": queued["trigger_id"],
                                    "status": "queued",
                                    "conversation_id": conversation_id}
@@ -1269,26 +1269,6 @@ def build(sup: "Supervisor") -> dict[str, Any]:
         return _run_operation("ego_converse", "ego",
                               {"message": message, "conversation_id": conversation_id},
                               idempotency_key, run)
-
-    def _note_trigger_for(interaction_id: str | None, trigger_id: str) -> None:
-        """Record which trigger answers an interaction, durably.
-
-        The association existed only inside the thread that was waiting, so a
-        restart left a completed thought with `output: null` forever. Best
-        effort by design: failing to record it must not fail the request,
-        and the reconciler simply has nothing to work from.
-        """
-        if not interaction_id:
-            return
-        try:
-            mind.writer.apply(
-                lambda m: m.sql("UPDATE interactions SET trigger_id = ?"
-                                " WHERE interaction_id = ?",
-                                (trigger_id, interaction_id)),
-                actor="harness", bump_version=False)
-        except Exception:  # noqa: BLE001
-            sup.log.exception("could not record trigger %s for interaction %s",
-                              trigger_id, interaction_id)
 
     def ego_investigate(*, question: str, constraints: str = "",
                         budget_tokens: int | None = None,
@@ -1333,8 +1313,9 @@ def build(sup: "Supervisor") -> dict[str, Any]:
                          # `ego_surface_result`.
                          "interaction_id": interaction_id,
                          "attachments": list(attachments or [])},
-                operation_id=op_id, lineage=op_id)
-            _note_trigger_for(interaction_id, queued["trigger_id"])
+                operation_id=op_id, lineage=op_id,
+                # In the same commit as the trigger; see `ego_converse`.
+                answers_interaction=interaction_id)
             out: dict[str, Any] = {"trigger_id": queued["trigger_id"],
                                    "status": "queued", "question": question}
             if not wait:

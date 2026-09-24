@@ -19,6 +19,7 @@ client and cognition:
 from __future__ import annotations
 
 import json
+import itertools
 import logging
 import time
 from types import SimpleNamespace
@@ -53,8 +54,13 @@ def _sup(mind, methods=None, **extra):
     return sup
 
 
+_made = itertools.count()
+
+
 def _interaction(mind, client="client_a", kind="converse", status="running"):
-    interaction_id = f"ixn_{kind}_{int(time.time() * 1000000) % 10**9}"
+    # Counted, not clocked: several made in one loop used to collide on the
+    # microsecond and fail on the primary key.
+    interaction_id = f"ixn_{kind}_{int(time.time())}_{next(_made)}"
     mind.writer.apply(
         lambda m: m.sql(
             "INSERT INTO interactions(interaction_id, client_id, surface, kind,"
@@ -298,6 +304,154 @@ def test_a_filename_may_not_carry_control_characters(mind, bad):
 
 
 # ---------------------------------------------------------------------------
+# Nothing recoverable is left unrecoverable
+# ---------------------------------------------------------------------------
+def test_a_trigger_and_the_interaction_it_answers_are_one_commit(mind):
+    """Written separately, a crash in between stranded a completed answer.
+
+    The trigger existed and the answer landed on it; the interaction had no
+    link to either, so the reconciler could not see work it could have
+    delivered.
+    """
+    interaction_id = _interaction(mind)
+    verbs = _sup(mind).methods()
+    queued = verbs["role_enqueue_trigger"](
+        role="ego", kind="user_input", source="operator", summary="q",
+        expects_answer=True, lineage="op-1",
+        answers_interaction=interaction_id)
+
+    row = mind.db.conn.execute(
+        "SELECT trigger_id FROM interactions WHERE interaction_id = ?",
+        (interaction_id,)).fetchone()
+    assert row["trigger_id"] == queued["trigger_id"]
+
+
+def test_the_link_is_written_inside_the_enqueue(mind):
+    """Structural: there is no second write that could be lost on its own."""
+    import inspect
+
+    from amoeba import supervisor_api, turn_api
+
+    source = inspect.getsource(turn_api.build)
+    # To the next verb at the same indentation, so the nested mutation this
+    # is about stays inside the slice.
+    body = source.split("    def role_enqueue_trigger", 1)[1].split("\n    def ", 1)[0]
+    assert "UPDATE interactions SET trigger_id" in body
+    assert body.index("UPDATE interactions SET trigger_id") < body.index(
+        "mind.writer.apply("), "the link is not inside the enqueue's mutation"
+    assert "_note_trigger_for" not in inspect.getsource(supervisor_api.build), (
+        "the best-effort second write is still reachable")
+
+
+def test_a_wait_that_expires_leaves_the_request_recoverable(mind):
+    """A delivery timeout is not an answer failing.
+
+    Marking it failed put the interaction beyond the reconciler, which only
+    looks at requests still waiting -- so a thought that completed a moment
+    later could never reach the client that asked.
+    """
+    def slow_converse(**kw):
+        return {"result": {"status": "queued", "trigger_id": "trg_1"}}
+
+    verbs = _sup(mind, methods={"ego_converse": slow_converse}).methods()
+    submitted = verbs["io_submit"](text="a question", client_id="client_a")
+    deadline = time.time() + 30
+    while time.time() < deadline:
+        row = mind.db.conn.execute(
+            "SELECT status FROM interactions WHERE interaction_id = ?",
+            (submitted["interaction_id"],)).fetchone()
+        if row["status"] != "accepted":
+            break
+        time.sleep(0.05)
+
+    status = mind.db.conn.execute(
+        "SELECT status FROM interactions WHERE interaction_id = ?",
+        (submitted["interaction_id"],)).fetchone()["status"]
+    assert status in ("accepted", "running"), (
+        f"a delivery timeout made the request terminal ({status})")
+
+    # What stopped is Amoeba's own watcher, so it is written where the
+    # operator reads what happened -- not shown to a client who can do
+    # nothing differently with it, and not made into a status, because the
+    # interaction still is what it says it is.
+    events = [dict(r) for r in mind.db.conn.execute(
+        "SELECT kind, payload_inline, payload_sha256 FROM events WHERE kind = ?",
+        ("interaction.wait_expired",))]
+    assert len(events) == 1, "the expired wait left no trace"
+    payload = (json.loads(events[0]["payload_inline"])
+               if events[0]["payload_inline"]
+               else mind.blobs.get_json(events[0]["payload_sha256"]))
+    assert payload["interaction_id"] == submitted["interaction_id"]
+    assert payload["patience_seconds"] > 0, "it does not say what was overrun"
+
+
+def test_an_expired_wait_is_not_a_client_facing_state(mind):
+    """The watcher is ours. A client sees the request it actually has."""
+    def slow_converse(**kw):
+        return {"result": {"status": "queued", "trigger_id": "trg_1"}}
+
+    verbs = _sup(mind, methods={"ego_converse": slow_converse}).methods()
+    submitted = verbs["io_submit"](text="a question", client_id="client_a")
+    deadline = time.time() + 30
+    while time.time() < deadline:
+        if mind.db.conn.execute(
+                "SELECT 1 FROM events WHERE kind = 'interaction.wait_expired'"
+        ).fetchone():
+            break
+        time.sleep(0.05)
+
+    out = verbs["io_status"](interaction_id=submitted["interaction_id"],
+                             client_id="client_a")
+    assert out["status"] in ("accepted", "running")
+    assert "detached" not in out and "deferred" not in out, (
+        "an internal scheduling detail became part of the client's vocabulary")
+
+
+def test_an_expired_request_is_settled_rather_than_left_waiting(mind):
+    """`expired` was ignored, so those interactions waited forever -- and sat
+    at the front of the queue the reconciler reads."""
+    interaction_id = _interaction(mind)
+    mind.writer.apply(
+        lambda m: m.sql("UPDATE interactions SET trigger_id = 'trg_x'"
+                        " WHERE interaction_id = ?", (interaction_id,)),
+        actor="test", bump_version=False)
+
+    verbs = _sup(mind, methods={
+        "role_answer": lambda trigger_id: {"status": "expired"}}).methods()
+    out = verbs["io_reconcile"]()
+
+    assert any(d["interaction_id"] == interaction_id for d in out["delivered"])
+    row = mind.db.conn.execute(
+        "SELECT status, error FROM interactions WHERE interaction_id = ?",
+        (interaction_id,)).fetchone()
+    assert row["status"] == "failed"
+    assert "expired" in (row["error"] or "")
+
+
+def test_a_settled_answer_is_found_behind_a_queue_of_unsettled_ones(mind):
+    """Taking only the oldest `limit` let slow requests hide finished ones."""
+    waiting = [_interaction(mind) for _ in range(6)]
+    answered = _interaction(mind)
+    for i, ixn in enumerate(waiting + [answered]):
+        mind.writer.apply(
+            lambda m, ixn=ixn, i=i: m.sql(
+                "UPDATE interactions SET trigger_id = ? WHERE interaction_id = ?",
+                (f"trg_{i}", ixn)),
+            actor="test", bump_version=False)
+
+    def role_answer(trigger_id):
+        if trigger_id == "trg_6":
+            return {"status": "completed", "answer": "the late reply"}
+        return {"status": "queued"}
+
+    verbs = _sup(mind, methods={"role_answer": role_answer}).methods()
+    out = verbs["io_reconcile"](limit=1)
+
+    assert [d["interaction_id"] for d in out["delivered"]] == [answered], (
+        "the settled answer was hidden behind requests still being thought about")
+
+
+# ---------------------------------------------------------------------------
 # What a client is told it may call, and what it is told when it calls wrong
 # ---------------------------------------------------------------------------
 def test_every_advertised_verb_says_how_to_call_it(mind):
@@ -404,9 +558,47 @@ def test_what_is_rendered_says_where_the_rest_is(mind):
     trigger = dict(mind.db.conn.execute(
         "SELECT * FROM role_triggers WHERE trigger_id = ?",
         (out["result"]["trigger_id"],)).fetchone())
+    # Rendered on its own, with no turn being built to issue a reference on;
+    # it still has to say how much it withheld and where the whole thing is.
     body = mailbox.trigger_body(trigger, mind.blobs)
     assert len(body) < 20000
-    assert "truncated at" in body and trigger["payload_sha256"][:12] in body
+    assert "of 20000 characters" in body and "12000 more" in body
+    assert trigger["payload_sha256"][:12] in body
+
+
+def test_the_rest_of_a_long_request_can_actually_be_read(mind):
+    """A digest is not a handle.
+
+    The note named the content store, which told Ego where its own
+    instructions were while giving it no way to get there: `result_read`
+    honours only a reference that was issued to the reading role, and this
+    one never was. Reviewed on 2026-09-24; both the shown fragment and the
+    full digest were refused.
+    """
+    from amoeba import mailbox, turn_api
+
+    message = "Q" * 9000 + " FINALLY: say the word ARTICHOKE."
+    mind.writer.apply(
+        lambda m: mailbox.enqueue(
+            m, role="ego", kind="user_input", source="operator",
+            summary="long", payload={"message": message}),
+        actor="test", bump_version=False)
+    mind.work.register_agent(agent_id="ego", role="ego", session_handle="s")
+    _, turn = mind.writer.apply(
+        lambda m: mailbox.claim(m, mind, role="ego", incarnation=1,
+                                profile_ref="ego@1", profile_sha256="p",
+                                environment_sha256="e", environment_blob="eb"),
+        actor="ego", bump_version=False)
+
+    shown = mind.blobs.get_json(turn["bundle_blob"])["text"]
+    assert "ARTICHOKE" not in shown, "the tail was not withheld; nothing to test"
+    ref = shown.split('result_ref="', 1)[1].split('"', 1)[0]
+
+    read = _sup(mind).methods()["result_read"](
+        result_ref=ref, path="message", offset=mailbox.MAX_BODY_CHARS,
+        turn_id=turn["turn_id"])
+    assert read["of"] == len(message)
+    assert "ARTICHOKE" in read["value"], "the trailing instruction is unreachable"
 
 
 def test_more_than_the_door_allows_is_refused_not_trimmed():

@@ -146,6 +146,7 @@ def _reset(cfg: Any, *, delete: bool, dry_run: bool,
     under a live writer leaves a half-state nobody can reason about later.
     """
     from . import reset as reset_mod
+    from .errors import ResourceExhausted
 
     live = reset_mod.holder(cfg)
     if live is not None:
@@ -158,11 +159,19 @@ def _reset(cfg: Any, *, delete: bool, dry_run: bool,
               "  archive it instead (omit --delete), or pass --yes to mean it.")
         return 2
 
-    chosen = reset_mod.plan(cfg, rotate_credentials=rotate_credentials)
-    if not chosen["holds_state"]:
-        print(f"nothing to reset: {cfg.state_dir} holds no organism state")
-        return 0
-    out = reset_mod.perform(chosen, delete=delete, dry_run=dry_run)
+    # Held across deciding and doing. The check above is a courtesy that
+    # gives a readable message; this is what actually excludes a supervisor.
+    try:
+        with reset_mod.owned(cfg):
+            chosen = reset_mod.plan(cfg, rotate_credentials=rotate_credentials)
+            if not chosen["holds_state"]:
+                print(f"nothing to reset: {cfg.state_dir} holds no organism state")
+                return 0
+            out = reset_mod.perform(chosen, delete=delete, dry_run=dry_run)
+    except ResourceExhausted as exc:
+        print(f"refusing: {exc.message}\n"
+              f"  stop it first: python -m amoeba shutdown --config <config>")
+        return 2
     verb = ("would move" if dry_run else
             "deleted" if out["deleted"] else "archived")
     print(f"{verb} {len(out['moved'])} item(s) from {cfg.state_dir}:")
