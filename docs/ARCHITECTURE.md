@@ -70,7 +70,30 @@ raw events are reached only through `id_audit` / `mind_provenance`.
 **I4. Content before reference.** Blob bytes are fsynced before any event
 referencing them commits. An orphan blob is recoverable garbage; a committed
 reference to missing content is an integrity failure and is reported as one.
-→ `test_missing_blob_is_detected_not_glossed_over`
+
+Which required knowing what the references *are*. Audited on 2026-09-24, the
+inventory was a hand-written list of six columns, and the schema holds twenty:
+deleting a claimed turn's `bundle_blob` and asking for deep integrity returned
+zero missing content, because `role_turns` was not on the list. The inventory
+is now derived from the schema -- every `*_sha256`, `*_blob` and `sha256`
+column is a candidate -- and each candidate must be either checked or excused
+in `NOT_CONTENT_REFERENCES` with its reason. A table added later is covered by
+default, and omitting it takes a deliberate entry rather than a lapse. Which
+columns hold references was settled against a running organism rather than by
+name: `role_turns.bundle_sha256` looks like one and is not, and happens to
+equal `bundle_blob` for 275 of 277 live rows because both derive from the same
+canonical body -- checking it would have reported the other two as corruption.
+
+A count of zero also has to mean a check ran. The shallow path substituted an
+empty list, so "nothing is missing" and "nothing was examined" were the same
+answer -- on the path `id_health` takes. An integrity report now states
+whether content was checked and how many references that covered.
+→ `test_missing_blob_is_detected_not_glossed_over`,
+`test_a_missing_turn_bundle_is_reported`,
+`test_a_shallow_check_does_not_report_a_clean_bill`,
+`test_a_healthy_store_says_how_much_it_checked`,
+`test_every_digest_column_is_either_checked_or_excused`,
+`test_the_inventory_names_columns_that_exist`
 
 **I5. Hash chaining detects mutation, not administrators.** Two distinct
 attacks, so two tests: rewriting an event's payload (caught by the recomputed
@@ -737,8 +760,17 @@ prefix **separately**, rather than claiming the whole profile was handed over.
 discarded `repetition_penalty` would be a profile claiming to have shaped
 cognition that it did not. Harness constraints narrow a profile and never
 widen it, and are not a parameter any caller can supply.
+Audited on 2026-09-24, this was true of the *map* and not of the call.
+`test_every_model_variable_reaches_the_backend` asserts that every variable has
+a backend argument -- a statement about two dictionaries -- while `_infer`
+forwarded three of the six, so the shipped Id profile declaring `top_p: 0.9`
+generated at the service default of 0.95 and the durable binding described
+sampling nobody applied. A test that compares maps cannot see a call site, so
+the guarantee is now asserted where the call is made (I135).
 → `test_unsupported_model_variables_are_refused_not_dropped`,
 `test_every_model_variable_reaches_the_backend`,
+`test_the_sampling_a_profile_binds_reaches_the_call`,
+`test_a_setting_the_profile_does_not_bind_is_not_sent`,
 `test_harness_constraints_narrow_and_never_widen`
 
 ### Persistent roles and bounded turns
@@ -2126,6 +2158,57 @@ yours".
 `test_a_second_question_does_not_take_the_file_from_the_first`,
 `test_ego_cannot_read_an_attachment_from_another_request`
 
+**I135. A binding describes the sampling that was applied, and a refusal says
+what it is.** Two halves of the same rule: the record and the act have to
+agree, and neither may be inferred from prose. `_infer` forwarded
+`max_tokens`, `temperature` and `seed` and nothing else, so a profile binding
+`top_p: 0.9` ran at the backend's 0.95 while the incarnation binding said 0.9.
+It is asserted at the call boundary now, because the test that existed
+compared the variable map with the backend-argument map and could not see a
+call site at all.
+
+The other half: whether a role had hit its context limit or genuinely broken
+was decided by matching words in the exception message across an RPC boundary,
+where the type does not survive. Rewording a refusal anywhere in the stack
+would silently reroute a healthy organism at a known limit into the crash
+path. A refusal that is pressure now says so in its details, which do survive;
+the wording is still matched afterwards, for refusals raised by code that does
+not carry the marker. A generic resource-exhaustion code is deliberately not
+enough on its own -- the pool can be short of sessions or slots, and that is a
+different shortage.
+→ `test_the_sampling_a_profile_binds_reaches_the_call`,
+`test_a_setting_the_profile_does_not_bind_is_not_sent`,
+`test_pressure_is_recognised_by_what_the_refusal_says_it_is`,
+`test_a_different_shortage_is_not_pressure`,
+`test_the_old_wording_is_still_understood`,
+`test_the_arbiter_declares_its_own_refusal`
+
+**I136. A worker is reported as saying what it said, and is shown what the
+record says it was shown.** Output with no `FINDING:` line was published to the
+blackboard as a finding at confidence 0.5 -- a number nobody stated, on a claim
+nobody made, which then read as corroboration to the next worker. Unshaped
+output is posted as a note, and a confidence that was not given is `None`
+rather than a default. `CONFIDENCE:` with an empty value also raised
+`IndexError`, so a truncated but usable result became a worker failure and
+spent one of three attempts.
+
+The input side is the same rule. A board read receipt freezes what was shown,
+including each post's `attempt_fate` and `work_note`, while the rendering
+handed the model only author, type and body -- so a finding whose author was
+fenced or whose work was cancelled weighed exactly as much as a corroborated
+one, and the record said it had been told otherwise. Attempts that ran and
+posted nothing were not mentioned at all, leaving a worker unable to tell "no
+one has looked at this" from "three have, and died here". A retry is now told
+that it is one, and what went wrong last time.
+→ `test_unshaped_output_is_posted_as_a_note_not_a_finding`,
+`test_a_confidence_nobody_stated_is_not_invented`,
+`test_a_confidence_field_with_nothing_in_it_does_not_crash`,
+`test_output_that_is_not_a_finding_is_not_reported_as_one`,
+`test_a_post_is_shown_with_what_became_of_its_attempt`,
+`test_attempts_that_posted_nothing_are_still_reported`,
+`test_a_board_naive_worker_stays_board_naive`,
+`test_a_retry_is_told_it_is_one`
+
 **I73. A role is never wedged by a turn it did not close.** One open turn per
 role is a database constraint, so a turn left running blocks every future turn
 for that role — the role heartbeats, reports healthy, and never thinks again
@@ -2473,17 +2556,30 @@ condition directly expresses that claim, at the layer where the guarantee
 lives.** A passing test is weak evidence; a test that *fails when the guarantee
 is removed* is the real thing.
 
-`scripts/verify_invariants.py` applies one targeted mutation per invariant —
-a minimal edit that negates precisely that claim, at the layer that owns it —
-runs only the tests named for it, and **requires them to fail**. Source is
+`scripts/verify_invariants.py` applies targeted mutations — each a minimal
+edit that negates precisely one claim, at the layer that owns it — runs only
+the tests named for that invariant, and **requires them to fail**. Source is
 always restored.
+
+Each mutant is applied and judged **on its own**. Until 2026-09-24 an
+invariant's primary and all its `also` mutants were written together and the
+tests run once, which asks only whether removing everything at once broke
+something — a question one lethal mutant answers on behalf of every inert one
+beside it. An invariant counts as defended only when every mutant it declares
+was individually lethal, and a skipped anchor fails the run rather than
+passing quietly.
 
 ```powershell
 .\.venv\Scripts\python.exe scripts\verify_invariants.py          # all
 .\.venv\Scripts\python.exe scripts\verify_invariants.py --only I7,I8
+.\.venv\Scripts\python.exe scripts\verify_invariants.py --primaries-only
 ```
 
-Current result: **21 of 21 defended, 0 weak.**
+The count is deliberately not written here. It was stated once as "21 of 21
+defended" and stayed on the page through a hundred and fifteen further
+invariants, describing a run nobody had made since — and an audit was right to
+flag it, because an inventory count is not evidence that anything is defended.
+The run prints its own totals, and that is the only place they are true.
 
 ### What the first run found
 

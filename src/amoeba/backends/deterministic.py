@@ -295,6 +295,7 @@ class DeterministicBackend:
             tokens = list(tokens)
             if self._used_cells + len(tokens) > self.n_ctx:
                 raise ResourceExhausted("simulated context full",
+                                        pressure="context_pressure",
                                         used=self._used_cells, n_ctx=self.n_ctx)
             sess.tokens.extend(tokens)
             self._used_cells += len(tokens)

@@ -293,6 +293,71 @@ def verify_chain(conn: sqlite3.Connection, *, start_seq: int = 0) -> tuple[bool,
     return True, None
 
 
+# Every column that holds the digest of content the blob store must have.
+# Classified against a running organism on 2026-09-24 rather than by name:
+# each column's values were checked for membership in `blobs`. Six of the
+# checks below did not exist before that, and `missing_content` returning zero
+# meant only that the six it did have were satisfied.
+CONTENT_REFERENCES: tuple[tuple[str, str, str], ...] = (
+    ("events", "event_id", "payload_sha256"),
+    ("snapshots", "snapshot_id", "tokens_blob"),
+    ("snapshots", "snapshot_id", "text_blob"),
+    ("operations", "operation_id", "request_blob"),
+    ("operations", "operation_id", "result_blob"),
+    ("work_items", "work_id", "result_blob"),
+    ("role_triggers", "trigger_id", "payload_sha256"),
+    ("role_triggers", "trigger_id", "answer_sha256"),
+    ("role_turns", "turn_id", "bundle_blob"),
+    ("role_turns", "turn_id", "environment_blob"),
+    ("role_turns", "turn_id", "result_sha256"),
+    ("interactions", "interaction_id", "input_sha256"),
+    ("interactions", "interaction_id", "output_sha256"),
+    ("interaction_inputs", "input_id", "sha256"),
+    ("interaction_results", "result_id", "sha256"),
+    ("issued_results", "result_ref", "sha256"),
+    ("artifacts", "artifact_id", "sha256"),
+    ("board_evidence", "id", "blob_sha256"),
+    ("conclusion_evidence", "id", "blob_sha256"),
+    ("memory_evidence", "id", "blob_sha256"),
+)
+
+# Columns that look like references and are not. Listed with the reason,
+# because "we did not check this one" has to be a decision on the record
+# rather than an omission nobody notices.
+NOT_CONTENT_REFERENCES: dict[tuple[str, str], str] = {
+    ("blobs", "sha256"): "the registry itself; it is what references point at",
+    ("incarnation_profiles", "prompt_sha256"): "digest of prompt text held in the library",
+    ("incarnation_profiles", "config_sha256"): "digest of resolved settings, not stored content",
+    ("incarnation_profiles", "profile_sha256"): "digest of the binding, not stored content",
+    ("prompt_versions", "local_sha256"): "digest of the local definition, not stored content",
+    ("role_turns", "profile_sha256"): "digest of the profile the turn ran under",
+    ("role_turns", "environment_sha256"): "digest of the environment; the bytes are environment_blob",
+    ("role_turns", "bundle_sha256"): (
+        "digest of the rendered bundle; the bytes are bundle_blob. It usually "
+        "equals bundle_blob because both derive from the same canonical body, "
+        "which is a coincidence and not a reference -- 2 of 277 live rows "
+        "differ, and checking it would report those as missing content"),
+}
+
+
+def candidate_reference_columns(conn: sqlite3.Connection) -> set[tuple[str, str]]:
+    """Every column in this schema that could hold a content digest.
+
+    Read from the database rather than a list, so a table added later is
+    covered by default and has to be classified deliberately to be skipped.
+    The previous inventory was hand-written, and being hand-written is how it
+    came to cover six references out of twenty.
+    """
+    out: set[tuple[str, str]] = set()
+    for row in conn.execute("SELECT name FROM sqlite_master WHERE type = 'table'"):
+        table = row["name"]
+        for col in conn.execute(f"PRAGMA table_info({table})"):
+            name = col["name"]
+            if name.endswith("_sha256") or name.endswith("_blob") or name == "sha256":
+                out.add((table, name))
+    return out
+
+
 def missing_content(conn: sqlite3.Connection, blobs: BlobStore) -> list[dict[str, str]]:
     """Every committed blob reference whose bytes are absent or corrupt.
 
@@ -301,21 +366,19 @@ def missing_content(conn: sqlite3.Connection, blobs: BlobStore) -> list[dict[str
     """
     missing: list[dict[str, str]] = []
     refs: list[tuple[str, str, str]] = []
-    for row in conn.execute(
-        "SELECT event_id, payload_sha256 FROM events WHERE payload_sha256 IS NOT NULL"
-    ):
-        refs.append(("event", row["event_id"], row["payload_sha256"]))
-    for table, idcol, col in (
-        ("snapshots", "snapshot_id", "tokens_blob"),
-        ("snapshots", "snapshot_id", "text_blob"),
-        ("operations", "operation_id", "request_blob"),
-        ("operations", "operation_id", "result_blob"),
-        ("work_items", "work_id", "result_blob"),
-    ):
-        for row in conn.execute(
-            f"SELECT {idcol} AS rid, {col} AS sha FROM {table} WHERE {col} IS NOT NULL"
-        ):
-            refs.append((table, row["rid"], row["sha"]))
+    for table, idcol, col in CONTENT_REFERENCES:
+        try:
+            rows = conn.execute(
+                f"SELECT {idcol} AS rid, {col} AS sha FROM {table}"
+                f" WHERE {col} IS NOT NULL").fetchall()
+        except sqlite3.Error:
+            # A table a migration has not created here yet. Reported as
+            # uncheckable rather than skipped in silence.
+            missing.append({"referrer_kind": table, "referrer_id": col,
+                            "sha256": "", "reason": "reference not readable"})
+            continue
+        for row in rows:
+            refs.append((f"{table}.{col}", row["rid"], row["sha"]))
     for kind, rid, sha in refs:
         if not blobs.exists(sha):
             missing.append({"referrer_kind": kind, "referrer_id": rid, "sha256": sha, "reason": "absent"})

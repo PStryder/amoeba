@@ -205,6 +205,39 @@ def test_corroboration_separates_real_support_from_echo(mind):
     assert "one observation restated" in c["note"]
 
 
+def test_support_from_an_attempt_that_never_finished_is_flagged(mind):
+    """Corroboration reports the fate of its supporters, not just their count.
+
+    A supporter whose own attempt died is weaker evidence than one whose
+    attempt completed, and a reader counting `independent_support_count`
+    cannot tell them apart. `unfinished_support` is what says so, and nothing
+    asserted it: the mutant that empties the list survived every board test.
+    """
+    claim = post(mind, "wk_1", "the fork shares KV cells")
+
+    supporter_work = _admit(mind, objective="verify independently")
+    lease = mind.work.lease(neuocyte_id="wk_2", work_id=supporter_work)
+    supporting = mind.board.post(
+        author="wk_2", author_kind="neuocyte", post_type="finding",
+        body="measured it myself; shared", thread_id=claim,
+        work_id=supporter_work,
+        relations=[{"to_post": claim, "relation": "supports"}])[0]
+
+    # The attempt that wrote it then died without finishing.
+    mind.work.fail(work_id=supporter_work, neuocyte_id="wk_2",
+                   fencing_token=lease["fencing_token"], failure="died",
+                   requeue=False)
+
+    c = mind.board.corroboration(claim)
+
+    assert supporting in c["supporting_posts"]
+    assert c["unfinished_support"] == [supporting], (
+        "support from an attempt that never finished was reported as though "
+        "its author had completed")
+    fates = {f["post_id"]: f for f in c["support_provenance"]}
+    assert fates[supporting]["attempt_unfinished"] is True
+
+
 def test_corroboration_counts_challenges_too(mind):
     claim = post(mind, "wk_1", "claim")
     ch = mind.board.post(author="wk_2", author_kind="neuocyte", post_type="challenge",

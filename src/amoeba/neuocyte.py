@@ -74,6 +74,20 @@ What other neuocytes have already posted about this:
 {posts}
 """
 
+# A post's fate is part of what it means. The read receipt already froze this
+# as "what was shown", while the rendering left it out -- so a worker weighed a
+# finding whose author was fenced or whose work was cancelled exactly as it
+# weighed a corroborated one, and the record said it had been told.
+POST_FATE = "      ({fate}{note})"
+
+SILENT_BLOCK = """
+{count} earlier attempt(s) at this work posted nothing at all.
+"""
+
+ATTEMPT_BLOCK = """
+This is attempt {attempt} of this work item.{previous}
+"""
+
 NO_BOARD_BLOCK = """
 You have deliberately NOT been shown what other neuocytes found. Answer from the
 context and the task alone, so that agreement with another neuocyte means
@@ -294,7 +308,9 @@ class Neuocyte:
         board_block, board_seen = self._board_context(item)
         tools_block, tool_names = self._tools_block(item)
         prompt = self._profile_block() + WORKER_INSTRUCTION.format(
-            objective=item["objective"], board=board_block, tools=tools_block)
+            objective=item["objective"],
+            board=self._attempt_context(item) + board_block,
+            tools=tools_block)
         self.inf.call("ingest_messages", session_id=self.session_id,
                       messages=[{"role": "user", "content": prompt}],
                       add_assistant=True)
@@ -511,12 +527,45 @@ class Neuocyte:
             self.log.debug("board read failed", exc_info=True)
             return NO_BOARD_BLOCK, []
         posts = res.get("posts", [])
+        # A report, not a number: {count, attempts, truncated, ...}
+        silent = int((res.get("silent_attempts") or {}).get("count") or 0)
         if not posts:
+            # Silence is itself information: attempts that ran and posted
+            # nothing were reported to nobody, so a worker could not tell "no
+            # one has looked at this" from "three have and found nothing".
+            if silent:
+                return NO_BOARD_BLOCK + SILENT_BLOCK.format(count=silent), []
             return NO_BOARD_BLOCK, []
-        rendered = "\n".join(
-            f"- [{p['post_id']}] ({p['post_type']}, {p['author']}) {p['body'][:180]}"
-            for p in posts)
-        return BOARD_BLOCK.format(posts=rendered), [p["post_id"] for p in posts]
+        lines = []
+        for p in posts:
+            lines.append(
+                f"- [{p['post_id']}] ({p['post_type']}, {p['author']}) "
+                f"{p['body'][:180]}")
+            fate, note = p.get("attempt_fate"), p.get("work_note")
+            if fate or note:
+                lines.append(POST_FATE.format(
+                    fate=fate or "fate unrecorded",
+                    note=f": {note}" if note else ""))
+        rendered = "\n".join(lines)
+        block = BOARD_BLOCK.format(posts=rendered)
+        if silent:
+            block += SILENT_BLOCK.format(count=silent)
+        return block, [p["post_id"] for p in posts]
+
+    def _attempt_context(self, item: dict[str, Any]) -> str:
+        """What this work has already cost, from the row rather than a guess.
+
+        Durable and previously unsaid: a worker retrying after two failures was
+        told neither that it was a retry nor what went wrong last time, and
+        then asked to do better.
+        """
+        attempt = int(item.get("attempt") or 1)
+        if attempt <= 1:
+            return ""
+        failure = (item.get("failure") or "").strip()
+        previous = (f" The previous attempt ended: {failure[:300]}"
+                    if failure else " No reason was recorded for the last one.")
+        return ATTEMPT_BLOCK.format(attempt=attempt, previous=previous)
 
     def _publish_finding(self, item: dict[str, Any], parsed: dict[str, Any],
                          out: dict[str, Any]) -> str | None:
@@ -525,9 +574,13 @@ class Neuocyte:
         if item.get("board_access") != "read_write":
             return None
         try:
+            # Output that did not have the shape of a finding is posted as
+            # what it is. A note is still evidence and still readable; what it
+            # is not is a claim the worker never made.
             res = self.sup.call(
                 "board_post", author=self.neuocyte_id, author_kind="neuocyte",
-                post_type="finding", body=parsed["finding"],
+                post_type="finding" if parsed.get("parsed") else "note",
+                body=parsed["finding"],
                 title=item["objective"][:120], work_id=item["work_id"],
                 confidence=parsed["confidence"],
                 model_generation=self.model_generation,
@@ -657,23 +710,43 @@ class Neuocyte:
 
 
 def _parse_finding(text: str) -> dict[str, Any]:
+    """What the worker said, and how much of it had the shape we asked for.
+
+    Two things this must not do, both found by audit on 2026-09-24.
+
+    It must not invent a confidence. Output with no `FINDING:` line was
+    published as a finding at 0.5 -- so a model declining to answer, or
+    answering in prose, became a half-confident claim on the blackboard with
+    a number nobody stated. `confidence` is `None` when it was not given, and
+    `parsed` says whether this had the shape of a finding at all.
+
+    And it must not crash on a field that is present but empty.
+    `CONFIDENCE:` with nothing after it indexed the first whitespace-split
+    element before entering the `try`, which caught only `ValueError` anyway
+    -- so a truncated but usable result raised `IndexError`, became a worker
+    failure, and spent a retry.
+    """
     clean = strip_tool_calls(text)
-    finding, confidence, evidence = "", 0.5, ""
+    finding, evidence = "", ""
+    confidence: float | None = None
     for line in clean.splitlines():
         upper = line.upper()
         if upper.startswith("FINDING:"):
             finding = line.split(":", 1)[1].strip()
         elif upper.startswith("CONFIDENCE:"):
-            raw = line.split(":", 1)[1].strip().split()[0] if ":" in line else ""
-            try:
-                confidence = max(0.0, min(1.0, float(raw.rstrip(".,"))))
-            except ValueError:
-                confidence = 0.5
+            words = line.split(":", 1)[1].strip().split()
+            if words:
+                try:
+                    confidence = max(0.0, min(1.0, float(words[0].rstrip(".,"))))
+                except ValueError:
+                    confidence = None
         elif upper.startswith("EVIDENCE:"):
             evidence = line.split(":", 1)[1].strip()
-    if not finding:
+    parsed = bool(finding)
+    if not parsed:
         finding = clean.strip()[:400] or "(neuocyte produced no parsable finding)"
-    return {"finding": finding, "confidence": confidence, "evidence": evidence}
+    return {"finding": finding, "confidence": confidence, "evidence": evidence,
+            "parsed": parsed}
 
 
 def main(argv: Sequence[str] | None = None) -> int:

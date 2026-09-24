@@ -24,6 +24,12 @@ BOARD_ACCESS = ("none", "read", "read_write")
 independent replication; agreement after reading is not."""
 TERMINAL_WORK = ("done", "failed", "cancelled")
 
+# How many attempts a work item gets before it is somebody's problem rather
+# than something to retry. Applied wherever an attempt ends -- a reported
+# failure and an expired lease are the same expenditure, and counting only one
+# of them let an item cycle forever.
+MAX_WORK_ATTEMPTS = 3
+
 
 class WorkRepo:
     def __init__(self, db: Database, blobs: BlobStore, writer: StateWriter) -> None:
@@ -60,6 +66,15 @@ class WorkRepo:
         if board_access not in BOARD_ACCESS:
             raise InvalidInput("unknown board access mode", board_access=board_access,
                                allowed=list(BOARD_ACCESS))
+        # A dependency on something that does not exist is never satisfiable,
+        # and admitting it queues work that can only ever wait. Refused at the
+        # door, where the caller can still do something about it.
+        unknown = [d for d, s in self._dep_states(self.conn.execute,
+                                                  list(depends_on or [])).items()
+                   if s is None]
+        if unknown:
+            raise InvalidInput("depends on work that does not exist",
+                               depends_on=unknown)
         work_id = new_id("work")
 
         def body(m: Mutation) -> None:
@@ -164,6 +179,81 @@ class WorkRepo:
         _receipt, claimed = self.writer.apply(body, actor=neuocyte_id, bump_version=False)
         return claimed
 
+    @staticmethod
+    def _dep_states(execute: Any, deps: Sequence[str]) -> dict[str, str | None]:
+        """What each dependency is now; `None` if there is no such work item."""
+        states: dict[str, str | None] = {}
+        for dep in deps:
+            row = execute("SELECT status FROM work_items WHERE work_id = ?",
+                          (dep,)).fetchone()
+            states[dep] = row["status"] if row is not None else None
+        return states
+
+    def ready(self, execute: Any, deps: Sequence[str]) -> bool:
+        """Can this item be worked on now? The one definition of readiness.
+
+        Read through a caller-supplied executor so dispatch can ask the same
+        question as the lease, against a connection rather than a mutation.
+        They used to disagree: dispatch chose the highest-priority *queued*
+        item and the lease then refused it for being unready, so a blocked
+        head of queue stopped a ready item behind it from ever being
+        dispatched -- nobody was leasing it to find out.
+        """
+        return all(s == "done" for s in self._dep_states(execute, deps).values())
+
+    def unreachable_deps(self, execute: Any, deps: Sequence[str]) -> list[str]:
+        """Dependencies that can never become satisfied."""
+        return sorted(d for d, s in self._dep_states(execute, deps).items()
+                      if s is None or s in ("failed", "cancelled"))
+
+    def next_ready(self, *, work_class: str) -> str | None:
+        """The item dispatch should serve: highest priority among the ready."""
+        for row in self.conn.execute(
+            "SELECT work_id, depends_on FROM work_items"
+            " WHERE status = 'queued' AND work_class = ?"
+            " ORDER BY priority DESC, created_at ASC LIMIT 50", (work_class,),
+        ):
+            deps = json.loads(row["depends_on"] or "[]")
+            if not deps or self.ready(self.conn.execute, deps):
+                return row["work_id"]
+        return None
+
+    def retire_blocked(self, *, actor: str = "supervisor") -> list[str]:
+        """Fail queued work whose dependencies can never be satisfied.
+
+        A dependency that failed or was cancelled is not a wait, it is an
+        answer: nothing will ever make the dependent runnable. Left queued it
+        occupies the queue forever and its owner is never told.
+        """
+        candidates = [
+            (r["work_id"], json.loads(r["depends_on"] or "[]"))
+            for r in self.conn.execute(
+                "SELECT work_id, depends_on FROM work_items"
+                " WHERE status = 'queued' AND depends_on NOT IN ('', '[]')")]
+        blocked = [(wid, self.unreachable_deps(self.conn.execute, deps))
+                   for wid, deps in candidates if deps]
+        blocked = [(wid, dead) for wid, dead in blocked if dead]
+        if not blocked:
+            return []
+
+        def body(m: Mutation) -> None:
+            for work_id, dead in blocked:
+                m.sql(
+                    "UPDATE work_items SET status = 'failed', failure = ?,"
+                    " lease_owner = NULL, lease_expires = NULL, updated_at = ?"
+                    " WHERE work_id = ? AND status = 'queued'",
+                    (f"depends on work that will never finish: {', '.join(dead)}",
+                     time.time(), work_id),
+                )
+                m.emit(EventKind.WORK_FAILED, {
+                    "work_id": work_id, "neuocyte_id": None,
+                    "failure": "a dependency failed or was cancelled",
+                    "requeued": False, "unreachable_dependencies": dead,
+                })
+
+        self.writer.apply(body, actor=actor, bump_version=False)
+        return [wid for wid, _ in blocked]
+
     def _deps_satisfied(self, m: Mutation, deps: Sequence[str]) -> bool:
         for dep in deps:
             row = m.sql("SELECT status FROM work_items WHERE work_id = ?", (dep,)).fetchone()
@@ -222,6 +312,26 @@ class WorkRepo:
             "board_access": row["board_access"],
         }
 
+    def _record_rejection(self, *, work_id: str, neuocyte_id: str,
+                          presented: int, detail: dict[str, Any]) -> None:
+        """Write down that a result was refused, after the refusal rolled back.
+
+        Emitting inside the mutation that then raises is emitting nothing: the
+        rollback takes the event with it, so a rejected result left no trace
+        and could not reach the counter that is supposed to notice them. This
+        is a separate commit, and it must never turn a refusal into a
+        different error -- the caller is being told no either way.
+        """
+        def body(m: Mutation) -> None:
+            m.emit(EventKind.WORK_RESULT_FENCED, {
+                "work_id": work_id, "neuocyte_id": neuocyte_id,
+                "presented_token": presented, **detail})
+
+        try:
+            self.writer.apply(body, actor=neuocyte_id, bump_version=False)
+        except Exception:  # noqa: BLE001 -- the refusal stands regardless
+            pass
+
     def complete(
         self,
         *,
@@ -242,20 +352,24 @@ class WorkRepo:
         if existing is not None:
             return existing
 
+        rejected: dict[str, Any] = {}
+
         def body(m: Mutation) -> None:
             row = m.sql("SELECT * FROM work_items WHERE work_id = ?", (work_id,)).fetchone()
             if row is None:
                 raise NotFound("unknown work item", work_id=work_id)
             if int(row["fencing_token"]) != int(fencing_token):
-                m.emit(EventKind.WORK_RESULT_FENCED, {
-                    "work_id": work_id, "neuocyte_id": neuocyte_id,
-                    "presented_token": fencing_token, "current_token": row["fencing_token"],
-                })
+                rejected.update({"current_token": row["fencing_token"],
+                                 "status": row["status"],
+                                 "because": "fencing token superseded"})
                 raise Fenced(
                     "neuocyte result rejected: fencing token superseded",
                     work_id=work_id, presented=fencing_token, current=row["fencing_token"],
                 )
             if row["status"] in TERMINAL_WORK:
+                rejected.update({"current_token": row["fencing_token"],
+                                 "status": row["status"],
+                                 "because": f"already {row['status']}"})
                 raise Fenced("work item already terminal", work_id=work_id, status=row["status"])
             blob = m.put_json(result, schema="work.result")
             # Findings that were produced against a state version older than the
@@ -274,9 +388,14 @@ class WorkRepo:
                 "fencing_token": fencing_token, "stale_against": stale_against,
             })
 
-        receipt, _ = self.writer.apply(
-            body, actor=neuocyte_id, operation_id=operation_id, mutation_id=mutation_id,
-        )
+        try:
+            receipt, _ = self.writer.apply(
+                body, actor=neuocyte_id, operation_id=operation_id, mutation_id=mutation_id,
+            )
+        except Fenced:
+            self._record_rejection(work_id=work_id, neuocyte_id=neuocyte_id,
+                                   presented=fencing_token, detail=rejected)
+            raise
         return receipt
 
     def fail(self, *, work_id: str, neuocyte_id: str, fencing_token: int, failure: str,
@@ -286,13 +405,31 @@ class WorkRepo:
         if existing is not None:
             return existing
 
+        rejected: dict[str, Any] = {}
+
         def body(m: Mutation) -> None:
             row = m.sql("SELECT * FROM work_items WHERE work_id = ?", (work_id,)).fetchone()
             if row is None:
                 raise NotFound("unknown work item", work_id=work_id)
             if int(row["fencing_token"]) != int(fencing_token):
+                rejected.update({"current_token": row["fencing_token"],
+                                 "status": row["status"],
+                                 "because": "fencing token superseded"})
                 raise Fenced("stale failure report", work_id=work_id)
-            status = "queued" if requeue and int(row["attempt"]) < 3 else "failed"
+            # A failure may only end an attempt that is still running.
+            # `complete` has always checked this; `fail` did not, and cancel
+            # and completion both clear the lease without changing the token
+            # -- so a late error report carrying that token resurrected
+            # terminal work to `queued`. Cancelled work ran again, and a
+            # committed success quietly lost its terminal status.
+            if row["status"] != "leased":
+                rejected.update({"current_token": row["fencing_token"],
+                                 "status": row["status"],
+                                 "because": f"not leased ({row['status']})"})
+                raise Fenced("work item is not leased", work_id=work_id,
+                             status=row["status"])
+            status = ("queued" if requeue and int(row["attempt"]) < MAX_WORK_ATTEMPTS
+                      else "failed")
             m.sql(
                 "UPDATE work_items SET status = ?, failure = ?, lease_owner = NULL,"
                 " lease_expires = NULL, updated_at = ? WHERE work_id = ?",
@@ -303,17 +440,25 @@ class WorkRepo:
                 "requeued": status == "queued", "attempt": row["attempt"],
             })
 
-        receipt, _ = self.writer.apply(
-            body, actor=neuocyte_id, operation_id=operation_id, mutation_id=mutation_id,
-        )
+        try:
+            receipt, _ = self.writer.apply(
+                body, actor=neuocyte_id, operation_id=operation_id, mutation_id=mutation_id,
+            )
+        except Fenced:
+            self._record_rejection(work_id=work_id, neuocyte_id=neuocyte_id,
+                                   presented=fencing_token, detail=rejected)
+            raise
         return receipt
 
     def cancel(self, *, work_id: str, actor: str, reason: str) -> Receipt:
         def body(m: Mutation) -> None:
+            # The token moves too. Clearing the lease without retiring its
+            # authority left an outstanding worker holding a token the row
+            # still accepted, so its late report could act on cancelled work.
             m.sql(
                 "UPDATE work_items SET status = 'cancelled', failure = ?, lease_owner = NULL,"
-                " lease_expires = NULL, updated_at = ? WHERE work_id = ? AND status NOT IN"
-                " ('done','failed','cancelled')",
+                " lease_expires = NULL, fencing_token = fencing_token + 1, updated_at = ?"
+                " WHERE work_id = ? AND status NOT IN ('done','failed','cancelled')",
                 (reason, time.time(), work_id),
             )
             m.emit(EventKind.WORK_CANCELLED, {"work_id": work_id, "reason": reason})
@@ -322,7 +467,13 @@ class WorkRepo:
         return receipt
 
     def expire_leases(self, *, actor: str = "supervisor", now: float | None = None) -> list[str]:
-        """Return expired leases to the queue. Safe to call repeatedly."""
+        """Return expired leases to the queue, or retire them. Safe to repeat.
+
+        An expired attempt costs the same as a reported one, so it counts
+        against the same ceiling. Without that, an item whose worker died
+        every time cycled forever: ten lease/expiry rounds left it `queued` on
+        attempt ten, with nobody told and nothing decided.
+        """
         now = now if now is not None else time.time()
 
         def body(m: Mutation) -> list[str]:
@@ -333,18 +484,29 @@ class WorkRepo:
             ).fetchall()
             expired = []
             for row in rows:
+                spent = int(row["attempt"]) >= MAX_WORK_ATTEMPTS
                 # Bumping the fencing token here is what makes a late result
                 # from the dead neuocyte unable to commit.
                 m.sql(
-                    "UPDATE work_items SET status = 'queued', lease_owner = NULL,"
-                    " lease_expires = NULL, fencing_token = fencing_token + 1, updated_at = ?"
+                    "UPDATE work_items SET status = ?, lease_owner = NULL,"
+                    " lease_expires = NULL, fencing_token = fencing_token + 1,"
+                    " failure = COALESCE(?, failure), updated_at = ?"
                     " WHERE work_id = ?",
-                    (now, row["work_id"]),
+                    ("failed" if spent else "queued",
+                     (f"no attempt finished: {MAX_WORK_ATTEMPTS} leases expired"
+                      if spent else None),
+                     now, row["work_id"]),
                 )
                 m.emit(EventKind.WORK_LEASE_EXPIRED, {
                     "work_id": row["work_id"], "prior_owner": row["lease_owner"],
-                    "attempt": row["attempt"],
+                    "attempt": row["attempt"], "retired": spent,
                 })
+                if spent:
+                    m.emit(EventKind.WORK_FAILED, {
+                        "work_id": row["work_id"], "neuocyte_id": row["lease_owner"],
+                        "failure": "every lease expired without a result",
+                        "requeued": False, "attempt": row["attempt"],
+                    })
                 expired.append(row["work_id"])
             return expired
 

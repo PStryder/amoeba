@@ -159,6 +159,32 @@ def test_the_wake_is_queued_once_and_then_held_by_the_cooldown(mind):
     assert len(sup.queued) == 1, "a bad hour became a wake storm"
 
 
+def test_the_cooldown_holds_even_once_nothing_is_pending(mind):
+    """The second guard, on its own.
+
+    Two things stop a wake storm: a durable check for a trigger of this kind
+    already waiting, and an in-memory cooldown. While the first wake is still
+    pending the durable check does all the work, so the sibling test above
+    passes with the cooldown removed entirely -- it was evidence for the pair
+    and for neither part.
+
+    Here the role consumes the trigger first, which is what happens in
+    practice the moment Id takes a turn. Nothing is pending, the condition is
+    still true, and only the cooldown stands between a bad hour and a storm.
+    """
+    sup = _Sup(mind, work_failed=9)
+    sup.wake()
+    assert len(sup.queued) == 1
+
+    mind.db.conn.execute("UPDATE role_triggers SET status = 'consumed'")
+    mind.db.conn.commit()
+
+    for _ in range(4):
+        sup.wake()
+    assert len(sup.queued) == 1, (
+        "the cooldown did not hold once the first wake had been consumed")
+
+
 def test_turning_them_off_is_possible(mind):
     sup = _Sup(mind, work_failed=99)
     sup.cfg.scheduler.condition_wakes = False

@@ -65,6 +65,14 @@ class Mutation:
     # scope -- and a harness that could not express that would report SKIP,
     # which proves nothing while looking like success.
     also: list[tuple[str, ...]] = field(default_factory=list)
+    # Trials that are *expected* to survive, by label ("primary", "also[2]"),
+    # each with the reason. A guarantee defended at two layers has mutants
+    # that cannot be observed one at a time: removing either leaves the other
+    # enforcing it, so the tests rightly pass and WEAK would be the wrong
+    # word. Declaring it here is not a suppression -- the run requires such a
+    # trial to survive, and reports a failure if it turns out to be lethal
+    # after all, because then the reason is wrong and it is a real mutant.
+    masked: dict[str, str] = field(default_factory=dict)
 
 
 # Each mutation removes exactly one guarantee, at the layer that owns it.
@@ -93,8 +101,21 @@ MUTATIONS: list[Mutation] = [
         "    missing: list[dict[str, str]] = []\n    refs: list[tuple[str, str, str]] = []",
         "    return []  # MUTANT: never reports missing content\n"
         "    missing: list[dict[str, str]] = []\n    refs: list[tuple[str, str, str]] = []",
-        ["test_missing_blob_is_detected_not_glossed_over"],
-        layer="events.missing_content (the integrity check)",
+        ["test_missing_blob_is_detected_not_glossed_over",
+         "test_a_missing_turn_bundle_is_reported",
+         "test_a_shallow_check_does_not_report_a_clean_bill",
+         "test_every_digest_column_is_either_checked_or_excused"],
+        layer="events.missing_content / Mind.verify_integrity (what a clean bill covers)",
+        note="The primary mutant reports nothing missing. Separately verified to die for an inventory that omits a table -- which is how the real one came to cover six references out of twenty, so a deleted turn bundle was reported as no missing content at all -- and for a shallow check that substitutes an empty list, making \"nothing is missing\" and \"nothing was looked at\" the same answer on the path `id_health` takes.",
+        also=[("src/amoeba/store/events.py",
+               '    ("role_turns", "turn_id", "bundle_blob"),',
+               "    # MUTANT: the turn's bundle goes unchecked"),
+              ("src/amoeba/mind.py",
+               '            "content_checked": bool(deep),',
+               '            "content_checked": True,  # MUTANT: shallow claims a clean bill'),
+              ("src/amoeba/mind.py",
+               '            "missing_content_count": len(missing) if missing is not None else None,',
+               '            "missing_content_count": len(missing or []),  # MUTANT: zero either way')],
     ),
     Mutation(
         "I5", "The hash chain detects mutation",
@@ -135,9 +156,22 @@ MUTATIONS: list[Mutation] = [
         "src/amoeba/store/work_repo.py",
         '                token = int(row["fencing_token"]) + 1',
         '                token = int(row["fencing_token"])  # MUTANT: no bump',
-        ["test_each_lease_advances_the_fencing_token"],
-        layer="WorkRepo.lease (where the token advances)",
-        note="expire_leases also bumps the token, which masked this",
+        ["test_each_lease_advances_the_fencing_token",
+         "test_a_late_failure_cannot_reopen_cancelled_work",
+         "test_a_late_failure_cannot_undo_a_committed_success",
+         "test_cancelling_retires_the_lease_it_cancelled",
+         "test_a_refused_result_is_recorded_even_though_it_was_refused"],
+        layer="WorkRepo.lease / complete / fail / cancel (what a result must present against)",
+        note="expire_leases also bumps the token, which masked the primary. The token alone was never enough: `fail` checked it and nothing else, while cancellation and completion cleared the lease without retiring the token, so a late error report resurrected terminal work to `queued`. Separately verified to die for a failure accepted against work that is not leased, for a cancellation that leaves its lease authoritative, and for a rejection emitted inside the mutation that then rolls it back -- which records nothing at all.",
+        also=[("src/amoeba/store/work_repo.py",
+               '            if row["status"] != "leased":',
+               "            if False:  # MUTANT: a failure may end anything"),
+              ("src/amoeba/store/work_repo.py",
+               "                \" lease_expires = NULL, fencing_token = fencing_token + 1, updated_at = ?\"\n                \" WHERE work_id = ? AND status NOT IN ('done','failed','cancelled')\",",
+               "                \" lease_expires = NULL, updated_at = ?\"  # MUTANT: the lease keeps its authority\n                \" WHERE work_id = ? AND status NOT IN ('done','failed','cancelled')\","),
+              ("src/amoeba/store/work_repo.py",
+               "            self._record_rejection(work_id=work_id, neuocyte_id=neuocyte_id,\n                                   presented=fencing_token, detail=rejected)\n            raise\n        return receipt\n\n    def fail(self",
+               "            raise  # MUTANT: the rejection leaves no trace\n        return receipt\n\n    def fail(self")],
     ),
     Mutation(
         "I11", "A finding pinned to an older state version is flagged",
@@ -398,8 +432,8 @@ MUTATIONS: list[Mutation] = [
     Mutation(
         "I23d", "A fenced neuocyte cannot still run code",
         "src/amoeba/store/work_repo.py",
-        '        if int(row["fencing_token"]) != int(fencing_token):',
-        "        if False:  # MUTANT: stale tokens accepted",
+        '        if int(row["fencing_token"]) != int(fencing_token):\n            raise Fenced("stale fencing token; this neuocyte has been superseded",',
+        '        if False:  # MUTANT: stale tokens accepted\n            raise Fenced("stale fencing token; this neuocyte has been superseded",',
         ["test_a_fenced_neuocyte_cannot_invoke_a_tool"],
         layer="WorkRepo.authorise_tool_call (the fencing check)",
     ),
@@ -508,7 +542,9 @@ MUTATIONS: list[Mutation] = [
         '        landed = _sandbox_manager().write_bytes(sandbox_id, dest, data)',
         '        landed = _sandbox_manager().write_file(\n'
         '            sandbox_id, dest, data.decode("utf-8", "replace"))  # MUTANT',
-        ["test_an_attached_files_digest_is_what_the_neuocyte_can_hash",
+        ["test_a_sandbox_that_lands_something_else_is_refused",
+         "test_a_sandbox_that_lands_the_bytes_is_receipted",
+         "test_an_attached_files_digest_is_what_the_neuocyte_can_hash",
          "test_the_durable_event_carries_the_same_digest",
          "test_attaching_a_binary_file_lands_the_exact_bytes"],
         layer="file_attach (the write into the sandbox, and the check on it)",
@@ -802,9 +838,11 @@ MUTATIONS: list[Mutation] = [
         "I48e", "A credential is required even on loopback",
         "src/amoeba/http_api.py",
         "            client_id = self._external_client()\n"
-        "            if client_id is None:",
+        "            if client_id is None:\n"
+        "                return self._rpc_error(UNAUTHORIZED,",
         "            client_id = self._external_client() or \"default\"\n"
-        "            if False:",
+        "            if False:\n"
+        "                return self._rpc_error(UNAUTHORIZED,",
         ["test_a_credential_is_required_even_on_loopback"],
         layer="_external_rpc (authentication)",
         note="treats binding to 127.0.0.1 as authentication, which it is not: "
@@ -827,8 +865,8 @@ MUTATIONS: list[Mutation] = [
     Mutation(
         "I42c", "A proposal's bytes are preserved as evidence when it is made",
         "src/amoeba/harness_api.py",
-        "        digest = mind.blobs.put(data)",
-        "        digest = sha256_hex(data)  # MUTANT: hash but do not preserve",
+        "        digest = mind.blobs.put(data)\n\n        def body(m: Mutation) -> None:",
+        "        digest = sha256_hex(data)  # MUTANT: hash but do not preserve\n\n        def body(m: Mutation) -> None:",
         ["test_an_undecided_proposal_keeps_its_evidence_and_its_pending_status",
          "test_a_proposal_stays_promotable_after_its_sandbox_is_destroyed"],
         layer="artifact_propose (content-addressing at propose time)",
@@ -894,8 +932,11 @@ MUTATIONS: list[Mutation] = [
         "src/amoeba/promptlib/store.py",
         "        if len(parts) == 1 and not self.versions(namespace):",
         "        if False:  # MUTANT: create_version may establish a root",
-        ["test_runtime_cannot_invent_a_new_root"],
-        layer="create_version (the existence guard)",
+        ["test_runtime_cannot_invent_a_new_root",
+         "test_runtime_cannot_establish_even_a_known_root",
+         "test_a_name_under_a_root_that_does_not_exist_is_refused",
+         "test_only_ego_and_id_are_roots"],
+        layer="create_version (the existence guard) / validate_namespace (the root check)",
         also=[("src/amoeba/promptlib/model.py",
                "    if require_root and parts[0] not in ROOTS:",
                "    if False:  # MUTANT: any top-level name is a root")],
@@ -1061,7 +1102,9 @@ MUTATIONS: list[Mutation] = [
         "    return\n"
         "    raise ValueError(\n"
         "        f\"[{role}].{RETIRED_PROMPT_KEY} is no longer honoured:",
-        ["test_a_configured_system_prompt_is_refused_not_honoured"],
+        ["test_a_configured_system_prompt_is_refused_not_honoured",
+         "test_the_prompt_builder_reads_only_the_library",
+         "test_the_builder_falls_back_to_the_shipped_text_not_to_configuration"],
         layer="config._reject_retired_prompt (the loud refusal)",
         also=[("src/amoeba/roles.py",
                "        return (self.profile_prompt if self.profile_prompt is not None\n"
@@ -1293,7 +1336,8 @@ MUTATIONS: list[Mutation] = [
         "src/amoeba/turn_api.py",
         '                args["operation_id"] = row["operation_id"]',
         '                pass  # MUTANT: the turn keeps its operation to itself',
-        ["test_a_turns_operation_reaches_what_the_role_does"],
+        ["test_a_turns_operation_reaches_what_the_role_does",
+         "test_a_continuation_keeps_the_operation_it_continues"],
         layer="role_tool_invoke (supplying the turn's operation to what it does)",
         note="Defended in two places, so both come out: the injection here and the operation a continuation inherits.",
         also=[("src/amoeba/mailbox.py",
@@ -1332,7 +1376,9 @@ MUTATIONS: list[Mutation] = [
         "src/amoeba/retention.py",
         '        "   AND NOT (expects_answer = 1 AND answer_status IS NULL)",',
         '        "   AND 1 = 1",  # MUTANT: old enough is reason enough',
-        ["test_a_request_still_owed_an_answer_is_never_old_enough"],
+        ["test_a_request_still_owed_an_answer_is_never_old_enough",
+         "test_an_open_turn_is_never_pruned_however_old",
+         "test_a_turn_a_continuation_still_points_at_is_kept"],
         layer="retention.prunable (deciding what may be forgotten)",
         note="Defended in three places and all three come out: a request still owed an answer, a turn still running, and a turn a continuation still points at. Two of these tests originally passed with their guard removed -- each was being saved by the referencing-trigger check instead of the one it was named after.",
         also=[("        if children:\n            continue\n",
@@ -1367,7 +1413,9 @@ MUTATIONS: list[Mutation] = [
         '        candidates = [f"{base}.{wanted}", base] if wanted else [base]',
         "        candidates = [base]  # MUTANT: the specialisation is ignored",
         ["test_a_requested_specialisation_is_bound",
-         "test_maintenance_work_specialises_under_id"],
+         "test_maintenance_work_specialises_under_id",
+         "test_being_born_into_something_else_is_reported",
+         "test_getting_what_was_asked_for_is_not_an_annotation"],
         layer="Neuocyte._bind_profile (which profile a worker is born with)",
         note="Defended twice and both come out: trying the specialisation at all, and recording the fallback when it is unavailable. Silence would make a specialisation that stopped applying indistinguishable from one nobody requested.",
         also=[("        self._report_profile(work_id, bound, fallback)",
@@ -1378,11 +1426,28 @@ MUTATIONS: list[Mutation] = [
         "src/amoeba/waking.py",
         '    if author is not None and author == owner:\n        return None',
         "    pass  # MUTANT: a role wakes itself by posting about its own work",
-        ["test_a_role_posting_about_its_own_work_does_not_wake_itself"],
-        layer="waking.wake_owner_of_work (who a recorded event concerns)",
+        ["test_a_role_posting_about_its_own_work_does_not_wake_itself",
+         "test_work_nobody_owns_wakes_nobody",
+         "test_only_a_persistent_role_can_own_work",
+         "test_a_trigger_cannot_be_queued_for_something_that_is_not_a_role",
+         "test_the_attempt_that_ends_the_work_tells_its_owner",
+         "test_a_failure_that_will_be_retried_tells_nobody"],
+        layer="waking.wake_owner_of_work / fail_work (who a recorded outcome concerns)",
         note="Defended twice and both come out: the ownership rule that decides whether anybody is woken at all, and the author check that stops a role notifying itself in a spiral.",
-        also=[('    if not row or row.get("origin_actor") not in mailbox.ROLES:',
-               '    if not row:  # MUTANT: work nobody owns wakes somebody anyway')],
+        # Two layers refuse a non-role -- the ownership filter and the
+        # enqueue -- and each masked the other: probed on 2026-09-24, removing
+        # either alone changed nothing observable through `wake_owner_of_work`.
+        # Both are kept, and each is negated against a test at its own level,
+        # because a guarantee two layers defend is one neither can be shown to
+        # defend while only the pair is ever asked.
+        also=[("src/amoeba/waking.py",
+               '    if not row or row.get("origin_actor") not in mailbox.ROLES:',
+               "    if not row:  # MUTANT: work nobody owns has an owner"),("src/amoeba/mailbox.py",
+               '    if role not in ROLES:\n        raise InvalidInput("unknown role", role=role, allowed=list(ROLES))\n    if kind not in TRIGGER_KINDS:',
+               '    if False:  # MUTANT: anybody can be queued a trigger\n        raise InvalidInput("unknown role", role=role, allowed=list(ROLES))\n    if kind not in TRIGGER_KINDS:'),
+              ("src/amoeba/supervisor_api.py",
+               "        if outcome in TERMINAL_WORK and not receipt.replayed:",
+               "        if not requeue:  # MUTANT: decide from the request, not the outcome")],
     ),
     Mutation(
         "I93", "Context is reclaimed by dropping finished work, not by cutting the middle out",
@@ -1390,7 +1455,9 @@ MUTATIONS: list[Mutation] = [
         '        if u.status != "settled":\n            continue\n',
         '        if u.status == "never":  # MUTANT: remove a thought still owed an answer\n            continue\n',
         ["test_a_turn_still_owed_an_answer_is_never_removed",
-         "test_a_turn_the_record_cannot_place_is_kept"],
+         "test_a_turn_the_record_cannot_place_is_kept",
+         "test_a_session_sees_only_its_own_spans",
+         "test_a_session_nobody_named_has_no_spans"],
         layer="reconstitution.plan (which context is finished with)",
         note="Defended in three places and all come out: the owed lineage, the unplaceable turn, and the span measured in a previous session whose offsets now describe other context.",
         also=[("src/amoeba/reconstitution.py",
@@ -1408,7 +1475,8 @@ MUTATIONS: list[Mutation] = [
         ["test_a_second_rejuvenation_does_not_resurrect_what_the_first_dropped",
          "test_a_rejuvenated_role_keeps_its_identity_and_gains_a_new_handle",
          "test_every_path_that_replaces_a_session_tells_the_role",
-         "test_a_role_adopts_the_recorded_session_when_it_missed_a_handover"],
+         "test_a_role_adopts_the_recorded_session_when_it_missed_a_handover",
+         "test_a_session_sees_only_its_own_spans"],
         layer="ContextHomeostasis.rejuvenate (recording the session that now exists)",
         note="Only the second rejuvenation can see this: the first reads a handle that is still correct. Defended alongside the span filter, and alongside the other holder of the handle -- the role process, which Id's own rejuvenation request left addressing a closed session for a day and a half.",
         also=[("src/amoeba/homeostasis.py",
@@ -1426,7 +1494,11 @@ MUTATIONS: list[Mutation] = [
         "src/amoeba/store/board_repo.py",
         "        if current is not None and author_token < current:",
         "        if False:  # MUTANT: join on the work item, not the attempt",
-        ["test_a_later_attempt_s_success_does_not_launder_a_fenced_attempt_s_post"],
+        ["test_a_later_attempt_s_success_does_not_launder_a_fenced_attempt_s_post",
+         "test_work_still_running_is_reported_as_such",
+         "test_the_fate_a_reader_was_shown_is_recorded",
+         "test_corroboration_separates_real_support_from_echo",
+         "test_support_from_an_attempt_that_never_finished_is_flagged"],
         layer="BoardRepo._work_provenance (whose fate a post reports)",
         note="The mutant is the plausible wrong implementation, not the absent one: joining the post to `work_items.status` passes every other test here and still renders a fenced attempt's finding as `done`. A work item can fail attempt 1 and complete on attempt 2, and the naive join launders the dead attempt's post through the later success. Defended alongside attaching the provenance at all, and alongside drawing 'unfinished' at the right line -- calling everything that is not done unfinished would discount a finding whose retry may yet corroborate it.",
         also=[('        item.update(self._work_provenance(item.get("work_id"),\n                                          item.get("author_fencing_token")))',
@@ -1475,7 +1547,10 @@ MUTATIONS: list[Mutation] = [
         "src/amoeba/supervisor.py",
         "        if waited >= ceiling:",
         "        if False:  # MUTANT: defer the review for as long as pressure lasts",
-        ["test_a_deferred_heartbeat_eventually_runs_anyway"],
+        ["test_a_deferred_heartbeat_eventually_runs_anyway",
+         "test_pressure_nobody_measured_does_not_hold_a_turn_back",
+         "test_pressure_at_the_threshold_still_holds_a_turn_back",
+         "test_the_deferral_clock_restarts_once_the_pool_settles"],
         layer="Supervisor._heartbeat_deferred_for_pressure (the bound on deferral)",
         note="Defended in three places and all three come out: the ceiling that guarantees the review still happens, the reset that keeps the clock measuring one episode, and the rule that unknown pressure proceeds. The ceiling is the one that matters most -- without it, sustained pressure silently ends Id's self-examination at the moment it is most worth having.",
         also=[('            self._heartbeat_deferred_since.pop(role, None)\n            return None\n\n        since',
@@ -1488,7 +1563,9 @@ MUTATIONS: list[Mutation] = [
         "src/amoeba/ego_api.py",
         '        if row.get("produced_by") != "ego":',
         "        if False:  # MUTANT: withdraw anybody's claim",
-        ["test_only_the_author_may_withdraw_a_claim"],
+        ["test_only_the_author_may_withdraw_a_claim",
+         "test_withdrawing_twice_is_a_no_op_that_keeps_the_first_reason",
+         "test_a_superseded_claim_cannot_then_be_withdrawn"],
         layer="ego_withdraw_conclusion (who may stop making a claim)",
         note="Defended alongside the standing guard: an auditor able to edit the record it audits is not an auditor, and a claim already replaced must not acquire a second account of how it ended.",
         also=[("src/amoeba/store/memory_repo.py",
@@ -1500,7 +1577,8 @@ MUTATIONS: list[Mutation] = [
         "src/amoeba/store/memory_repo.py",
         '            if live is not None:',
         "            if False:  # MUTANT: open a rival dispute about the same claim",
-        ["test_a_repeated_contradiction_does_not_open_a_second_dispute"],
+        ["test_a_repeated_contradiction_does_not_open_a_second_dispute",
+         "test_withdrawing_the_claim_ends_the_dispute_about_it"],
         layer="MemoryRepo.open_disagreement / withdraw_conclusion (one live dispute, ended by the record)",
         note="Defended twice and both come out: the deduplication that stops one unresolved issue becoming twenty rows, and the closure that stops a dispute outliving the claim it is about.",
         also=[('            self._close_disputes_in(\n                m, subject_kind="conclusion", subject_id=conclusion_id,\n                resolution="retracted", actor=actor,\n                detail=f"the claim was withdrawn by {actor}")',
@@ -1532,12 +1610,12 @@ MUTATIONS: list[Mutation] = [
     Mutation(
         "I104", "The operator console is valid JavaScript",
         "src/amoeba/dashboard.py",
-        " +\n",
-        "\n",
+        '  if (!id) throw new Error("the message was accepted but Amoeba returned " +\n',
+        '  if (!id) throw new Error("the message was accepted but Amoeba returned"\n',
         ["test_the_dashboard_script_has_no_python_string_concatenation",
          "test_the_dashboard_script_parses_as_javascript"],
         layer="DASHBOARD_HTML (whether the embedded script parses at all)",
-        note="The mutant restores the Python habit that broke the console: drop one `+` between wrapped string literals. It is invisible in Python, fatal in JavaScript, and takes the whole page down rather than the one line it appears on.",
+        note="The mutant restores the Python habit that broke the console: drop one `+` between wrapped string *literals*. It is invisible in Python, fatal in JavaScript, and takes the whole page down rather than the one line it appears on. The literals matter -- dropping a `+` before a parenthesised expression instead leaves `\"a\" (expr)`, which is a call on a string: valid syntax, a runtime failure, and invisible to `node --check`. Verified 2026-09-24 after the first attempt at this mutant did exactly that and survived.",
     ),
     Mutation(
         "I105", "The Operator contributes to the room and cannot speak as either mind in it",
@@ -1558,7 +1636,8 @@ MUTATIONS: list[Mutation] = [
         "        self._entries: deque[dict[str, Any]] = deque(maxlen=maxlen)",
         "        self._entries: deque[dict[str, Any]] = deque()  # MUTANT: unbounded",
         ["test_the_room_is_bounded",
-         "test_a_room_message_is_durably_recorded_even_though_the_view_is_not"],
+         "test_a_room_message_is_durably_recorded_even_though_the_view_is_not",
+         "test_each_direction_of_the_backchannel_lands_in_the_other_mind"],
         layer="Room (a viewport that is allowed to forget, and must not be the record)",
         note="An unbounded viewport is a leak wearing a feature's clothes, and a viewport that never forgets starts being treated as history. The second test holds the other end: durable causal recording is not this buffer's job and must survive without it.",
         also=[("src/amoeba/supervisor_api.py",
@@ -1816,7 +1895,10 @@ MUTATIONS: list[Mutation] = [
         '            "SELECT kind, COUNT(*) AS n FROM events WHERE seq > ?"\n            "   AND kind LIKE \'role.%\'"  # MUTANT: only what we thought mattered\n            " GROUP BY kind ORDER BY n DESC", (int(since),))}',
         ["test_every_kind_since_the_watermark_is_counted",
          "test_what_is_not_itemised_is_still_counted",
-         "test_a_live_quiet_review_is_cheap"],
+         "test_a_live_quiet_review_is_cheap",
+         "test_the_first_review_of_a_process_says_that_is_what_it_is",
+         "test_a_bundle_with_an_unusable_ceiling_has_no_ceiling",
+         "test_a_bundle_whose_ceilings_agree_keeps_the_smallest"],
         layer="heartbeat.measure / the heartbeat trigger (what a review is told changed)",
         note="The primary mutant reports only the kinds somebody chose, which is how a cheap review blinds the one mind that watches for what nobody announced. Separately verified to die for a dropped tail, for a first review claiming quiet, for owed work not counting, for a watermark that restarts with the process, for a ceiling that binds a bundled question, and for a trigger that carries no digest at all.",
         also=[("src/amoeba/heartbeat.py",
@@ -1836,7 +1918,10 @@ MUTATIONS: list[Mutation] = [
         "            if True:  # MUTANT: the thirty-seven hours",
         ["test_a_role_that_cannot_think_is_recorded_and_repaired",
          "test_repairs_are_bounded_and_the_alarm_outlasts_them",
-         "test_the_pulse_reports_a_role_that_cannot_think"],
+         "test_the_pulse_reports_a_role_that_cannot_think",
+         "test_a_turn_that_stopped_for_pressure_is_not_a_failed_turn",
+         "test_consecutive_real_failures_still_count",
+         "test_the_pulse_can_name_a_role_that_cannot_think"],
         layer="Supervisor._supervise_thinking / mailbox.failing_streak (whether a role's turns work)",
         note="The primary mutant is what shipped: a role failing every turn while answering every probe, unnoticed for thirty-seven hours. Separately verified to die for a limit counted as a failure, a success that does not clear the streak, unbounded restarts, a streak reported on every pass, and a pulse that does not say it.",
         also=[("src/amoeba/mailbox.py",
@@ -1876,7 +1961,10 @@ MUTATIONS: list[Mutation] = [
         "    if True:  # MUTANT: the clock is the only sense again\n        return None",
         ["test_a_burst_of_failures_wakes_the_inward_mind",
          "test_the_wake_is_queued_once_and_then_held_by_the_cooldown",
-         "test_a_role_is_never_woken_about_its_own_wedging"],
+         "test_a_role_is_never_woken_about_its_own_wedging",
+         "test_pressure_at_the_threshold_is_a_condition_worth_waking_for",
+         "test_pressure_below_the_threshold_earns_nothing",
+         "test_the_cooldown_holds_even_once_nothing_is_pending"],
         layer="conditions.detect / Supervisor._wake_on_conditions (what earns a turn besides the clock)",
         note="The primary mutant is what shipped: failures visible to nobody until the next review, which under pressure is deferred. Separately verified to die for pressure that never wakes, for an absent measurement read as pressure, for waking a role about its own wedging, for a cooldown that does not hold, and for news repeated while still unread.",
         also=[("src/amoeba/conditions.py",
@@ -1931,7 +2019,8 @@ MUTATIONS: list[Mutation] = [
         '                payload={"message": message[:16000],  # MUTANT: silently clipped',
         ["test_a_long_request_is_not_quietly_shortened",
          "test_an_investigation_keeps_its_constraints",
-         "test_an_investigation_carries_its_request_context"],
+         "test_an_investigation_carries_its_request_context",
+         "test_the_investigation_branch_passes_what_it_was_given"],
         layer="ego_converse / ego_investigate payloads (what reaches cognition)",
         note="The primary mutant restores the silent clip that dropped trailing instructions from valid requests. Separately verified to die for an investigation clipped at eight thousand, and for one told nothing about the request it is serving.",
         also=[("src/amoeba/supervisor_api.py",
@@ -2016,6 +2105,77 @@ MUTATIONS: list[Mutation] = [
         " AND ? IS NOT NULL ORDER BY created_at")  # MUTANT: only the input row''')],
     ),
     Mutation(
+        "I134", "Work is dispatched only if it can be worked on, and work that cannot be is ended",
+        "src/amoeba/store/work_repo.py",
+        "            if not deps or self.ready(self.conn.execute, deps):\n                return row[\"work_id\"]",
+        "            return row[\"work_id\"]  # MUTANT: serve the head of the queue",
+        ["test_a_ready_item_is_not_hidden_behind_a_blocked_one",
+         "test_work_cannot_depend_on_something_that_does_not_exist",
+         "test_a_dependency_that_failed_ends_the_work_waiting_on_it",
+         "test_work_whose_dependency_is_still_running_is_left_alone",
+         "test_leases_that_keep_expiring_do_not_cycle_forever"],
+        layer="WorkRepo.next_ready / admit / retire_blocked / expire_leases (what the queue can actually serve)",
+        note="The primary mutant is the reported defect: dispatch chose the highest-priority queued item and the targeted lease then refused it for being unready, so a blocked head of queue hid ready work behind it and nothing was served. Separately verified to die for a dependency on work that does not exist being admitted, for a dependent left queued forever after its dependency failed or was cancelled, and for an expired lease that counts against no ceiling -- ten rounds left the item queued on attempt ten with nothing decided and nobody told.",
+        also=[("src/amoeba/store/work_repo.py",
+               "        if unknown:\n            raise InvalidInput(\"depends on work that does not exist\",\n                               depends_on=unknown)",
+               "        if False:  # MUTANT: admit a dependency that cannot exist\n            raise InvalidInput(\"depends on work that does not exist\",\n                               depends_on=unknown)"),
+              ("src/amoeba/store/work_repo.py",
+               "        blocked = [(wid, dead) for wid, dead in blocked if dead]",
+               "        blocked = []  # MUTANT: a dead dependency is just a long wait"),
+              ("src/amoeba/store/work_repo.py",
+               "                spent = int(row[\"attempt\"]) >= MAX_WORK_ATTEMPTS",
+               "                spent = False  # MUTANT: expiry costs nothing")],
+    ),
+    Mutation(
+        "I135", "A binding describes the sampling that was applied, and a refusal says what it is",
+        "src/amoeba/roles.py",
+        "                            seed=seed, **applied)",
+        "                            seed=seed)  # MUTANT: the profile's sampling is decorative",
+        ["test_the_sampling_a_profile_binds_reaches_the_call",
+         "test_a_setting_the_profile_does_not_bind_is_not_sent",
+         "test_pressure_is_recognised_by_what_the_refusal_says_it_is",
+         "test_a_different_shortage_is_not_pressure",
+         "test_the_old_wording_is_still_understood",
+         "test_the_arbiter_declares_its_own_refusal"],
+        layer="RoleProcess._infer / _is_context_pressure (what reaches the model, and what a refusal means)",
+        note="The primary mutant is the audited defect: the Id profile declares top_p 0.9, the service default is 0.95, and only max_tokens, temperature and seed were forwarded -- so the durable binding described sampling nobody applied. The existing test compared the variable map against the backend argument map, which is a statement about two dictionaries and cannot see a call site. Separately verified to die for a refusal that no longer declares itself, which returns the pressure/failure decision to matching words in a sentence, and for a classifier that accepts any resource exhaustion -- the pool can be short of slots, which is a different shortage.",
+        also=[("src/amoeba/arbiter.py",
+               '                pressure="context_pressure",',
+               "                # MUTANT: the refusal no longer says what it is"),
+              ("src/amoeba/roles.py",
+               '    if details.get("pressure") == CONTEXT_PRESSURE_KIND:\n        return True',
+               '    if details.get("remote_code") == "resource_exhausted":\n        return True  # MUTANT: any shortage is pressure')],
+    ),
+    Mutation(
+        "I136", "A worker is reported as saying what it said, and shown what the record says it was shown",
+        "src/amoeba/neuocyte.py",
+        '                post_type="finding" if parsed.get("parsed") else "note",',
+        '                post_type="finding",  # MUTANT: unshaped output is a finding',
+        ["test_unshaped_output_is_posted_as_a_note_not_a_finding",
+         "test_a_confidence_nobody_stated_is_not_invented",
+         "test_a_confidence_field_with_nothing_in_it_does_not_crash",
+         "test_a_post_is_shown_with_what_became_of_its_attempt",
+         "test_attempts_that_posted_nothing_are_still_reported",
+         "test_a_retry_is_told_it_is_one"],
+        layer="neuocyte._parse_finding / _publish_finding / _board_context (the worker's record and its input)",
+        note="The primary mutant publishes output that had no FINDING: line as a finding. Separately verified to die for a confidence nobody stated being invented at 0.5, for an empty CONFIDENCE: field crashing the parse and spending a retry, for a post shown without what became of the attempt that wrote it -- which the read receipt already froze as shown -- for silent attempts going unmentioned, so a worker cannot tell nobody has looked from three having died here, and for a retry that is not told it is one.",
+        also=[("src/amoeba/neuocyte.py",
+               "    confidence: float | None = None\n    for line in clean.splitlines():",
+               "    confidence = 0.5  # MUTANT: a number nobody stated\n    for line in clean.splitlines():"),
+              ("src/amoeba/neuocyte.py",
+               "            words = line.split(\":\", 1)[1].strip().split()\n            if words:",
+               "            words = [line.split(\":\", 1)[1].strip().split()[0]]  # MUTANT\n            if words:"),
+              ("src/amoeba/neuocyte.py",
+               "            fate, note = p.get(\"attempt_fate\"), p.get(\"work_note\")",
+               "            fate, note = None, None  # MUTANT: the fate is not shown"),
+              ("src/amoeba/neuocyte.py",
+               "            if silent:\n                return NO_BOARD_BLOCK + SILENT_BLOCK.format(count=silent), []",
+               "            if False:  # MUTANT: silence says nothing\n                return NO_BOARD_BLOCK + SILENT_BLOCK.format(count=silent), []"),
+              ("src/amoeba/neuocyte.py",
+               "        attempt = int(item.get(\"attempt\") or 1)\n        if attempt <= 1:",
+               "        attempt = int(item.get(\"attempt\") or 1)\n        if True:  # MUTANT: every attempt looks like the first")],
+    ),
+    Mutation(
         "I111", "A generation is admitted only if its whole allowance fits",
         "src/amoeba/arbiter.py",
         "        if prompt_tokens + capped > ceiling:",
@@ -2081,6 +2241,10 @@ def main() -> int:
     ap.add_argument("--only", default="", help="comma-separated invariant ids")
     ap.add_argument("--primaries-only", action="store_true",
                     help="skip the secondary mutants (faster, and says less)")
+    ap.add_argument("--no-baseline", action="store_true",
+                    help="do not check the named tests pass before mutating "
+                         "(faster, and cannot tell a lethal mutant from a "
+                         "test that was already failing)")
     args = ap.parse_args()
     wanted = {x.strip() for x in args.only.split(",") if x.strip()}
     muts = [m for m in MUTATIONS if not wanted or m.invariant in wanted]
@@ -2104,6 +2268,15 @@ def main() -> int:
     results = []          # (mutation, label, verdict, detail)
     try:
         for m in muts:
+            # Green before red. Without this, a test that was already failing
+            # fails under every mutant and reports each as lethal.
+            if not args.no_baseline:
+                passed, tail = run_tests(m.tests)
+                if not passed:
+                    results.append((m, "baseline", "BASELINE", tail))
+                    print(f"BASE {m.invariant:8s} its tests do not pass "
+                          f"unmutated -> {m.tests}")
+                    continue
             trials = trials_for(m)
             if args.primaries_only:
                 trials = trials[:1]
@@ -2118,10 +2291,21 @@ def main() -> int:
                 finally:
                     for rel, orig in originals.items():
                         (ROOT / rel).write_text(orig, encoding="utf-8")
-                if survived:
+                excuse = m.masked.get(label)
+                if survived and excuse:
+                    results.append((m, label, "MASKED", excuse))
+                    print(f"MASK {m.invariant:8s} {label}: survives as declared "
+                          f"-- {excuse}")
+                elif survived:
                     results.append((m, label, "WEAK", tail))
                     print(f"WEAK {m.invariant:8s} {label}: tests PASSED with the "
                           f"guarantee removed -> {m.tests}")
+                elif excuse:
+                    # Declared unobservable and observed. The declaration is
+                    # the thing that is wrong.
+                    results.append((m, label, "MISDECLARED", excuse))
+                    print(f"BAD! {m.invariant:8s} {label}: declared masked but "
+                          f"its tests FAIL without it -- it is a real mutant")
                 else:
                     results.append((m, label, "GOOD", ""))
                     print(f"GOOD {m.invariant:8s} {label}")
@@ -2133,19 +2317,33 @@ def main() -> int:
 
     weak = [r for r in results if r[2] == "WEAK"]
     skipped = [r for r in results if r[2] == "SKIP"]
-    # An invariant is defended only if every mutant it declares was lethal.
-    bad = {r[0].invariant for r in results if r[2] != "GOOD"}
+    masked = [r for r in results if r[2] == "MASKED"]
+    misdeclared = [r for r in results if r[2] == "MISDECLARED"]
+    unbaselined = [r for r in results if r[2] == "BASELINE"]
+    # An invariant is defended when every mutant it declares was lethal, or
+    # was declared unobservable and behaved that way.
+    bad = {r[0].invariant for r in results if r[2] not in ("GOOD", "MASKED")}
+    for m, _label, _v, _d in unbaselined:
+        bad.add(m.invariant)
     defended = {m.invariant for m in muts} - bad
 
     print(f"\n{'='*70}")
     print(f"{len(results)} mutants run: {len(defended)} invariants fully defended, "
-          f"{len(weak)} WEAK mutant(s), {len(skipped)} skipped")
+          f"{len(weak)} WEAK mutant(s), {len(masked)} masked as declared, "
+          f"{len(misdeclared)} misdeclared, {len(unbaselined)} with failing "
+          f"tests, {len(skipped)} skipped")
+    for m, _label, _v, _d in unbaselined:
+        print(f"  BASELINE {m.invariant}: its named tests do not pass "
+              f"before any mutation -- nothing it reports would mean anything")
+    for m, label, _, why in misdeclared:
+        print(f"  MISDECLARED {m.invariant} [{label}]: it is lethal, so this "
+              f"is not masked: {why}")
     for m, label, _, tail in weak:
         print(f"  WEAK {m.invariant} [{label}]: {m.claim}")
         print(f"       layer: {m.layer}")
     for m, label, _, why in skipped:
         print(f"  SKIP {m.invariant} [{label}]: {why}")
-    return 1 if weak or skipped else 0
+    return 1 if weak or skipped or misdeclared or unbaselined else 0
 
 
 if __name__ == "__main__":

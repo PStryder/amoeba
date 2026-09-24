@@ -441,8 +441,16 @@ def _make_handler(api: ApiServer) -> type[BaseHTTPRequestHandler]:  # noqa: C901
             # Identity is bound here, from the credential. Anything the caller
             # sent under these names is discarded rather than honoured.
             for forged in ("client_id", "actor", "role", "caller", "scope",
-                           "from_role", "origin_actor", "operator"):
+                           "from_role", "origin_actor", "operator",
+                           # Which door a request came through is something
+                           # this adapter knows and the caller asserts. It
+                           # carried no privilege, but it was recorded as
+                           # provenance, and provenance the subject supplies
+                           # is not provenance.
+                           "surface"):
                 params.pop(forged, None)
+            if method == "io_submit":
+                params["surface"] = "api"
             try:
                 result = api.external.call(method, client_id=client_id, **params)
             except MindError as exc:

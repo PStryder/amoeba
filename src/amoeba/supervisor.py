@@ -881,9 +881,14 @@ class Supervisor:
         assert self.mind is not None
         with self._sched_lock:
             self._reap_neuocytes()
+            blocked = self.mind.work.retire_blocked()
+            if blocked:
+                self.log.info("work retired for unreachable dependencies: %s", blocked)
+                self._report_retired_work(blocked)
             expired = self.mind.work.expire_leases()
             if expired:
-                self.log.info("expired leases requeued: %s", expired)
+                self.log.info("expired leases returned or retired: %s", expired)
+                self._report_retired_work(expired)
             snapshot = self.resource_snapshot()
             work_class = self.arbiter.next_class_to_serve(snapshot)
             if work_class is not None:
@@ -950,13 +955,37 @@ class Supervisor:
             if proc.returncode not in (0, None):
                 self.log.warning("neuocyte %s exited rc=%s", wid, proc.returncode)
 
+    def _report_retired_work(self, work_ids: list[str]) -> None:
+        """Tell the owner about work that expiry ended rather than returned.
+
+        An expired lease used to be purely an internal retry, so nothing was
+        reported. Now that attempts are bounded, the last expiry is an
+        outcome, and an outcome nobody is told about is the same defect as a
+        terminal failure that sends no trigger.
+        """
+        assert self.mind is not None
+        from .waking import wake_owner_of_work
+
+        marks = ",".join("?" * len(work_ids))
+        rows = self.mind.db.conn.execute(
+            f"SELECT work_id, status FROM work_items WHERE work_id IN ({marks})"
+            "   AND status = 'failed'", work_ids).fetchall()
+        for row in rows:
+            try:
+                wake_owner_of_work(
+                    self, self.mind, row["work_id"], kind="work_failed",
+                    summary=(f"work {row['work_id']} you requested was given up "
+                             "on: every attempt's lease expired without a result"))
+            except Exception:  # noqa: BLE001 -- the outcome stands either way
+                self.log.exception("could not report retired work %s",
+                                   row["work_id"])
+
     def _dispatch_neuocyte(self, work_class: str) -> None:
         assert self.mind is not None
-        row = self.mind.db.conn.execute(
-            "SELECT work_id FROM work_items WHERE status = 'queued' AND work_class = ?"
-            " ORDER BY priority DESC, created_at ASC LIMIT 1", (work_class,),
-        ).fetchone()
-        if row is None:
+        # The readiness rule belongs to the work repository, so dispatch and
+        # the lease cannot disagree about which item is next.
+        work_id = self.mind.work.next_ready(work_class=work_class)
+        if work_id is None:
             return
         neuocyte_id = new_id("nc")
         env = dict(os.environ)
@@ -964,7 +993,7 @@ class Supervisor:
             [str(Path(__file__).resolve().parents[1]), env.get("PYTHONPATH", "")]
         )
         cmd = [sys.executable, "-m", "amoeba.neuocyte", "--neuocyte-id", neuocyte_id,
-               "--work-id", row["work_id"]]
+               "--work-id", work_id]
         if self.cfg.source_path:
             cmd += ["--config", str(self.cfg.source_path)]
         flags = subprocess.CREATE_NEW_PROCESS_GROUP if sys.platform == "win32" else 0
@@ -972,7 +1001,7 @@ class Supervisor:
                                 stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
                                 cwd=str(Path(__file__).resolve().parents[2]))
         self.neuocytes[neuocyte_id] = {
-            "proc": proc, "work_class": work_class, "work_id": row["work_id"],
+            "proc": proc, "work_class": work_class, "work_id": work_id,
             "started": time.time(),
             "hard_deadline": time.time() + self.cfg.arbiter.neuocyte_wall_seconds + 30,
         }

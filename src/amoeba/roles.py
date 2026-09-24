@@ -162,15 +162,30 @@ overwritten regardless of what the model asked for.
 CONTEXT_PRESSURE_MARKERS = ("context budget", "context window",
                             "exceeds the configured context", "context full")
 
+# What a refusal says about itself when it is the context filling up. Carried
+# in the error's details, which survive the RPC boundary intact even though
+# the exception type does not.
+CONTEXT_PRESSURE_KIND = "context_pressure"
+
 
 def _is_context_pressure(exc: BaseException) -> bool:
     """Is this the context filling up rather than something breaking?
 
-    Matched on the message because the inference service reports it across an
-    RPC boundary, where the original exception type does not survive. Narrow
-    on purpose: a broad match here would route real failures into the
-    homeostasis path and hide them.
+    Asked of the refusal itself first. This used to be decided purely by
+    matching words in the message, which made the difference between "rejuvenate
+    and carry on" and "this role has failed" a property of how a sentence was
+    phrased: rewording a refusal anywhere in the stack silently rerouted a
+    healthy organism at a known limit into the crash path.
+
+    The wording is still matched, second, because refusals raised by code that
+    predates the marker still say what they are in prose, and losing those
+    would be the same regression from the other direction. A generic
+    resource-exhaustion code is deliberately *not* enough on its own: the pool
+    can be short of sessions or slots, which is a different shortage.
     """
+    details = getattr(exc, "details", None) or {}
+    if details.get("pressure") == CONTEXT_PRESSURE_KIND:
+        return True
     text = str(exc).lower()
     return any(marker in text for marker in CONTEXT_PRESSURE_MARKERS)
 
@@ -654,9 +669,22 @@ class RoleProcess:
                 "ingest_messages", session_id=self.session_id,
                 messages=[{"role": "user", "content": user_text}],
                 add_assistant=True)
+        # Everything else the profile bound. Only `max_tokens`, `temperature`
+        # and `seed` used to be forwarded, so a profile declaring `top_p: 0.9`
+        # generated at the service default of 0.95 while the durable record
+        # said 0.9 -- a binding that described sampling nobody applied. The
+        # test for it compared key sets rather than the call, so it could not
+        # have noticed.
+        applied: dict[str, Any] = {}
+        for name, cast in (("top_p", float), ("top_k", int)):
+            if settings.get(name) is not None:
+                applied[name] = cast(settings[name])
+        stops = settings.get("stop_strings", settings.get("stop"))
+        if isinstance(stops, (list, tuple)) and stops:
+            applied["stop_strings"] = [str(s) for s in stops]
         out = self.inf.call("generate", session_id=self.session_id,
                             max_tokens=max_tokens, temperature=temperature,
-                            seed=seed)
+                            seed=seed, **applied)
         self.turns += 1
         return out
 

@@ -175,6 +175,41 @@ def test_runtime_cannot_invent_a_new_root(mind, library):
         assert name not in store.namespaces()
 
 
+def test_a_name_under_a_root_that_does_not_exist_is_refused(mind, library):
+    """Through the store, where several guards agree on the answer."""
+    store, _ = library
+    for name in ("godmode.child", "operator.notes", "supervisor.x.y"):
+        with pytest.raises(NamespaceError):
+            mind.writer.apply(lambda m, n=name: store.create_runtime_version(
+                m, namespace=n, prompt_mode="replace", prompt_text="x",
+                origin="id", created_by="id"), actor="id")
+        assert name not in store.namespaces()
+
+
+def test_only_ego_and_id_are_roots():
+    """The rule itself, where it lives.
+
+    Asked of `validate_namespace` directly because every route into it is
+    already guarded: a top-level name is refused for having no versions, and
+    a nested one for having no parent. The root check is therefore
+    unobservable through the store with any name at all -- which makes the
+    store the wrong place to assert it, not the rule the wrong rule.
+    """
+    from amoeba.promptlib.model import ROOTS, validate_namespace
+
+    assert set(ROOTS) == {"ego", "id"}
+    for good in ("ego", "id", "ego.neuocyte", "id.neuocyte.analyst"):
+        assert validate_namespace(good)[0] in ROOTS
+
+    for bad in ("godmode", "godmode.child", "operator.notes", "supervisor.x.y"):
+        with pytest.raises(NamespaceError):
+            validate_namespace(bad)
+
+    # ...and the caller that deliberately does not require one still may.
+    assert validate_namespace("godmode.child", require_root=False) == (
+        "godmode", "child")
+
+
 def test_runtime_cannot_establish_even_a_known_root(mind):
     """The second defence, isolated: `ego` is a legal name but must not exist.
 

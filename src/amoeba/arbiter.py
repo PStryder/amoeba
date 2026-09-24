@@ -265,11 +265,11 @@ class Arbiter:
         unlimited: a session nobody assigned a budget is a bug, and silently
         granting it the whole pool would hide that bug behind good behaviour.
 
-        The refusal wording matters. `roles.CONTEXT_PRESSURE_MARKERS` matches
-        "context budget" and "exceeds the configured context" to tell a full
-        context from a broken one across an RPC boundary where the exception
-        type does not survive, so rewording this sends a healthy organism at a
-        known limit into the crash path instead of into rejuvenation.
+        This refusal carries `pressure="context_pressure"` in its details,
+        which is what `roles._is_context_pressure` reads. The wording is still
+        matched as a fallback for refusals raised by code that does not carry
+        the marker, so rewording those remains load-bearing -- but not this
+        one, and not any refusal that declares itself.
         """
         cfg = self.cfg
         ceiling = int(budget_tokens) if budget_tokens else cfg.max_prompt_tokens
@@ -295,6 +295,10 @@ class Arbiter:
             raise ResourceExhausted(
                 "prompt plus its generation allowance exceeds the configured "
                 "context budget",
+                # Says what it is, so the classifier does not have to read the
+                # sentence. The wording still matters for refusals raised
+                # elsewhere, but this one no longer depends on it.
+                pressure="context_pressure",
                 prompt_tokens=prompt_tokens, generation_allowance=capped,
                 max_prompt_tokens=ceiling, budget_basis=budget_basis,
                 budget_source=("session" if budget_tokens else "global default"),

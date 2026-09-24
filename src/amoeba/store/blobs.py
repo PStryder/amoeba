@@ -18,6 +18,37 @@ from ..errors import IntegrityError
 from ..ids import sha256_hex
 
 
+def _fsync_dir(path: Path) -> None:
+    """Flush the directory entry the rename just created.
+
+    I4 says bytes are durable before anything references them, and fsyncing
+    the file is only half of that: after a crash the file can be intact and
+    its name absent, because the rename lived in an unflushed directory
+    entry. An audit on 2026-09-24 noted the missing step and, correctly,
+    declined to accept "it is fine on NTFS" from a code reading.
+
+    POSIX exposes this directly. Windows does not -- a directory cannot be
+    opened with `os.open` for fsync, and flushing the volume is both
+    privileged and far heavier than this warrants -- so there it is a no-op
+    and the guarantee rests on NTFS metadata journalling, which orders the
+    rename but does not promise it is on the platter. That is a real
+    difference between the platforms and is written down rather than assumed
+    away.
+    """
+    if os.name != "posix":
+        return
+    try:
+        fd = os.open(path, os.O_RDONLY)
+    except OSError:
+        return
+    try:
+        os.fsync(fd)
+    except OSError:
+        pass
+    finally:
+        os.close(fd)
+
+
 class BlobStore:
     def __init__(self, root: Path) -> None:
         self.root = Path(root)
@@ -41,6 +72,7 @@ class BlobStore:
                 fh.flush()
                 os.fsync(fh.fileno())
             os.replace(tmp, target)
+            _fsync_dir(target.parent)
         except BaseException:
             try:
                 os.unlink(tmp)

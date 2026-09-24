@@ -172,6 +172,18 @@ class BoardRepo:
                 f"no attempt fate; the work item is {status!r}")
             return out
 
+        if status == "cancelled":
+            # Checked before supersession: cancelling now retires the lease's
+            # authority by moving the token, so every post from the cancelled
+            # attempt would otherwise read as "a later attempt superseded
+            # this" -- and there is no later attempt. The work was called off.
+            out["attempt_fate"] = "cancelled"
+            out["attempt_unfinished"] = True
+            out["work_note"] = (
+                "the work item was cancelled; this attempt did not finish, "
+                "and no later attempt replaced it")
+            return out
+
         if current is not None and author_token < current:
             # A later attempt superseded this author. Whatever became of the
             # work afterwards was not this attempt's doing, and its finding

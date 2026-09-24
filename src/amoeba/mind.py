@@ -18,7 +18,7 @@ from .ids import new_id
 from .logging_setup import get_logger
 from .store.blobs import BlobStore
 from .store.db import Database
-from .store.events import EventKind, missing_content, read_events, resolve_provenance, verify_chain
+from .store.events import CONTENT_REFERENCES, EventKind, missing_content, read_events, resolve_provenance, verify_chain
 from .store.board_repo import BoardRepo
 from .store.memory_repo import MemoryRepo
 from .store.work_repo import WorkRepo
@@ -58,7 +58,7 @@ class Mind:
         checkpoints exported to independent append-only storage.
         """
         ok, bad = verify_chain(self.db.conn)
-        missing = missing_content(self.db.conn, self.blobs) if deep else []
+        missing = missing_content(self.db.conn, self.blobs) if deep else None
         counts = {
             row["k"]: row["n"]
             for row in self.db.conn.execute(
@@ -75,8 +75,15 @@ class Mind:
         return {
             "hash_chain_ok": ok,
             "first_bad_event": bad,
-            "missing_content": missing,
-            "missing_content_count": len(missing),
+            # A shallow check substituted an empty list, so "nothing missing"
+            # and "nothing looked at" read identically -- and `id_health` uses
+            # the shallow path. A count of zero now means the references below
+            # were checked and were all present.
+            "content_checked": bool(deep),
+            "content_references_checked": (
+                len(CONTENT_REFERENCES) if deep else 0),
+            "missing_content": missing or [],
+            "missing_content_count": len(missing) if missing is not None else None,
             "counts": counts,
             "state_version": self.state_version(),
             "caveat": ("hash chaining detects ordinary mutation; it is not protection "

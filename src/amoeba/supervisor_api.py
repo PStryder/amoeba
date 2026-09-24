@@ -23,6 +23,7 @@ from .errors import (
 )
 from .ids import new_id
 from .store.events import EventKind, read_events
+from .store.work_repo import TERMINAL_WORK
 from .store.writer import Mutation
 
 if TYPE_CHECKING:
@@ -874,13 +875,23 @@ def build(sup: "Supervisor") -> dict[str, Any]:
                                  fencing_token=fencing_token, failure=failure,
                                  requeue=requeue)
         sup.release_work_sandbox(work_id, reason="work failed")
-        if not requeue:
-            # A requeued failure is an attempt, not an outcome: waking the
-            # owner for it would report a conclusion that has not been reached.
+        # Read the outcome that was committed, rather than deciding from the
+        # caller's request. `requeue=True` -- which is the neuocyte's default
+        # -- still retires the item once its attempts run out, and taking the
+        # notification from the flag meant the attempt that ended the work
+        # told nobody: the owner waited on a `failed` item for a message that
+        # was never going to come.
+        row = mind.db.conn.execute(
+            "SELECT status FROM work_items WHERE work_id = ?", (work_id,)).fetchone()
+        outcome = row["status"] if row is not None else None
+        # A requeued failure is an attempt, not an outcome: waking the owner
+        # for it would report a conclusion that has not been reached. Replay
+        # of a receipt is not a second outcome either.
+        if outcome in TERMINAL_WORK and not receipt.replayed:
             _wake_owner_of_work(
                 work_id, kind="work_failed",
                 summary=f"work {work_id} you requested failed: {failure[:200]}")
-        return {"receipt_id": receipt.receipt_id}
+        return {"receipt_id": receipt.receipt_id, "outcome": outcome}
 
     def cancel_work(*, work_id: str, actor: str = "supervisor", reason: str = ""
                     ) -> dict[str, Any]:

@@ -186,7 +186,15 @@ account — the same boundary documented in `SANDBOX.md`. This separates
 authority between *callers*, not against a determined process already running
 as the user.
 
-The external surface currently runs cognition synchronously on a worker thread
-per interaction. There is no per-client rate limit or concurrency cap yet; a
-client can queue as many interactions as it likes. That is a resource-policy
-gap, not an authority gap, and it belongs with the Arbiter.
+Cognition itself is no longer synchronous: an external request is enqueued as
+a trigger and answered at a role's turn boundary, and the answer is published
+onto the interaction from the durable record (I129) rather than by whoever
+happened to be waiting. What each interaction still has is a thread that
+*watches* for that answer so it can be published sooner; when its patience runs
+out the thread stops watching and reconciliation delivers instead, which is
+recorded as `interaction.wait_expired` and changes nothing about the request.
+
+So the resource caveat stands, for the watchers rather than for the thinking.
+There is no per-client rate limit or concurrency cap yet; a client can queue as
+many interactions as it likes. That is a resource-policy gap, not an authority
+gap, and it belongs with the Arbiter.

@@ -83,19 +83,35 @@ def _doctor(cfg: Any) -> int:
               "backend.kind is 'deterministic': output is a hash function, "
               "NOT model inference")
 
-    try:
-        from .mind import Mind
+    # Read-only, and never on a database that does not exist yet. `Mind(cfg)`
+    # opens the store for writing and runs schema initialisation and
+    # migrations, which `doctor` did without holding the supervisor's
+    # ownership lock -- a second writer against a live organism, from a
+    # command whose whole job is to look. An uninitialised installation is a
+    # thing to report, not a thing to create by inspecting it.
+    if not cfg.db_path.exists():
+        check("state_store", True,
+              "no organism here yet; a supervisor will create one on first start")
+    else:
+        try:
+            from .mind import Mind
 
-        mind = Mind(cfg)
-        integrity = mind.verify_integrity(deep=True)
-        check("state_store", True, {"state_version": integrity["state_version"],
-                                    "counts": integrity["counts"]})
-        check("hash_chain", integrity["hash_chain_ok"], integrity["first_bad_event"])
-        check("content_addressable_store", integrity["missing_content_count"] == 0,
-              integrity["missing_content"][:5])
-        mind.close()
-    except Exception as exc:  # noqa: BLE001
-        check("state_store", False, repr(exc), fatal=True)
+            mind = Mind(cfg, read_only=True)
+            try:
+                integrity = mind.verify_integrity(deep=True)
+                check("state_store", True,
+                      {"state_version": integrity["state_version"],
+                       "counts": integrity["counts"]})
+                check("hash_chain", integrity["hash_chain_ok"],
+                      integrity["first_bad_event"])
+                check("content_addressable_store",
+                      integrity["missing_content_count"] == 0,
+                      {"missing": integrity["missing_content"][:5],
+                       "references_checked": integrity["content_references_checked"]})
+            finally:
+                mind.close()
+        except Exception as exc:  # noqa: BLE001
+            check("state_store", False, repr(exc), fatal=True)
 
     check("supervisor_running", cfg.ready_path.exists(),
           cfg.ready_path.read_text() if cfg.ready_path.exists() else "not running")

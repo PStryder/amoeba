@@ -29,7 +29,7 @@ Because this is the simple organism.
 
 Amoeba is intended to begin as a relatively primitive persistent cognitive architecture and become more capable through better models, better tools, accumulated knowledge, improved internal organization, and eventually mechanisms for proposing and evaluating improvements to itself.
 
-The disposable cognitive neuocytes inside an Amoeba are called **neuocytes**.
+The disposable cognitive workers inside an Amoeba are called **neuocytes**.
 
 An Amoeba may eventually be only one organism in a larger cognitive ecology.
 
@@ -85,7 +85,7 @@ The state they produce is not.
 
 # Neuocytes
 
-A **neuocyte** is an independent cognitive neuocyte.
+A **neuocyte** is an independent, disposable cognitive worker.
 
 Neuocytes may share the same underlying model weights while maintaining independent working contexts.
 
@@ -632,7 +632,7 @@ disposable cognitive workers are `neuocyte` (`src/amoeba/neuocyte.py`,
 `max_neuocytes`, `role="neuocyte"`). `work_id` / `work_items` / `workspace`
 refer to *work*, not to neuocytes, and are deliberately unchanged.
 
-Two results worth pulling forward, because they constrain the design:
+Four results worth pulling forward, because they constrain the design:
 
 - **Physical prefix sharing is real and measured.** With one unified KV stream,
   a neuocyte forked from an Ego snapshot shares KV cells rather than copying
@@ -752,4 +752,4 @@ MIT
 ---
 
 **Amoeba**  
-*The organism is persistent. The cells are disposable.*
+*The organism is persistent. The neuocytes are disposable.*
