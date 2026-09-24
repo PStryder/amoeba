@@ -308,6 +308,7 @@ class Supervisor:
         self.mind = Mind(self.cfg)
         self.homeostasis.mind = self.mind
         self.homeostasis.governed_prompt = self._governed_prompt
+        self.homeostasis.hand_over = self.hand_over_session
         # Configured host roots are Peter's directories, not Amoeba's state,
         # so they are deliberately NOT hardened: locking down a directory the
         # user works in would be a surprising side effect of pointing Amoeba

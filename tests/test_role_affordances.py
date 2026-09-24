@@ -24,6 +24,7 @@ long answers -- the ceiling increase turned a latent defect into a live one.
 
 from __future__ import annotations
 
+import logging
 import sys
 import threading
 import time
@@ -470,3 +471,61 @@ def test_a_second_turn_does_not_pay_for_the_declaration_again(tmp_path):
         assert spans[1] < spans[0] - declared * 0.8, (spans, declared)
     finally:
         stack.stop()
+
+
+# ---------------------------------------------------------------------------
+# A role that missed a handover heals itself
+# ---------------------------------------------------------------------------
+class _Beat:
+    """The Harness end of a role's liveness beat."""
+
+    def __init__(self, handle):
+        self.handle = handle
+        self.beats = 0
+
+    def call(self, method, **kw):
+        assert method == "heartbeat"
+        self.beats += 1
+        return {"ok": True, "session_handle": self.handle}
+
+
+def _beating_role(handle, *, holding="sess_old", in_turn=False):
+    role = _bare_role()
+    role.session_id = holding
+    role.current_turn_id = "turn_live" if in_turn else None
+    role.sup = _Beat(handle)
+    role._stop = threading.Event()
+    role.log = logging.getLogger("test-role")
+    return role
+
+
+def _one_beat(role):
+    """Run exactly one pass of the loop, then let it end."""
+    passes = iter([False, True])          # run once, then stop
+    role._stop.wait = lambda _timeout: next(passes, True)
+    role.heartbeat_loop()
+
+
+def test_a_role_adopts_the_recorded_session_when_it_missed_a_handover():
+    """The live wedge: Id held a closed session and failed every turn for a day.
+
+    The record is the authority -- it is what the Harness checkpoints and
+    rebuilds from -- so a role holding anything else is the one that is wrong,
+    and it heals on the next beat rather than needing an operator.
+    """
+    role = _beating_role("sess_new")
+    _one_beat(role)
+    assert role.session_id == "sess_new"
+
+
+def test_a_role_mid_turn_is_not_moved_under_its_own_feet():
+    """A generation in flight owns its session until the turn closes."""
+    role = _beating_role("sess_new", in_turn=True)
+    _one_beat(role)
+    assert role.session_id == "sess_old"
+
+
+def test_a_beat_that_agrees_changes_nothing():
+    role = _beating_role("sess_old")
+    _one_beat(role)
+    assert role.session_id == "sess_old" and role.sup.beats == 1

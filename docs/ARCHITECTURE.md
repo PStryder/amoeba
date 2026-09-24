@@ -1070,9 +1070,30 @@ longer exists even as a fallback: see I122 for what a rebuild does instead.
 `test_a_turn_still_owed_an_answer_is_never_removed`,
 `test_a_turn_the_record_cannot_place_is_kept`
 
-**I94. The recorded session handle follows the live one.** Rejuvenation closes
-a role's session and opens a fresh one, and `hand_over_session` tells the role
-so. That updated the handle the role holds in memory and not
+**I94. Everyone holding a role's session handle learns when it changes.**
+Rejuvenation closes a role's session and opens a fresh one. Two parties hold
+that handle -- the durable record the Harness rebuilds from, and the role
+process itself -- and both have failed to learn it, in the same way and a
+year apart.
+
+The second failure was worse, because it was the mind asking for help. Live,
+Id used `id_request_rejuvenation` on its own context at 77%, correctly. The
+Harness rebuilt the session, updated the record, and never told Id: handing
+over was done by the *caller*, and only the turn-boundary caller did it. Id
+went on addressing a session that had been closed, and every turn for the
+next day and a half failed with "unknown inference session" -- a mind's own
+self-care was the one way it could wedge itself permanently. The handover now
+happens inside the rejuvenation, where the session is actually replaced, so
+every path does it; whether it landed is recorded on the receipt
+(`role_told`) rather than assumed.
+
+Because a handover can still fail to land -- the role restarting at that
+instant, the Harness briefly unreachable -- a role's liveness beat carries the
+handle the record holds, and a role holding a different one adopts it, unless
+it is mid-turn, in which case the running generation keeps its session until
+the turn closes. Recovery in seconds, without an operator.
+
+`hand_over_session` tells the role so. That updated the handle the role holds in memory and not
 `agents.session_handle`, which is the durable record the Harness itself reads
 to find the session to checkpoint. The first rejuvenation worked anyway. The
 *second* checkpointed the session the first one had closed, and restored the
@@ -1096,6 +1117,11 @@ it placed each kept turn is recorded separately, against the new handle
 described and the next rebuild can still place what it carried.
 → `test_a_second_rejuvenation_does_not_resurrect_what_the_first_dropped`,
 `test_a_rejuvenated_role_keeps_its_identity_and_gains_a_new_handle`,
+`test_every_path_that_replaces_a_session_tells_the_role`,
+`test_a_handover_that_does_not_land_is_recorded_not_swallowed`,
+`test_a_role_adopts_the_recorded_session_when_it_missed_a_handover`,
+`test_a_role_mid_turn_is_not_moved_under_its_own_feet`,
+`test_a_beat_carries_the_session_the_record_holds`,
 `test_spans_of_a_closed_session_never_place_a_turn_in_its_successor`,
 `test_spans_from_another_session_are_never_removable`
 

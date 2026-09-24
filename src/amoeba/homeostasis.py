@@ -301,10 +301,10 @@ class ContextHomeostasis:
             inf.call("restore_prefix", session_id=new["session_id"], tokens=keep,
                      snapshot_id=checkpoint.get("snapshot_id"))
 
-        # Durable, and before anything else can read the old handle. The
-        # role was told in memory by `hand_over_session`; this is the copy the
-        # Harness itself reads on the next rejuvenation, and leaving it stale
-        # made that rejuvenation checkpoint a session that no longer exists.
+        # Durable, and before anything else can read the old handle. This is
+        # the copy the Harness itself reads on the next rejuvenation, and
+        # leaving it stale made that rejuvenation checkpoint a session that no
+        # longer exists.
         try:
             self.mind.work.set_session_handle(
                 agent_id=role, session_handle=new["session_id"],
@@ -315,6 +315,14 @@ class ContextHomeostasis:
                 "rejuvenation would work from a closed session", role,
                 new["session_id"])
             raise
+        # Told to the role here rather than by the caller, because every
+        # path that replaces a session has to do it and only one of the three
+        # did. Live, Id used `id_request_rejuvenation` on its own context at
+        # 77% -- correctly -- and was never told the new handle: it went on
+        # calling a session the Harness had closed, and every turn for the
+        # next day and a half failed with "unknown inference session". Asking
+        # for help was the one way it could wedge itself.
+        told = self._hand_over(role, new["session_id"], reason)
         # Where each carried turn now sits, against the new handle. Its own
         # row keeps the coordinates it was measured under (I94); without these
         # the next rebuild would find every carried turn `unknown`, keep it
@@ -341,6 +349,10 @@ class ContextHomeostasis:
             "occupancy_after": round(after.occupancy, 4),
             "pressure_before": before.pressure,
             "pressure_after": after.pressure,
+            # Whether the role itself knows. False is recoverable -- its next
+            # heartbeat adopts the recorded handle -- but it is a fact about
+            # this rejuvenation and is recorded as one.
+            "role_told": told,
             "reconstitution": (
                 "rebuilt from whole parts: the governed prompt rendered fresh, "
                 "every environment block removed so the current declaration "
@@ -364,6 +376,18 @@ class ContextHomeostasis:
                       role, len(tokens), len(keep), before.occupancy * 100,
                       after.occupancy * 100)
         return result
+
+    def _hand_over(self, role: str, session_id: str, reason: str) -> bool:
+        """Tell the role which session it now has. Never fails the rebuild."""
+        source = getattr(self, "hand_over", None)
+        if not callable(source):
+            return False
+        try:
+            return bool(source(role, session_id, reason=reason))
+        except Exception:  # noqa: BLE001
+            self.log.warning("could not hand %s its new session %s", role,
+                             session_id, exc_info=True)
+            return False
 
     # ------------------------------------------------------------------
     # rebuild: whole parts, never offsets

@@ -86,6 +86,7 @@ Read this before trusting anything below it.
 | Bounded truthful tool-result delivery | **Implemented, tested** | token-budgeted per role; whole-JSON projection with a reference `result_read` opens for the issuing role; compact prompt views — see I123 |
 | Only the Harness authors chat structure | **Implemented, tested** | control tokens are refused on the token id before append, in both decode paths; refused attempts are recorded — see I124 |
 | Heartbeat carries a measured delta | **Implemented, tested** | complete by event watermark, never interpreted; a quiet review is ceilinged and telemetry is compact by default — see I125 |
+| Session handover on every path, with recovery | **Implemented, tested** | the rejuvenation itself tells the role and records whether it landed; a beat carries the recorded handle so a role heals — see I94 |
 | Roles can invoke what they are offered | **Implemented, tested** | the environment block states the call syntax the loop parses; a malformed attempt is refused and retried, never delivered as an answer — see I113, I115 |
 | A busy role is not restarted as dead | **Implemented, tested** | health probes use their own inference connection, so a long generation cannot fail liveness — see I114 |
 | Per-role output ceilings | **Implemented, tested** | Ego 3072, Id 1024, `ego.neuocyte` 512, `id.neuocyte` 384, one canonical value per bound profile; the platform cap refuses rather than clamps, and startup fails on a contradiction — see I110 |

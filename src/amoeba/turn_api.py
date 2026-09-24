@@ -169,9 +169,11 @@ def build(sup: "Supervisor") -> dict[str, Any]:  # noqa: C901
         except Exception as exc:  # noqa: BLE001
             sup.log.warning("rejuvenation for %s failed: %s", role, exc)
             return {"performed": False, "reason": str(exc)[:200]}
+        # The handover happens inside the rejuvenation itself, so every
+        # path that replaces a session does it -- not only this one.
         session = done.get("session_id") or done.get("new_session_id")
-        sup.hand_over_session(role, session, reason="context pressure")
         return {"performed": True, "role": role,
+                "role_told": done.get("role_told"),
                 "session_id": session,
                 "note": ("identity, incarnation, profile binding and mailbox "
                          "are untouched; a replacement session is not a new "

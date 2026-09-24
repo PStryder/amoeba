@@ -671,9 +671,22 @@ class RoleProcess:
     def heartbeat_loop(self) -> None:
         while not self._stop.wait(5.0):
             try:
-                self.sup.call("heartbeat", agent_id=self.role)
+                beat = self.sup.call("heartbeat", agent_id=self.role)
             except Exception:  # noqa: BLE001
                 self.log.debug("heartbeat failed", exc_info=True)
+                continue
+            # A handover this process missed -- the Harness was unreachable
+            # for that moment, or this process restarted while its session was
+            # being replaced. Live, Id missed one and spent a day and a half
+            # calling a session that had been closed. The record is the
+            # authority, and adopting it costs nothing when it agrees.
+            recorded = (beat or {}).get("session_handle")
+            if recorded and recorded != self.session_id and not self.current_turn_id:
+                self.log.warning("%s was holding session %s; the record says "
+                                 "%s -- adopting it", self.role,
+                                 self.session_id, recorded)
+                self.refresh_session(session_id=recorded,
+                                     reason="recorded handle differs")
 
     # ------------------------------------------------------------------
     def base_methods(self) -> dict[str, Any]:

@@ -441,3 +441,41 @@ def test_only_the_heartbeat_consults_the_gate():
     assert callers == {"_schedule_heartbeats"}, (
         f"the pressure gate is consulted outside the heartbeat scheduler: "
         f"{sorted(callers)}")
+
+
+# ---------------------------------------------------------------------------
+# Whatever replaces a session tells the role, and a role can recover
+# ---------------------------------------------------------------------------
+def test_every_path_that_replaces_a_session_tells_the_role(homeo, mind):
+    """Live: Id asked for its own rejuvenation and was never told the answer.
+
+    `id_request_rejuvenation` and the critical-pressure tick both replaced
+    Id's session without handing it over -- only the turn-boundary path did.
+    Id went on calling a session the Harness had closed, and every turn for
+    the next day and a half failed with "unknown inference session". Asking
+    for help was the one way it could wedge itself permanently.
+    """
+    told: list[tuple[str, str]] = []
+    homeo.hand_over = lambda role, session, reason="": (
+        told.append((role, session)) or True)
+
+    out = homeo.request_rejuvenation(role="id", reason="my context is large",
+                                     requested_by="id")
+    assert out["performed"] is True
+    assert told == [("id", out["new_session_id"])], "Id was not told"
+    assert out["role_told"] is True
+
+    homeo.fake.sessions[0]["n_past"] = 9000          # critical: the tick path
+    told.clear()
+    tick = homeo.tick()
+    assert tick and tick["performed"] is True
+    assert told == [(tick["role"], tick["new_session_id"])]
+
+
+def test_a_handover_that_does_not_land_is_recorded_not_swallowed(homeo, mind):
+    def refuses(role, session, reason=""):
+        raise ConnectionError("the role is not answering")
+
+    homeo.hand_over = refuses
+    out = homeo.rejuvenate(role="id", reason="tidy")
+    assert out["performed"] is True and out["role_told"] is False

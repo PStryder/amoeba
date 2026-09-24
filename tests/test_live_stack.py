@@ -1426,3 +1426,17 @@ def test_a_wake_trigger_is_evidence_not_a_question(tmp_path: Path):
                 "a board post was queued as a question Ego owes a reply to"
     finally:
         stack.stop()
+
+
+def test_a_beat_carries_the_session_the_record_holds(stack: LiveStack):
+    """What lets a role heal after a handover it never received.
+
+    Live, Id missed one -- it had asked for its own rejuvenation, which was
+    the one path that did not hand the session over -- and spent a day and a
+    half calling a session the Harness had closed.
+    """
+    beat = stack.call("heartbeat", agent_id="id")
+    assert beat["ok"] is True
+    recorded = beat["session_handle"]
+    assert recorded, "the beat says nothing about which session is current"
+    assert recorded == stack.call("operator_overview")["roles"]["id"]["session_id"]

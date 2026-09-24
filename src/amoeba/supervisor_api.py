@@ -378,8 +378,20 @@ def build(sup: "Supervisor") -> dict[str, Any]:
                 "receipt_id": receipt.receipt_id}
 
     def heartbeat(*, agent_id: str) -> dict[str, Any]:
+        """Liveness, and the session the record says this agent is using.
+
+        Carried on every beat so a role that missed a handover heals itself
+        within seconds instead of calling a closed session forever. The
+        record is the authority here: it is what the Harness checkpoints and
+        rebuilds from, and a role holding something else is the one that is
+        wrong.
+        """
         mind.work.heartbeat(agent_id)
-        return {"ok": True, "at": time.time()}
+        row = mind.db.conn.execute(
+            "SELECT session_handle FROM agents WHERE agent_id = ?",
+            (agent_id,)).fetchone()
+        return {"ok": True, "at": time.time(),
+                "session_handle": row["session_handle"] if row else None}
 
     def retire_agent(*, agent_id: str, reason: str = "", crashed: bool = False
                      ) -> dict[str, Any]:
