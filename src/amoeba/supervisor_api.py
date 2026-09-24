@@ -538,11 +538,33 @@ def build(sup: "Supervisor") -> dict[str, Any]:
         """
         dossier: dict[str, Any] = {"resolved_from": "durable record only",
                                    "ego_consulted": False}
+        if not conclusion_id and not operation_id:
+            # The question Id actually has: what is waiting to be audited?
+            # Without this, a mind told "17 unaudited conclusions" had no way
+            # to reach one, and invented identifiers instead.
+            row = mind.db.conn.execute(
+                "SELECT conclusion_id FROM conclusions c WHERE NOT EXISTS ("
+                "SELECT 1 FROM audits a WHERE a.target_kind = 'conclusion'"
+                " AND a.target_id = c.conclusion_id)"
+                " ORDER BY created_at LIMIT 1").fetchone()
+            if row is None:
+                raise NotFound("nothing is waiting to be audited",
+                               hint="every recorded conclusion has an audit")
+            conclusion_id = row["conclusion_id"]
+            dossier["resolved_by"] = "the oldest conclusion nobody has audited"
         if conclusion_id:
             concl = mind.memory.get_conclusion(conclusion_id)
             dossier["conclusion"] = concl
             operation_id = operation_id or concl.get("operation_id")
         if not operation_id:
+            if dossier.get("conclusion"):
+                # A claim recorded outside any operation is still auditable
+                # against its own evidence. Refusing the dossier would make a
+                # conclusion Id was told to audit unreachable.
+                return {**dossier, "events": [], "hash_chain_ok": None,
+                        "note": ("this conclusion was recorded outside any "
+                                 "operation, so there is no operation trail; "
+                                 "its own evidence is above")}
             raise NotFound("no operation to resolve", conclusion_id=conclusion_id)
         prov = mind.provenance(operation_id=operation_id)
         dossier["operation_id"] = operation_id

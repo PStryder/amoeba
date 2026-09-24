@@ -81,6 +81,9 @@ def measure(conn, role: str, *, since: int | None) -> dict[str, Any]:
         "other_kinds": max(0, len(by_kind) - len(shown)),
         "other_events": total - sum(shown.values()),
         "attention": _attention(conn, role),
+        # A count with no route to the thing counted is what made a mind
+        # invent identifiers. The oldest one is named, and the rest follow it.
+        "oldest_unaudited": _oldest_unaudited(conn),
         "first_review": since is None,
     }
 
@@ -103,6 +106,14 @@ def _attention(conn, role: str) -> dict[str, int]:
             "SELECT COUNT(*) FROM role_triggers WHERE target_role = ?"
             " AND expects_answer = 1 AND answer_status IS NULL", role),
     }
+
+
+def _oldest_unaudited(conn) -> str | None:
+    row = conn.execute(
+        "SELECT conclusion_id FROM conclusions c WHERE NOT EXISTS ("
+        "SELECT 1 FROM audits a WHERE a.target_kind = 'conclusion'"
+        " AND a.target_id = c.conclusion_id) ORDER BY created_at LIMIT 1").fetchone()
+    return row["conclusion_id"] if row else None
 
 
 def quiet(digest: dict[str, Any]) -> bool:
@@ -129,9 +140,11 @@ def render(digest: dict[str, Any], *, interval_seconds: float,
             lines.append(f"  and {digest['other_events']} more across "
                          f"{digest['other_kinds']} further kinds, not itemised here")
     owed = {k: v for k, v in digest["attention"].items() if v}
-    lines.append("attention: " + (", ".join(f"{k.replace('_', ' ')} {v}"
-                                            for k, v in owed.items())
-                                  if owed else "nothing outstanding"))
+    said = [f"{k.replace('_', ' ')} {v}" for k, v in owed.items()]
+    if digest.get("oldest_unaudited"):
+        said = [s + f" (oldest: {digest['oldest_unaudited']})"
+                if s.startswith("unaudited conclusions") else s for s in said]
+    lines.append("attention: " + (", ".join(said) if said else "nothing outstanding"))
     if deferred_seconds:
         lines.append(f"this review ran {deferred_seconds:.0f}s late, held back "
                      "while the pool was under pressure.")

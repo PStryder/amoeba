@@ -236,13 +236,37 @@ def test_the_operator_can_ask_for_an_audit_and_its_verdict_is_recorded(quiet):
 
 @live
 def test_an_unauditable_target_is_refused_without_waking_id(quiet):
-    """Measured before queueing: a claim the record cannot resolve costs no turn."""
-    concl = quiet.call("record_conclusion", claim="with no operation", produced_by="ego")
+    """Measured before queueing: a claim the record cannot resolve costs no turn.
+
+    A conclusion recorded outside any operation is *not* an example of this:
+    since I127 it resolves a dossier of its own evidence, because a claim Id
+    was told to audit has to be reachable. Something the record cannot find
+    at all still costs nobody a turn.
+    """
     before = len(quiet.call("role_turns", role="id")["turns"])
-    out = quiet.call("id_audit", conclusion_id=concl["conclusion_id"], wait=False)
+    out = quiet.call("id_audit", conclusion_id="concl_01M34JP5HHF1PS7QKTTFFQMG7X",
+                     wait=False)
     assert out["status"] == "failed"
-    assert "no operation to resolve" in json.dumps(out)
+    assert "unknown conclusion" in json.dumps(out)
     time.sleep(3)
     assert len(quiet.call("role_turns", role="id")["turns"]) == before, \
         "Id was woken for an audit that could never be committed"
     assert quiet.call("role_mailbox", role="id")["id"]["queued"] == 0
+
+
+@live
+def test_a_claim_recorded_outside_an_operation_is_still_auditable(quiet):
+    """The other half of I127: told to audit it, Id must be able to reach it.
+
+    This used to refuse with "no operation to resolve", so a conclusion the
+    digest counts could not be opened at all.
+    """
+    concl = quiet.call("record_conclusion", claim="with no operation",
+                       produced_by="ego")
+    dossier = quiet.call("audit_dossier", conclusion_id=concl["conclusion_id"])
+    assert dossier["conclusion"]["conclusion_id"] == concl["conclusion_id"]
+    assert dossier["events"] == []
+    assert "no operation trail" in dossier["note"]
+
+    out = quiet.call("id_audit", conclusion_id=concl["conclusion_id"], wait=False)
+    assert out["status"] != "failed", "Id was not woken for an auditable claim"

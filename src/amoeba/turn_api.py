@@ -27,6 +27,7 @@ import json
 import time
 from typing import TYPE_CHECKING, Any
 
+from . import identifiers
 from .argcheck import argument_problem
 from .results import issue_result, issued_digest
 from . import mailbox
@@ -311,6 +312,16 @@ def build(sup: "Supervisor") -> dict[str, Any]:  # noqa: C901
             details = getattr(exc, "details", None) or {}
             if isinstance(details, dict) and details.get("allowed"):
                 reason += f" (allowed: {', '.join(map(str, details['allowed']))})"
+            # An identifier that cannot be what it names is a different
+            # mistake from one that names something absent, and neither is
+            # helped by "unknown conclusion" alone. Live, Id spent three
+            # calls on a result reference it had just been shown, because
+            # nothing told it where a conclusion id comes from.
+            for key, value in (details or {}).items():
+                said = identifiers.explain(key, value) if isinstance(key, str) else ""
+                if said:
+                    reason += f" ({said})"
+                    break
             return _recorded({"accepted": False, "result": None,
                               "reason": reason[:500]}, role_name=role)
         # Bounded here rather than in the role process: this is the side

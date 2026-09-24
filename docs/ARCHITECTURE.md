@@ -1835,6 +1835,40 @@ organism thrashing itself is worse than one waiting for a human.
 `test_the_pulse_reports_a_role_that_cannot_think`,
 `test_a_role_that_cannot_think_counts_as_a_failure`
 
+**I127. A count comes with a way to reach the thing counted, and a refusal
+says where a real identifier lives.** Told "unaudited conclusions: 17", Id
+called `get_conclusion`, `get_memory` and `audit_dossier` with
+`c8f050bd638e10dc` -- the reference from a bounded tool result it had just
+been shown -- and earlier with its own session id under a `con_` prefix.
+Each answer was "unknown conclusion": true, and useless.
+
+The surface caused it. Id can fetch a conclusion by id and cannot list
+conclusions at all, so the only routes to one were raw events or provenance;
+and `audit_dossier()` with no argument -- the question Id actually had --
+refused with "no operation to resolve". A mind handed a count with no route
+to the things counted will manufacture the route.
+
+Three things, and none of them guesses which identifier was meant: guessing
+would turn a mind's mistake into the Harness's claim.
+
+* `audit_dossier()` with no argument resolves the oldest conclusion nobody
+  has audited, and says plainly when there is none. A conclusion recorded
+  outside any operation still yields a dossier of its own evidence rather
+  than a refusal, because a claim Id was told to audit must be reachable.
+* The digest names what it counts: `unaudited conclusions 17 (oldest: ...)`.
+* A refusal says what the value *is* -- a result reference, a session
+  identifier, a number -- when that is plain, and where a real one comes
+  from. A well-formed identifier of the right kind is not called a misuse:
+  it may simply be absent, and then "no such conclusion" is the whole truth.
+→ `test_a_value_is_described_as_what_it_is`,
+`test_a_well_formed_identifier_of_the_right_kind_is_not_a_misuse`,
+`test_nothing_guesses_which_identifier_was_meant`,
+`test_a_refusal_says_what_the_value_was_and_where_a_real_one_lives`,
+`test_a_missing_but_well_formed_identifier_is_not_called_a_misuse`,
+`test_audit_dossier_with_no_argument_resolves_the_oldest_unaudited`,
+`test_when_nothing_is_waiting_it_says_so_plainly`,
+`test_the_digest_names_the_conclusion_it_is_counting`
+
 **I73. A role is never wedged by a turn it did not close.** One open turn per
 role is a database constraint, so a turn left running blocks every future turn
 for that role — the role heartbeats, reports healthy, and never thinks again
