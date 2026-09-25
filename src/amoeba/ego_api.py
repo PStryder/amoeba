@@ -67,6 +67,16 @@ def _text(value: str, field: str, *, limit: int = 4000) -> str:
     return value.strip()[:limit]
 
 
+# The classes Ego may ask for. Maintenance belongs to Id: Ego asking for it
+# used to be served by an `id.neuocyte` -- Id's cognition instantiated by Ego,
+# with no Id in the record (I137). Declared separately from `WORK_CLASSES`
+# because the environment renders the values a role is *checked against*, and
+# offering Ego a class it can never have is an affordance that does not exist.
+# Live on 2026-09-24, shown both values, Ego chose `maintenance` for ordinary
+# investigative work twice running and was refused both times.
+EGO_WORK_CLASSES = ("user",)
+
+
 def build(sup: "Supervisor") -> dict[str, Any]:  # noqa: C901
     mind = sup.mind
     assert mind is not None
@@ -235,19 +245,11 @@ def build(sup: "Supervisor") -> dict[str, Any]:  # noqa: C901
         ``independent=True`` admits each replica board-naive, so later
         agreement between them is replication rather than an echo.
         """
-        if work_class not in WORK_CLASSES:
-            raise InvalidInput("unknown work class", work_class=work_class,
-                               allowed=list(WORK_CLASSES))
-        # Maintenance belongs to Id. Ego asking for it used to be served by an
-        # `id.neuocyte` -- Id's cognition instantiated by Ego, with no Id in
-        # the record (I137). Lineage is derived from the originating role now,
-        # so that cannot happen; this closes the other half, because an
-        # `ego.neuocyte` running maintenance-shaped work would be a worker
-        # doing a kind of work its own profile does not describe.
-        if work_class != "user":
+        if work_class not in EGO_WORK_CLASSES:
             raise InvalidInput(
-                "maintenance is Id's work, not Ego's",
-                work_class=work_class,
+                "maintenance is Id's work, not Ego's" if work_class in WORK_CLASSES
+                else "unknown work class",
+                work_class=work_class, allowed=list(EGO_WORK_CLASSES),
                 hint="ask Id with ego_request_id_review; Id decides whether "
                      "maintenance is warranted and delegates it itself")
         if not 1 <= int(replicas) <= 8:

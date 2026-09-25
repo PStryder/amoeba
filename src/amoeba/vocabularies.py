@@ -21,7 +21,8 @@ from .prompt_api import INCARNATION_DETAILS, VERDICTS as PROMPT_VERDICTS
 from .promptlib.model import PROMPT_MODES
 from .store.board_repo import AUTHOR_KINDS, POST_TYPES
 from .store.memory_repo import MEMORY_KINDS
-from .store.work_repo import BOARD_ACCESS, WORK_CLASSES
+from .ego_api import EGO_WORK_CLASSES
+from .store.work_repo import BOARD_ACCESS
 
 # (verb, argument) -> (the accepted values, where the check lives, its name)
 ARGUMENT_VOCABULARIES: dict[tuple[str, str], tuple[tuple[str, ...], str, str]] = {
@@ -30,7 +31,8 @@ ARGUMENT_VOCABULARIES: dict[tuple[str, str], tuple[tuple[str, ...], str, str]] =
     ("board_read", "post_types"): (POST_TYPES, "store/board_repo.py", "POST_TYPES"),
     ("ego_propose_memory", "kind"): (MEMORY_KINDS, "store/memory_repo.py", "MEMORY_KINDS"),
     ("recall", "kinds"): (MEMORY_KINDS, "store/memory_repo.py", "MEMORY_KINDS"),
-    ("ego_request_work", "work_class"): (WORK_CLASSES, "ego_api.py", "WORK_CLASSES"),
+    ("ego_request_work", "work_class"): (EGO_WORK_CLASSES, "ego_api.py",
+                                         "EGO_WORK_CLASSES"),
     ("ego_request_work", "board_access"): (BOARD_ACCESS, "ego_api.py", "BOARD_ACCESS"),
     ("ego_work_message", "kind"): (MESSAGE_KINDS, "ego_api.py", "MESSAGE_KINDS"),
     ("ego_request_id_review", "subject"): (REVIEW_SUBJECTS, "ego_api.py", "REVIEW_SUBJECTS"),
