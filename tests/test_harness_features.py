@@ -43,14 +43,28 @@ def test_board_round_trip_over_the_control_plane(stack: LiveStack):
 
 
 def test_independence_and_corroboration_over_rpc(stack: LiveStack):
+    """The same grading as in-process, reached over the wire.
+
+    This used to make wk_2 independent by having it *not read the board* and
+    post "measured: shared" without measuring anything, and the assertion
+    encoded that as independence. A body claiming a measurement is text; only
+    the acquisition is evidence (I138). wk_2 now actually goes and observes.
+    """
     claim = stack.call("board_post", author="wk_1", author_kind="neuocyte",
                        post_type="finding", body="prefix KV is shared")
-    # wk_2 never reads: independent.
+
+    # wk_2 observes for itself, through the path a worker really uses.
+    work = stack.call("admit_work", objective="measure the prefix",
+                      work_class="user", origin_actor="ego")
+    lease = stack.call("lease_work", neuocyte_id="wk_2", work_id=work["work_id"])
+    stack.call("tool_invoke", neuocyte_id="wk_2", work_id=work["work_id"],
+               fencing_token=lease["fencing_token"],
+               name="current_state_version", arguments={})
     indep = stack.call("board_post", author="wk_2", author_kind="neuocyte",
                        post_type="finding", body="measured: shared",
                        relations=[{"to_post": claim["post_id"],
                                    "relation": "supports"}])
-    # wk_3 reads first: an echo.
+    # wk_3 observes nothing and reads first: an echo.
     stack.call("board_read", reader="wk_3", limit=10)
     echo = stack.call("board_post", author="wk_3", author_kind="neuocyte",
                       post_type="note", body="concur",
@@ -59,7 +73,8 @@ def test_independence_and_corroboration_over_rpc(stack: LiveStack):
 
     verdict = stack.call("board_independence", post_a=claim["post_id"],
                          post_b=indep["post_id"])
-    assert verdict["verdict"] == "independent"
+    assert verdict["verdict"] == "independent_acquisition"
+    assert verdict["distinct_roots"], "wk_2's own observation was not recorded"
 
     corr = stack.call("board_corroboration", post_id=claim["post_id"])
     assert corr["independent_support"] == [indep["post_id"]]

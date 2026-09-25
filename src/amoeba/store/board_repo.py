@@ -6,25 +6,34 @@ that line implicitly: promoting a post into maintained memory is a separate,
 receipted act performed by the Harness, and the post keeps its own identity
 afterwards.
 
-## Why every read is recorded
+## Why agreement is graded, and on what
 
 Two neuocytes reaching the same finding is either the most valuable signal the
-swarm produces or the least, and which one depends entirely on a fact that is
-invisible after the fact: *had the second one already read the first?*
+swarm produces or the least. Counting it wrongly is how a swarm talks itself
+into a confident mistake: one observation wearing two coats.
 
-- Neither had read the other -> **independent replication**. Two separate
-  routes to the same answer.
-- The second had read the first -> **socially propagated agreement**. It may
-  still be correct, but it is one observation wearing two coats, and counting
-  it twice is how a swarm talks itself into a confident mistake.
+The question used to be *had the second one already read the first?* -- and
+whenever it had not, the two were called independent. That is a question about
+influence, and it gets the evidence wrong in the one case that matters most. A
+neuocyte forked from Ego's context is board-naive by construction: it never
+reads a post, because it inherits the observations themselves. It could
+restate everything Ego had seen and score independent every time, which is
+exactly what happened live on 2026-09-24.
 
-So `record_read` is called on every retrieval, and every post snapshots
-`informed_by`: the exact set of posts its author had read *before* it was
-written. That snapshot is immutable. :meth:`independence` then answers the
-question directly rather than guessing from timestamps later.
+So the question is now *did the second one observe something the first did
+not?* Acquisitions are recorded as they happen, against the actor that made
+them, and a fork copies the forker's roots to the heir marked `inherited`.
+:meth:`independence` counts distinct acquisitions; :meth:`corroboration`
+counts only those. Agreeing from shared evidence is still reported, as
+`concurring_reasoning`, because two routes to one answer says something about
+the reasoning -- it just says nothing further about the evidence (I138).
 
-`board_naive` is the strongest form of the signal: the author had read nothing
-at all from the board before posting.
+Influence is still tracked, and still worth knowing. `record_read` is called on
+every retrieval, and every post snapshots `informed_by`: the exact set of posts
+its author had read *before* it was written. That snapshot is immutable.
+`board_naive` is its strongest form -- the author had read nothing at all --
+and it means no post influenced this one, not that this one is a second
+witness.
 """
 
 from __future__ import annotations
@@ -405,8 +414,24 @@ class BoardRepo:
             raise InvalidInput("confidence must be in [0, 1]", confidence=confidence)
         relations = list(relations)
         for rel in relations:
-            if rel.get("relation") not in RELATIONS:
-                raise InvalidInput("unknown relation", relation=rel.get("relation"),
+            # A missing key and a wrong value are different mistakes, and
+            # reporting the second for the first sends the model to fix the
+            # part that was already right. Live on 2026-09-25 Ego passed
+            # {"target": ..., "relation_type": "supports"} and was told
+            # "unknown relation (allowed: ... supports ...)" -- because
+            # `.get("relation")` was None, not because `supports` was wrong.
+            # It spent four attempts cycling through relation names it had
+            # never got wrong, and gave up believing the board could not link
+            # a finding to its support.
+            missing = [k for k in ("to_post", "relation") if k not in rel]
+            if missing:
+                raise InvalidInput(
+                    "a relation needs " + " and ".join(repr(k) for k in missing),
+                    got=sorted(rel), allowed=list(RELATIONS),
+                    hint='each relation looks like {"to_post": "post_...", '
+                         '"relation": "supports"}')
+            if rel["relation"] not in RELATIONS:
+                raise InvalidInput("unknown relation", relation=rel["relation"],
                                    allowed=list(RELATIONS))
 
         post_id = new_id("post")
@@ -522,11 +547,36 @@ class BoardRepo:
     # the point of all the bookkeeping
     # ------------------------------------------------------------------
     def independence(self, post_a: str, post_b: str) -> dict[str, Any]:
-        """Were these two posts arrived at independently?
+        """Did these two posts rest on separate observations?
 
-        Answered from the immutable ``informed_by`` snapshots plus the read
-        log, never inferred from wording similarity.
+        Answered from what their authors actually acquired, recorded by the
+        Harness at acquisition time, and never from wording similarity or
+        from who spoke.
+
+        This used to ask a different question -- whether the later author had
+        *read the earlier post* -- and called two posts independent whenever
+        it had not. A neuocyte forked from Ego's context never reads a post:
+        it inherits the observation itself, restates it, and scored
+        `independent` every time. Live on 2026-09-24 a worker cited Ego's
+        `board_read` and `board_stats` as its own evidence at confidence 0.98,
+        having called neither.
+
+        The distinction now drawn:
+
+          independent_acquisition  this author observed a source lineage the
+                                   other did not. Corroboration.
+          shared_evidence          it reasoned from what it inherited or from
+                                   the same source consulted again. Possibly
+                                   useful -- two reasoners agreeing is a fact
+                                   about reasoning -- but not a second
+                                   observation, and never corroboration.
+          socially_informed        it had read the other post first: a named
+                                   case of shared evidence, kept distinct
+                                   because it says how the sharing happened.
+          same_author              not corroboration at all.
         """
+        from ..results import acquisition_roots
+
         a = self.get_post(post_a)
         b = self.get_post(post_b)
         earlier, later = (a, b) if a["created_at"] <= b["created_at"] else (b, a)
@@ -542,13 +592,21 @@ class BoardRepo:
             ).fetchone()
             later_saw_earlier = row is not None
 
+        earlier_roots = acquisition_roots(self.conn, earlier["author"],
+                                          before=earlier["created_at"])
+        later_roots = acquisition_roots(self.conn, later["author"],
+                                        before=later["created_at"])
+        new_roots = sorted(later_roots - earlier_roots)
+
         same_author = a["author"] == b["author"]
         if same_author:
             verdict = "same_author"
+        elif new_roots:
+            verdict = "independent_acquisition"
         elif later_saw_earlier:
             verdict = "socially_informed"
         else:
-            verdict = "independent"
+            verdict = "shared_evidence"
 
         return {
             "post_a": post_a, "post_b": post_b,
@@ -556,12 +614,22 @@ class BoardRepo:
             "later_author_had_read_earlier": later_saw_earlier,
             "later_author_board_naive": later["board_naive"],
             "same_author": same_author,
+            # What the verdict was actually computed from.
+            "earlier_acquisition_roots": sorted(earlier_roots),
+            "later_acquisition_roots": sorted(later_roots),
+            "distinct_roots": new_roots,
             "verdict": verdict,
             "explanation": {
-                "independent": "neither author had read the other's post; agreement "
-                               "here is replication",
-                "socially_informed": "the later author had already read the earlier "
-                                     "post; agreement is not independent evidence",
+                "independent_acquisition":
+                    "the later author observed something the earlier one did "
+                    "not; agreement here rests on separate evidence",
+                "shared_evidence":
+                    "the later author acquired nothing the earlier one had "
+                    "not; agreeing from the same evidence is a fact about "
+                    "reasoning, not a second observation",
+                "socially_informed":
+                    "the later author had already read the earlier post; "
+                    "agreement is not independent evidence",
                 "same_author": "both posts have the same author; not corroboration "
                                "at all",
             }[verdict],
@@ -580,10 +648,19 @@ class BoardRepo:
                 "SELECT from_post FROM board_relations WHERE to_post = ?"
                 " AND relation = 'challenges'", (post_id,))
         ]
-        independent, informed = [], []
+        independent, informed, concurring = [], [], []
         for s in supporters:
             verdict = self.independence(post_id, s["from_post"])["verdict"]
-            (independent if verdict == "independent" else informed).append(s["from_post"])
+            if verdict == "independent_acquisition":
+                independent.append(s["from_post"])
+            else:
+                informed.append(s["from_post"])
+                # Reasoning replication, kept apart from corroboration on
+                # purpose. Another mind reaching the same answer from the same
+                # evidence says something about the reasoning; it says nothing
+                # further about the evidence, so it must never move the count.
+                if verdict == "shared_evidence":
+                    concurring.append(s["from_post"])
 
         # Reported, never weighted. A supporter whose attempt was fenced is
         # not a second mind agreeing; it is a dead attempt's post still
@@ -612,10 +689,15 @@ class BoardRepo:
             "supporting_posts": [s["from_post"] for s in supporters],
             "independent_support": independent,
             "socially_informed_support": informed,
+            "concurring_reasoning": concurring,
+            "concurring_reasoning_count": len(concurring),
             "challenges": [c["from_post"] for c in challengers],
             "independent_support_count": len(independent),
-            "note": ("only independent_support counts as corroboration; "
-                     "socially informed support is one observation restated"),
+            "note": ("only independent_support counts as corroboration, and "
+                     "it counts distinct acquisitions, not speakers; "
+                     "concurring_reasoning is another mind reaching the same "
+                     "answer from the same evidence, which is a fact about "
+                     "reasoning and not a second observation"),
         }
 
     # ------------------------------------------------------------------

@@ -242,8 +242,11 @@ def build(sup: "Supervisor") -> dict[str, Any]:  # noqa: C901
         which capabilities. Ego cannot instantiate a worker, and there is no
         verb here that would let it.
 
-        ``independent=True`` admits each replica board-naive, so later
-        agreement between them is replication rather than an echo.
+        ``independent=True`` admits each replica board-naive, so no replica can
+        read another's post and echo it. That isolates influence, which is not
+        the same as producing evidence: replicas that go and observe different
+        things corroborate each other, and replicas that only reason from the
+        same inherited context do not, however many of them agree (I138).
         """
         if work_class not in EGO_WORK_CLASSES:
             raise InvalidInput(

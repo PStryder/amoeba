@@ -22,6 +22,7 @@ from .errors import (
     BackendUnavailable, InvalidInput, MindError, NotFound, ResourceExhausted,
 )
 from .ids import new_id
+from .results import inherit_roots
 from .store.events import EventKind, read_events
 from .store.work_repo import TERMINAL_WORK
 from .store.writer import Mutation
@@ -975,6 +976,17 @@ def build(sup: "Supervisor") -> dict[str, Any]:
         ref_id, receipt = mind.work.acquire_snapshot_ref(
             snapshot_id=snap["snapshot_id"], holder=holder
         )
+        # The holder is about to receive this context, and the observations
+        # that produced it come with it. Recorded as inherited, which is what
+        # stops the holder counting as a second witness to them (I138): it may
+        # cite them and reason from them, and repeating an observation is not
+        # making one.
+        try:
+            inherit_roots(mind, heir=holder, source=snap["actor"],
+                          before=snap["created_at"])
+        except Exception:  # noqa: BLE001
+            sup.log.debug("could not pass %s's roots to %s", snap["actor"],
+                          holder, exc_info=True)
         out = dict(snap)
         out["ref_id"] = ref_id
         out["receipt_id"] = receipt.receipt_id

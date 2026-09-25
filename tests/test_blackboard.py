@@ -16,6 +16,22 @@ def post(mind, author, body, **kw):
     return mind.board.post(author=author, body=body, **kw)[0]
 
 
+def _observe(mind, actor, *, tool="board_get_post", arguments=None, result=None):
+    """Record that `actor` acquired something, the way the Harness does.
+
+    Corroboration rests on acquisitions rather than on who spoke (I138), so a
+    test about corroboration has to make observations happen.
+    """
+    import json
+
+    from amoeba.results import issue_result
+
+    return issue_result(mind, json.dumps(result or {"seen": True}),
+                        role=actor, tool=tool,
+                        arguments=arguments if arguments is not None
+                        else {"post_id": "p_source"}, actor="harness")
+
+
 # ---------------------------------------------------------------------------
 # Posting, provenance, receipts
 # ---------------------------------------------------------------------------
@@ -54,6 +70,53 @@ def test_invalid_post_type_and_relation_rejected(mind):
     with pytest.raises(InvalidInput):
         mind.board.post(author="a", author_kind="neuocyte", post_type="note", body="x",
                         confidence=5.0)
+
+
+def test_a_relation_with_the_wrong_keys_is_not_called_an_unknown_relation(mind):
+    """The refusal must name the mistake that was made, not a different one.
+
+    Live on 2026-09-25 Ego passed `{"target": ..., "relation_type":
+    "supports"}` and was told "unknown relation (allowed: ... supports ...)",
+    because `.get("relation")` was None rather than because `supports` was
+    wrong. Its value was correct and the refusal pointed straight at it, so it
+    spent four attempts cycling through relation names it had never got wrong
+    and gave up believing the board could not link a finding to its support.
+    """
+    claim = post(mind, "wk_1", "the cache is cold")
+    with pytest.raises(InvalidInput) as exc:
+        mind.board.post(author="wk_2", author_kind="neuocyte", post_type="finding",
+                        body="agreed", thread_id=claim,
+                        relations=[{"target": claim, "relation_type": "supports"}])
+
+    said = str(exc.value)
+    assert "unknown relation" not in said, (
+        "the refusal blamed the value, which was never wrong")
+    assert "'to_post'" in said and "'relation'" in said, (
+        "the refusal did not name the keys that were missing")
+
+    # What the role reads is the message plus the details, so the shape it
+    # needs has to be in one of them.
+    details = exc.value.details
+    assert "supports" in str(details.get("allowed")), (
+        "the refusal did not say what a relation may be")
+    assert "to_post" in str(details.get("hint")), (
+        "the refusal did not show the shape it wanted")
+
+    # And the shape it names is one the board actually accepts.
+    ok = mind.board.post(author="wk_2", author_kind="neuocyte", post_type="finding",
+                         body="agreed", thread_id=claim,
+                         relations=[{"to_post": claim, "relation": "supports"}])[0]
+    assert ok
+
+
+def test_a_genuinely_unknown_relation_still_says_so(mind):
+    """Control: the new branch must not swallow the mistake it replaced."""
+    claim = post(mind, "wk_1", "the cache is cold")
+    with pytest.raises(InvalidInput) as exc:
+        mind.board.post(author="wk_2", author_kind="neuocyte", post_type="finding",
+                        body="agreed", thread_id=claim,
+                        relations=[{"to_post": claim, "relation": "vibes"}])
+    assert "unknown relation" in str(exc.value)
 
 
 def test_replies_and_relations_are_navigable(mind):
@@ -141,13 +204,25 @@ def test_informed_by_snapshot_is_frozen_at_post_time(mind):
 # ---------------------------------------------------------------------------
 # Independent replication vs socially propagated agreement
 # ---------------------------------------------------------------------------
-def test_two_naive_workers_agreeing_is_independent_replication(mind):
+def test_two_reasoners_agreeing_from_the_same_evidence_is_not_corroboration(mind):
+    """This used to assert the opposite, and it was the category error.
+
+    Two authors, neither having read the other, neither having observed
+    anything: the old rule called that "independent replication" because the
+    speakers were different. Agreement here says something about the
+    reasoning -- and nothing further about the evidence, which is the only
+    thing corroboration is about (I138). Reported as `concurring_reasoning`
+    so the signal is not lost, and kept out of `independent_support` so it
+    cannot be mistaken for a second observation.
+    """
     a = post(mind, "wk_1", "the knee is at 32 sessions")
     b = post(mind, "wk_2", "the knee is at 32 sessions")
     r = mind.board.independence(a, b)
-    assert r["verdict"] == "independent"
+
+    assert r["verdict"] == "shared_evidence"
     assert r["later_author_had_read_earlier"] is False
-    assert "replication" in r["explanation"]
+    assert r["distinct_roots"] == []
+    assert "not a second observation" in r["explanation"]
 
 
 def test_agreement_after_reading_is_not_independent(mind):
@@ -184,7 +259,10 @@ def test_independence_uses_the_read_log_when_no_snapshot_exists(mind):
 def test_corroboration_separates_real_support_from_echo(mind):
     claim = post(mind, "wk_1", "the fork shares KV cells")
 
-    # wk_2 verifies without looking at the board: independent.
+    # wk_2 goes and measures it for itself: a distinct acquisition, and the
+    # only thing here that is corroboration.
+    _observe(mind, "wk_2", tool="run_code", arguments={"code": "measure()"},
+             result={"occupancy": 2036})
     indep = mind.board.post(
         author="wk_2", author_kind="neuocyte", post_type="finding",
         body="measured cell occupancy; shared", thread_id=claim,
@@ -202,7 +280,7 @@ def test_corroboration_separates_real_support_from_echo(mind):
     assert c["independent_support"] == [indep]
     assert c["socially_informed_support"] == [echo]
     assert c["independent_support_count"] == 1
-    assert "one observation restated" in c["note"]
+    assert "distinct acquisitions, not speakers" in c["note"]
 
 
 def test_support_from_an_attempt_that_never_finished_is_flagged(mind):

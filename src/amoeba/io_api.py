@@ -357,14 +357,21 @@ def build(sup: "Supervisor") -> dict[str, Any]:  # noqa: C901
                      operation_id=out.get("operation_id")
                      if isinstance(out, dict) else None)
         except Exception as exc:  # noqa: BLE001
+            # Read out of `exc` here rather than inside the closure. Python
+            # unbinds an `except ... as` name when the block exits, so a
+            # closure over it works only while the block is still running --
+            # which is true today and would stop being true the moment this
+            # write is deferred or retried outside the handler.
+            kind = type(exc).__name__
+            detail = f"{kind}: {exc}"[:2000]
+
             def failed(m: Mutation) -> None:
                 m.sql("UPDATE interactions SET status = 'failed', error = ?,"
                       " completed_at = ? WHERE interaction_id = ?",
-                      (f"{type(exc).__name__}: {exc}"[:2000], time.time(),
-                       interaction_id))
+                      (detail, time.time(), interaction_id))
                 m.emit(EventKind.INTERACTION_FAILED, {
                     "interaction_id": interaction_id, "client_id": client_id,
-                    "error": type(exc).__name__})
+                    "error": kind})
 
             try:
                 mind.writer.apply(failed, actor=f"client:{client_id}")

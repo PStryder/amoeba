@@ -1998,6 +1998,15 @@ would turn a mind's mistake into the Harness's claim.
   identifier, a number -- when that is plain, and where a real one comes
   from. A well-formed identifier of the right kind is not called a misuse:
   it may simply be absent, and then "no such conclusion" is the whole truth.
+* A refusal names the mistake that was *made*, not a neighbouring one. Live on
+  2026-09-25 Ego passed a relation as `{"target": ..., "relation_type":
+  "supports"}` and was told "unknown relation (allowed: ... supports ...)" --
+  because the lookup found no `relation` key, not because `supports` was
+  wrong. The one part it had right was the part the refusal pointed at, so it
+  spent four attempts cycling through relation names, then told the user the
+  board could not link a finding to its support. A wrong key and a wrong value
+  are different mistakes and are now reported as such, with the shape that
+  would work.
 → `test_a_value_is_described_as_what_it_is`,
 `test_a_well_formed_identifier_of_the_right_kind_is_not_a_misuse`,
 `test_nothing_guesses_which_identifier_was_meant`,
@@ -2005,7 +2014,9 @@ would turn a mind's mistake into the Harness's claim.
 `test_a_missing_but_well_formed_identifier_is_not_called_a_misuse`,
 `test_audit_dossier_with_no_argument_resolves_the_oldest_unaudited`,
 `test_when_nothing_is_waiting_it_says_so_plainly`,
-`test_the_digest_names_the_conclusion_it_is_counting`
+`test_the_digest_names_the_conclusion_it_is_counting`,
+`test_a_relation_with_the_wrong_keys_is_not_called_an_unknown_relation`,
+`test_a_genuinely_unknown_relation_still_says_so`
 
 **I128. The organism is not blind when it is strained.** Id was woken by
 conclusions, messages, work it owns, board posts on that work, and the
@@ -2360,6 +2371,75 @@ role whose kind to check against, and I92 already says it wakes nobody.
 `test_the_harness_refuses_the_pairing_too`,
 `test_id_still_delegates_its_own_maintenance`,
 `test_work_nobody_persistent_originated_is_left_alone`
+
+**I138. Corroboration is a property of evidence lineage, not speaker count.**
+Independence used to mean *the later author had not read the earlier post*.
+That is a fact about reading, and a forked worker never reads: it inherits the
+observation itself, through the context it was forked from. So it was
+board-naive by construction and scored `independent` every time.
+
+Found live on 2026-09-24, one probe after I137. Ego read the board, forked an
+`ego.neuocyte`, and the worker posted a finding at confidence 0.98 citing
+"board_read returned no posts matching..." and "board_stats show 2 findings,
+both complete". It had called neither -- no worker in the organism's history
+had invoked a tool at all. Those were Ego's observations, inherited through the
+fork and restated as first-hand. The content may well have been accurate; the
+attribution was not, and the old rule counted it as corroboration of Ego's own
+claim.
+
+Two identities are kept apart, and conflating them breaks this in both
+directions:
+
+| | |
+|---|---|
+| **evidence root** | *which acquisition it was* -- the source lineage |
+| **content digest** | *what it returned* -- the payload |
+
+Two independent computations that both print `0` share a payload and are still
+two observations. One source consulted twice yields two payloads and is still
+one observation. Rooting corroboration in the digest gets both backwards, and
+so does keying the acquisition log by a payload-derived handle: an actor
+acquiring identical bytes from two sources keeps only the first root. That is
+why `acquisitions` is its own table, keyed by `(actor, evidence_root)`, beside
+the retrieval handle rather than inside it -- `issued_results` answers "may
+this actor open this payload", which is a question about payloads.
+
+A retrieval is rooted in *what was consulted*, so the same source re-read --
+by the same actor or a different one -- is one root. That is what makes "the
+worker went and looked itself" honest without making it corroboration. A fresh
+acquisition -- a computation, a file read, a measurement -- is rooted in the
+*act*, because performing one is observing something new. A tool nobody has
+classified is treated as a retrieval: the conservative direction is not
+manufacturing independence.
+
+Roots are written by the Harness at acquisition, never claimed by a caller. A
+post may say whatever it likes in its body and its evidence notes; what it
+cannot do is assert a root it did not acquire. Acquiring a snapshot copies the
+forker's roots to the heir marked `inherited` -- the worker may cite them and
+reason from them, which is the point of inheriting context, but repeating an
+observation is not making one, and inherited roots never add support.
+
+What the old rule was reaching for is real and is kept under its own name. Two
+reasoners arriving at the same answer from the same evidence says something
+about the reasoning; it says nothing further about the evidence. That is
+reported as `concurring_reasoning`, and it can never move
+`independent_support`.
+→ `test_a_worker_repeating_what_it_inherited_adds_nothing`,
+`test_two_workers_inheriting_the_same_observation_add_nothing`,
+`test_a_worker_rereading_the_same_source_adds_nothing`,
+`test_a_worker_observing_something_else_corroborates`,
+`test_inherited_plus_newly_acquired_counts_only_the_new`,
+`test_distinct_authors_cannot_manufacture_independence`,
+`test_an_actor_cannot_claim_a_root_it_did_not_acquire`,
+`test_inheritance_is_durable_and_stays_inherited`,
+`test_a_fork_passes_its_forkers_observations_on_as_inherited`,
+`test_invoking_a_tool_records_what_the_role_observed`,
+`test_a_workers_tool_call_is_recorded_as_its_own_observation`,
+`test_independence_and_corroboration_over_rpc`,
+`test_two_computations_with_the_same_output_are_two_observations`,
+`test_one_source_consulted_twice_is_one_observation`,
+`test_an_unclassified_tool_does_not_manufacture_independence`,
+`test_two_reasoners_agreeing_from_the_same_evidence_is_not_corroboration`
 
 **I73. A role is never wedged by a turn it did not close.** One open turn per
 role is a database constraint, so a turn left running blocks every future turn

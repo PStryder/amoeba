@@ -1966,7 +1966,9 @@ MUTATIONS: list[Mutation] = [
         '        "oldest_unaudited": None,  # MUTANT: a count with no route',
         ["test_the_digest_names_the_conclusion_it_is_counting",
          "test_audit_dossier_with_no_argument_resolves_the_oldest_unaudited",
-         "test_a_refusal_says_what_the_value_was_and_where_a_real_one_lives"],
+         "test_a_refusal_says_what_the_value_was_and_where_a_real_one_lives",
+         "test_a_relation_with_the_wrong_keys_is_not_called_an_unknown_relation",
+         "test_a_genuinely_unknown_relation_still_says_so"],
         layer="heartbeat digest / audit_dossier / role_tool_invoke refusals (how a mind reaches what it is told about)",
         note="The primary mutant is the state that made Id invent identifiers: a count of seventeen with nothing to call. Separately verified to die for a dossier that cannot be reached without an id, for a refusal that says nothing about the value, for a merely absent identifier called malformed, and for nothing saying where a real one comes from.",
         also=[("src/amoeba/supervisor_api.py",
@@ -1977,7 +1979,11 @@ MUTATIONS: list[Mutation] = [
                "            for key, value in {}.items():  # MUTANT: nothing about the value"),
               ("src/amoeba/identifiers.py",
                '    return SOURCES.get(argument, "")',
-               '    return ""  # MUTANT: the count without the route')],
+               '    return ""  # MUTANT: the count without the route'),
+              ("src/amoeba/store/board_repo.py",
+               '            missing = [k for k in ("to_post", "relation") if k not in rel]',
+               "            missing = []  # MUTANT: a missing key reported as a bad value\n"
+               '            rel = {"relation": rel.get("relation"), **rel}')],
     ),
     Mutation(
         "I128", "The organism is not blind when it is strained",
@@ -2270,6 +2276,56 @@ MUTATIONS: list[Mutation] = [
               ("src/amoeba/supervisor_api.py",
                "        _class_belongs_to(origin_actor, work_class)",
                "        pass  # MUTANT: the Harness does not check the pairing")],
+    ),
+    Mutation(
+        "I138", "Corroboration is a property of evidence lineage, not speaker count",
+        "src/amoeba/store/board_repo.py",
+        "        elif new_roots:",
+        "        elif not same_author:  # MUTANT: a second speaker is a second witness",
+        ["test_a_worker_repeating_what_it_inherited_adds_nothing",
+         "test_two_workers_inheriting_the_same_observation_add_nothing",
+         "test_a_worker_rereading_the_same_source_adds_nothing",
+         "test_a_worker_observing_something_else_corroborates",
+         "test_inherited_plus_newly_acquired_counts_only_the_new",
+         "test_distinct_authors_cannot_manufacture_independence",
+         "test_inheritance_is_durable_and_stays_inherited",
+         "test_a_fork_passes_its_forkers_observations_on_as_inherited",
+         "test_invoking_a_tool_records_what_the_role_observed",
+         "test_a_workers_tool_call_is_recorded_as_its_own_observation",
+         "test_independence_and_corroboration_over_rpc",
+         "test_two_computations_with_the_same_output_are_two_observations",
+         "test_two_reasoners_agreeing_from_the_same_evidence_is_not_corroboration"],
+        layer="BoardRepo.independence (what makes agreement evidence)",
+        note="The primary mutant is the old rule: a different author who had not "
+             "read the earlier post counted as independent. A forked worker never "
+             "reads a post -- it inherits the observation through the context -- so "
+             "it was board-naive by construction and scored independent every time. "
+             "Live on 2026-09-24 a worker cited Ego's board_read and board_stats as "
+             "its own evidence at confidence 0.98, having called neither. Separately "
+             "verified to die for inherited roots counted as first-hand, which is the "
+             "same defect one layer down; for a fork that passes nothing on, which "
+             "leaves the heir with an empty record and every restatement looking like "
+             "its own; and for rooting identity in the payload instead of the act, "
+             "which would make two computations that both print 0 one observation.",
+        also=[("src/amoeba/results.py",
+               "    if first_hand_only:\n        sql.append(\" AND acquired = 'first_hand'\")",
+               "    if False:  # MUTANT: inherited evidence counts as your own\n"
+               "        sql.append(\" AND acquired = 'first_hand'\")"),
+              ("src/amoeba/supervisor_api.py",
+               '            inherit_roots(mind, heir=holder, source=snap["actor"],',
+               '            dict(  # MUTANT: a fork passes nothing on\n'
+               '                mind=mind, heir=holder, source=snap["actor"],'),
+              ("src/amoeba/results.py",
+               '    if name in FRESH_ACQUISITION:\n        return f"acq:{new_id(\'evr\')}"',
+               '    if False:  # MUTANT: identity from the payload, not the act\n'
+               '        return f"acq:{new_id(\'evr\')}"'),
+              ("src/amoeba/turn_api.py",
+               "        _record_acquisition(role, name, arguments, result)",
+               "        pass  # MUTANT: the tool loop records no observation"),
+              ("src/amoeba/harness_api.py",
+               "                issue_result(mind, _dump_result(outcome.result), role=neuocyte_id,\n"
+               '                             tool=name, arguments=arguments, actor="harness")',
+               "                pass  # MUTANT: a worker's own call goes unrecorded")],
     ),
     Mutation(
         "I111", "A generation is admitted only if its whole allowance fits",

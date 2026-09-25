@@ -33,6 +33,7 @@ from .results import issue_result, issued_digest
 from . import mailbox
 from .errors import InvalidInput, NotFound
 from .scopes import model_facing_verbs
+from .tools import _dump as _dump_result
 from .tools import (RESULT_READ_VERB, deliver_tool_result, read_result_path,
                     redact_arguments as _redact)
 from .store.events import EventKind
@@ -366,6 +367,11 @@ def build(sup: "Supervisor") -> dict[str, Any]:  # noqa: C901
         delivered = deliver_tool_result(
             result, store=_store, count=count_tokens,
             budget_tokens=int(getattr(sup.cfg, role).tool_result_budget_tokens))
+        # The acquisition receipt, written whatever the result's size. It used
+        # to exist only for results too large to show whole, which left the
+        # system unable to say what a mind had actually observed -- so
+        # corroboration guessed from who had read which board post (I138).
+        _record_acquisition(role, name, arguments, result)
         return _recorded({"accepted": True, "result": result, "reason": None,
                           "result_text": delivered["text"],
                           "result_complete": delivered["complete"],
@@ -373,6 +379,21 @@ def build(sup: "Supervisor") -> dict[str, Any]:  # noqa: C901
                           "result_chars": delivered["chars"],
                           "result_ref": delivered["result_ref"],
                           "result_sha256": delivered["sha256"]}, role_name=role)
+
+    def _record_acquisition(actor: str, tool: str, arguments: Any,
+                            result: Any) -> None:
+        """What this actor observed, and which source lineage it came from.
+
+        Best effort: an observation happened whether or not the bookkeeping
+        succeeded, and failing the call that made it would lose the result to
+        protect the note about it.
+        """
+        try:
+            issue_result(mind, _dump_result(result), role=actor, tool=tool,
+                         arguments=arguments, actor="harness")
+        except Exception:  # noqa: BLE001
+            sup.log.debug("could not record %s's acquisition via %s", actor,
+                          tool, exc_info=True)
 
     def count_tokens(text: str) -> int:
         """Model tokens, measured by the model's own tokenizer.

@@ -742,6 +742,36 @@ CREATE TABLE IF NOT EXISTS issued_results (
   PRIMARY KEY (result_ref, issued_to)
 );
 
+-- What each actor has observed, and from which source lineage. Separate from
+-- `issued_results` on purpose: that table is a retrieval handle, keyed by the
+-- content digest because that is what a handle is for. This one is the
+-- evidentiary record, keyed by the acquisition, because corroboration is a
+-- property of evidence lineage and not of payloads (I138).
+--
+--   evidence_root  WHICH acquisition it was -- the source lineage
+--   sha256         WHAT it returned -- the payload
+--
+-- Two independent computations that both print "0" share a payload and are
+-- still two observations. One source consulted twice yields two payloads and
+-- is still one observation. Keying this by the digest got both backwards.
+--
+-- `acquired` says whether this actor made the observation or received
+-- somebody else's, which is what a forked worker gets along with the context.
+-- Inherited roots may be cited and reasoned from; they never add support,
+-- because repeating an observation is not making one.
+CREATE TABLE IF NOT EXISTS acquisitions (
+  actor          TEXT NOT NULL,
+  evidence_root  TEXT NOT NULL,
+  sha256         TEXT,
+  tool           TEXT,
+  created_at     REAL NOT NULL,
+  acquired       TEXT NOT NULL DEFAULT 'first_hand',
+  inherited_from TEXT,
+  PRIMARY KEY (actor, evidence_root)
+);
+CREATE INDEX IF NOT EXISTS ix_acquired_by
+  ON acquisitions(actor, acquired, created_at);
+
 CREATE TABLE IF NOT EXISTS turn_spans (
   turn_id          TEXT NOT NULL,
   session_handle   TEXT NOT NULL,

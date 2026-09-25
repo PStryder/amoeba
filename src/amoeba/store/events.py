@@ -321,6 +321,7 @@ CONTENT_REFERENCES: tuple[tuple[str, str, str], ...] = (
     ("interaction_inputs", "input_id", "sha256"),
     ("interaction_results", "result_id", "sha256"),
     ("issued_results", "result_ref", "sha256"),
+    ("acquisitions", "evidence_root", "sha256"),
     ("artifacts", "artifact_id", "sha256"),
     ("board_evidence", "id", "blob_sha256"),
     ("conclusion_evidence", "id", "blob_sha256"),

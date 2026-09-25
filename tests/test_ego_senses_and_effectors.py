@@ -23,6 +23,7 @@ proves what the dispatcher does.
 from __future__ import annotations
 
 import json
+import sqlite3
 import sys
 
 import pytest
@@ -453,3 +454,33 @@ def test_ego_keeps_the_verbs_it_legitimately_needs(org):
     assert org.ego.call("ego_work_view") is not None
     assert org.ego.call("board_post", author="ego", author_kind="ego",
                         post_type="note", body="a note")["post_id"]
+
+
+def test_a_workers_tool_call_is_recorded_as_its_own_observation(org):
+    """The worker end of I138's wire, through the real execution path.
+
+    A neuocyte's acquisitions are the ones corroboration most needs to tell
+    apart from what it inherited, and this is where they are written. If the
+    harness stopped recording them a worker would hold nothing first-hand,
+    every finding it posted would read as inherited, and nothing it genuinely
+    went and measured could ever count as corroboration.
+    """
+    work_id = org.call("admit_work", objective="observe something",
+                       work_class="user", origin_actor="ego")["work_id"]
+    item = org.call("lease_work", neuocyte_id="nc_obs", work_id=work_id)
+    org.call("tool_invoke", neuocyte_id="nc_obs", work_id=work_id,
+             fencing_token=item["fencing_token"], name="current_state_version",
+             arguments={})
+
+    db = sqlite3.connect(f"file:{org.cfg.db_path.as_posix()}?mode=ro", uri=True)
+    try:
+        rows = db.execute(
+            "SELECT evidence_root, acquired FROM acquisitions WHERE actor = ?",
+            ("nc_obs",)).fetchall()
+    finally:
+        db.close()
+
+    assert rows, "the worker's tool call recorded no observation"
+    assert all(r[1] == "first_hand" for r in rows), (
+        "a worker's own tool call was not recorded as its own")
+    org.call("cancel_work", work_id=work_id, reason="test")

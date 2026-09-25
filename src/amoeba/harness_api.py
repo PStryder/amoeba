@@ -25,6 +25,8 @@ from .ids import new_id, sha256_hex
 from .sandbox import SandboxLimits
 from .store.events import EventKind
 from .filespace import decode_exact_text
+from .results import issue_result
+from .tools import _dump as _dump_result
 from .tools import (ToolCallRequest, deliver_tool_result,
                     redact_arguments as _redact,
                     build_neuocyte_registry)
@@ -1032,6 +1034,15 @@ def build(sup: "Supervisor") -> dict[str, Any]:  # noqa: C901
         delivered = deliver_tool_result(
             outcome.result, retrieve=None,
             store=lambda text: mind.blobs.put(text.encode("utf-8")))
+        # A worker observes for itself too, and its observations are the ones
+        # corroboration most needs to tell apart from what it inherited.
+        if outcome.accepted:
+            try:
+                issue_result(mind, _dump_result(outcome.result), role=neuocyte_id,
+                             tool=name, arguments=arguments, actor="harness")
+            except Exception:  # noqa: BLE001
+                sup.log.debug("could not record %s's acquisition via %s",
+                              neuocyte_id, name, exc_info=True)
         return {**outcome.to_dict(), "receipt_id": receipt.receipt_id,
                 "turn": turn,
                 "result_text": delivered["text"],

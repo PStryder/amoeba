@@ -573,10 +573,15 @@ class Neuocyte:
         """Show the neuocyte the board only if its work item permits it.
 
         A work item admitted with ``board_access="none"`` produces a
-        board-naive neuocyte on purpose. That is what makes later agreement
-        between two neuocytes evidence of independent replication rather than one
-        of them having read the other. Reading is recorded against this neuocyte
-        the moment it happens.
+        board-naive neuocyte on purpose: it cannot have read what another
+        neuocyte posted, so it cannot be echoing it. Reading is recorded
+        against this neuocyte the moment it happens.
+
+        That is a fact about influence and not about evidence. Every neuocyte
+        here is board-naive in the way that matters least -- it never read a
+        post -- while inheriting the whole context it was forked from, so
+        agreement between two of them is corroboration only if they observed
+        different things (I138).
         """
         access = item.get("board_access", "read_write")
         if access == "none":

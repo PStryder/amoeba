@@ -1006,7 +1006,8 @@ class Supervisor:
             "hard_deadline": time.time() + self.cfg.arbiter.neuocyte_wall_seconds + 30,
         }
         self.arbiter.note_served(work_class)
-        self.log.info("dispatched %s neuocyte %s for %s", work_class, neuocyte_id, row["work_id"])
+        self.log.info("dispatched %s neuocyte %s for %s", work_class, neuocyte_id,
+                      work_id)
 
     def _kill_neuocyte(self, neuocyte_id: str, *, reason: str) -> None:
         info = self.neuocytes.pop(neuocyte_id, None)

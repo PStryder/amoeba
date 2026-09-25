@@ -175,10 +175,13 @@ def build(sup: "Supervisor") -> dict[str, Any]:  # noqa: C901
                                  ) -> dict[str, Any]:
         """Ask for bounded investigation by Id neuocytes.
 
-        ``independent=True`` admits each replica board-naive, so later
-        agreement between them is replication rather than an echo. That is the
-        whole reason the flag exists, and it is why the replicas are admitted
-        as separate work items rather than one item doing the work twice.
+        ``independent=True`` admits each replica board-naive, so no replica can
+        read another's post and echo it, and it is why the replicas are
+        admitted as separate work items rather than one item doing the work
+        twice. It isolates influence, which is not the same as producing
+        evidence: replicas that go and observe different things corroborate
+        each other, and replicas that only reason from the same inherited
+        context do not, however many of them agree (I138).
 
         The Arbiter still decides. Id requests; it does not schedule.
         """
@@ -198,8 +201,16 @@ def build(sup: "Supervisor") -> dict[str, Any]:  # noqa: C901
         return {"requested": int(replicas), "admitted": admitted,
                 "refused": refused, "independent": bool(independent),
                 "provenance": prov,
-                "note": ("admitted board-naive, so agreement between replicas "
-                         "is independent replication"
+                # What the flag bought, stated as what it is. It used to say
+                # agreement between board-naive replicas was independent
+                # replication, which is the claim I138 exists to refuse: they
+                # inherit the same context, so agreement can be one observation
+                # restated. Only a distinct acquisition makes it corroboration,
+                # and `board_corroboration` is where that is answered.
+                "note": ("admitted board-naive, so no replica can echo "
+                         "another's post; whether their agreement is "
+                         "corroboration depends on what each one went and "
+                         "observed, not on how many agree"
                          if independent else
                          "replicas can read the board; agreement may be social")}
 
