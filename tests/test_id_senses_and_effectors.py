@@ -146,7 +146,15 @@ def test_the_pulse_reports_observations_not_verdicts(org):
                 walk(item, path)
 
     walk(p)
-    assert "no health verdicts" in p["contract"]["reports"]
+    # One labelled classification is allowed and is named; everything else is
+    # a measurement. The pulse used to claim it made no judgements at all
+    # while deriving `thinking` from a threshold -- two documented policies
+    # contradicting each other, resolved in I126's favour because a mind that
+    # cannot think cannot be the one to notice it cannot think (item 12).
+    reports = p["contract"]["reports"]
+    assert "thinking" in reports and "measurement" in reports
+    thinking = p["roles"]["id"]["thinking"] if "roles" in p else None
+    assert thinking is None or isinstance(thinking, bool)
 
 
 def test_the_pulse_moves_when_work_moves(org):

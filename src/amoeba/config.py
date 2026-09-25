@@ -232,6 +232,13 @@ class SchedulerConfig:
     # truncates. The chain stops here and the reason is recorded, rather than
     # the organism quietly burning its context.
     max_continuations: int = 3
+    # Recovery is not progress. A continuation after the output ceiling means
+    # the model has more to say; one after context pressure means the turn was
+    # rebuilt and has said nothing new. Sharing one budget let a thought spend
+    # its ability to answer on housekeeping, so they are counted apart -- and
+    # this one is bounded too, because unlimited recovery is a rejuvenation
+    # loop with extra steps.
+    max_pressure_recoveries: int = 2
 
     # Wall clock for one bounded role turn, independent of the tool-turn and
     # token bounds.

@@ -181,10 +181,19 @@ def test_the_pulse_reports_a_role_that_cannot_think(mind):
     cfg.scheduler.role_failure_threshold_turns = 3
     pulse = PulseCollector(SimpleNamespace(mind=mind, cfg=cfg))
 
-    assert pulse._thinking("id") == {"consecutive_failed_turns": 0, "thinking": True}
+    well = pulse._thinking("id")
+    assert well["consecutive_failed_turns"] == 0 and well["thinking"] is True
+    # The threshold travels with the verdict, so a reader can recompute it
+    # rather than take the boolean on trust (audit item 12).
+    assert well["failure_threshold_turns"] == 3
+
     for _ in range(3):
         _turn(mind, "id", "role_failure")
-    assert pulse._thinking("id") == {"consecutive_failed_turns": 3, "thinking": False}
+
+    unwell = pulse._thinking("id")
+    assert unwell["consecutive_failed_turns"] == 3 and unwell["thinking"] is False
+    assert unwell["failure_threshold_turns"] == 3
+    assert unwell["last_failed_stop_reason"] == "role_failure"
 
 
 def test_a_role_that_cannot_think_counts_as_a_failure(mind):

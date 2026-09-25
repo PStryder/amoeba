@@ -327,6 +327,54 @@ def test_the_continuation_chain_is_bounded(mind):
     assert _claim(mind, "ego") is None, "the chain left work queued"
 
 
+def test_rebuilding_has_its_own_bound(mind):
+    """Recovery is bounded too, and separately from saying more.
+
+    Unbounded rejuvenation is a loop: a turn rebuilt, continued, rebuilt
+    again, forever, with nothing said. Splitting the allowances (I68b) is what
+    keeps a rebuilt turn from spending the answer's budget -- and this is the
+    other half, which keeps the recovery budget from being infinite.
+    """
+    _queue(mind, "ego")
+    turn = _claim(mind, "ego")
+    rebuilds = 0
+    while True:
+        out = _complete(mind, turn["turn_id"], stop_reason="context_pressure",
+                        max_continuations=3, max_pressure_recoveries=2)
+        if out["continuation"] is None:
+            break
+        rebuilds += 1
+        assert rebuilds <= 3, "a rebuilt turn rebuilt forever"
+        turn = _claim(mind, "ego")
+
+    assert rebuilds == 2, (
+        f"the recovery bound did not bind: {rebuilds} rebuilds")
+
+
+def test_rebuilding_leaves_the_answers_allowance_alone(mind):
+    """One recovery, then the room to actually say something."""
+    _queue(mind, "ego")
+    turn = _claim(mind, "ego")
+
+    out = _complete(mind, turn["turn_id"], stop_reason="context_pressure",
+                    max_continuations=3, max_pressure_recoveries=2)
+    assert out["continuation"] is not None
+
+    said = 0
+    turn = _claim(mind, "ego")
+    while True:
+        out = _complete(mind, turn["turn_id"], stop_reason="max_output_tokens",
+                        max_continuations=3, max_pressure_recoveries=2)
+        if out["continuation"] is None:
+            break
+        said += 1
+        assert said <= 4
+        turn = _claim(mind, "ego")
+
+    assert said == 3, (
+        f"the rebuild ate into the allowance for saying more: {said} of 3")
+
+
 def test_continuation_depth_counts_only_the_chain(mind):
     """An ordinary trigger starts a fresh chain however long the history."""
     _queue(mind, "ego")
@@ -1207,12 +1255,22 @@ def test_a_turns_operation_reaches_what_the_role_does(mind):
                      "operation_id": "op-C"}]
 
 
-def test_the_harness_does_not_override_an_operation_the_caller_gave(mind):
-    """Supplying a default is not the same as seizing the argument.
+def test_the_harness_binds_lineage_rather_than_defaulting_it(mind):
+    """A caller does not get to say who it is acting for.
 
-    The injection fills a gap; a verb called with an explicit operation keeps
-    it. Otherwise the Harness would silently rewrite the accountability of a
-    call that already knew its own.
+    This used to assert the opposite -- that an explicit `operation_id` was
+    kept, on the reasoning that filling a gap is not seizing an argument. An
+    audit on 2026-09-24 showed what that reasoning costs: defaulting means a
+    supplied value wins, so causal lineage rested entirely on the role process
+    stripping the argument before it ever reached here. Trusted code doing the
+    right thing, rather than the server making the wrong thing impossible --
+    and a faulty role process could misattribute every piece of work it
+    delegated.
+
+    Lineage is now bound from the turn. Where `operation_id` names the
+    operation to *look at* rather than the one being acted for -- `provenance`,
+    `history`, `audit_dossier` and their kin -- it is left alone, because that
+    is a question and not a claim about who is asking.
     """
     from amoeba import turn_api
 
@@ -1241,7 +1299,89 @@ def test_the_harness_does_not_override_an_operation_the_caller_gave(mind):
     verbs["role_tool_invoke"](
         turn_id=turn["turn_id"], name="ego_request_work",
         arguments={"objective": "x", "operation_id": "explicit"})
-    assert seen == ["explicit"]
+    assert seen == ["op-D"], (
+        "a caller's operation_id survived, so delegated work could be "
+        "attributed to a thought that never asked for it")
+
+
+def test_a_turn_with_no_operation_does_not_let_the_caller_invent_one(mind):
+    """The discard matters most exactly where there is nothing to replace it.
+
+    When the turn has an operation, binding overwrites whatever arrived. When
+    it has none -- a heartbeat, an ambient trigger -- there is nothing to
+    overwrite with, so without an explicit discard a caller's value would
+    simply survive and become the lineage of everything delegated.
+    """
+    from amoeba import turn_api
+
+    seen: list[str | None] = []
+
+    class _Sup:
+        def __init__(self) -> None:
+            self.mind = mind
+            self.cfg = mind.cfg
+            self.log = __import__("logging").getLogger("test")
+
+        def methods(self):
+            def ego_request_work(*, objective, operation_id=None, **kw):
+                seen.append(operation_id)
+                return {"admitted": []}
+            return {"ego_request_work": ego_request_work}
+
+        def note_trigger(self, role): return None
+
+        def next_heartbeat(self, role): return None
+
+    verbs = turn_api.build(_Sup())
+    _queue(mind, "ego", kind="heartbeat", source="scheduler")
+    turn = _claim(mind, "ego")
+    verbs["role_tool_invoke"](
+        turn_id=turn["turn_id"], name="ego_request_work",
+        arguments={"objective": "x", "operation_id": "invented"})
+
+    assert seen == [None], (
+        "a turn accountable to no operation delegated work under one the "
+        "caller made up")
+
+
+def test_a_verb_that_asks_about_an_operation_still_gets_to_name_it(mind):
+    """Binding every `operation_id` would leave these unable to look outward.
+
+    `provenance`, `history` and `audit_dossier` take an operation as their
+    *subject*. Rebinding it to the calling turn would make them permanently
+    self-referential -- a role could only ever ask about the turn it was in,
+    which is the one thing it already knows.
+    """
+    from amoeba import turn_api
+
+    seen: list[str | None] = []
+
+    class _Sup:
+        def __init__(self) -> None:
+            self.mind = mind
+            self.cfg = mind.cfg
+            self.log = __import__("logging").getLogger("test")
+
+        def methods(self):
+            def provenance(*, operation_id=None, **kw):
+                seen.append(operation_id)
+                return {"events": []}
+            return {"provenance": provenance}
+
+        def note_trigger(self, role): return None
+
+        def next_heartbeat(self, role): return None
+
+    verbs = turn_api.build(_Sup())
+    _queue_op(mind, lineage="op-E", operation_id="op-E", kind="user_input",
+              source="operator", summary="look into it", expects_answer=True)
+    turn = _claim(mind, "ego")
+    verbs["role_tool_invoke"](
+        turn_id=turn["turn_id"], name="provenance",
+        arguments={"operation_id": "op-somebody-else"})
+
+    assert seen == ["op-somebody-else"], (
+        "a verb asking about an operation was rebound to its own turn")
 
 
 # ===========================================================================

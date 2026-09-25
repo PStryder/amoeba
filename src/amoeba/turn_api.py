@@ -50,6 +50,15 @@ OPERATOR_TURN_VERBS = ("role_mailbox", "role_turns", "role_turn",
                        "operator_message_role")
 
 
+# Verbs whose `operation_id` names the operation to look at or act on, rather
+# than the operation the calling turn is accountable to. For every other verb
+# the Harness binds lineage from the turn and discards what the caller sent.
+OPERATION_IS_A_TARGET = frozenset({
+    "provenance", "history", "audit_dossier", "get_operation",
+    "update_operation", "cancel_operation", "ego_status",
+})
+
+
 def build(sup: "Supervisor") -> dict[str, Any]:  # noqa: C901
     mind = sup.mind
     assert mind is not None
@@ -125,7 +134,8 @@ def build(sup: "Supervisor") -> dict[str, Any]:  # noqa: C901
                 tool_call_count=tool_call_count, result=result,
                 session_handle=session_handle, token_start=token_start,
                 token_end=token_end,
-                max_continuations=sup.cfg.scheduler.max_continuations)
+                max_continuations=sup.cfg.scheduler.max_continuations,
+                max_pressure_recoveries=sup.cfg.scheduler.max_pressure_recoveries)
 
         receipt, out = mind.writer.apply(body, actor="harness",
                                          bump_version=False)
@@ -268,22 +278,32 @@ def build(sup: "Supervisor") -> dict[str, Any]:  # noqa: C901
                              role_name=role)
         args = dict(arguments or {})
         # What a role does during a turn is accountable to the operation that
-        # caused the turn. The role cannot supply this -- `operation_id` is
-        # stripped from model-supplied arguments like every other authority
-        # argument -- so the Harness supplies it from the turn itself.
+        # caused the turn, and the Harness *binds* that rather than defaulting
+        # it. Defaulting meant a supplied value won, so causal lineage rested
+        # on the role process stripping the argument before it arrived --
+        # trusted code doing the right thing, rather than the server making
+        # the wrong thing impossible (audited 2026-09-24).
         #
         # It matters beyond bookkeeping: work delegated here comes back as a
         # trigger whose lineage is the work's operation, and if that is empty
         # the result is untagged and will not enter the continuation that
-        # delegated it.
+        # delegated it. If it is somebody *else's*, the result joins a thought
+        # that never asked for it.
         try:
             accepts = inspect.signature(handler).parameters
         except (TypeError, ValueError):  # a builtin or C callable
             accepts = {}
         takes_anything = any(p.kind is inspect.Parameter.VAR_KEYWORD
                              for p in accepts.values())
-        if row["operation_id"] and "operation_id" not in args:
-            if "operation_id" in accepts or takes_anything:
+        if name in OPERATION_IS_A_TARGET:
+            # Here `operation_id` says *which* operation to report on or act
+            # on. That is a question, not a claim about who is asking, and
+            # binding it to this turn would make these verbs unable to look at
+            # anything but themselves.
+            pass
+        elif "operation_id" in accepts or takes_anything:
+            args.pop("operation_id", None)
+            if row["operation_id"]:
                 args["operation_id"] = row["operation_id"]
         # A verb that scopes itself to the turn asking for it gets the turn,
         # from the fence rather than from the model. `turn_id` is an authority

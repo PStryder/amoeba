@@ -256,11 +256,17 @@ def verify_chain(conn: sqlite3.Connection, *, start_seq: int = 0) -> tuple[bool,
 
     The two checks below are deliberately redundant. ``chain_hash`` already
     folds the predecessor's hash into each event, so the recomputed comparison
-    catches excision and reordering on its own; the explicit ``prev_hash``
-    comparison catches the same thing one row earlier and names the offending
-    event more precisely. Deleting either leaves the other working -- which is
-    the point, and is why a mutation of one alone does not make the invariant
-    tests fail (see scripts/verify_invariants.py, I5).
+    catches excision, reordering *and* tampering on its own; the explicit
+    ``prev_hash`` comparison catches excision one row earlier and names the
+    offending event a comparison sooner. Deleting either leaves the other
+    working, which is the point.
+
+    It also means only one of them can be tested. There is no edit the
+    ``prev_hash`` comparison catches that the recomputed hash misses, so I5's
+    mutant targets the recomputed hash -- the one a test can negate -- and the
+    ``prev_hash`` check is declared masked in scripts/verify_invariants.py with
+    that reasoning. Keep it anyway: if ``chain_hash`` ever stops folding the
+    predecessor in, it is what would carry the guarantee alone.
     """
     prev = GENESIS_HASH
     if start_seq > 0:

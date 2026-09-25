@@ -114,15 +114,26 @@ def test_what_counts_as_plumbing(name, credential):
 # What a reset refuses
 # ---------------------------------------------------------------------------
 def test_a_running_organism_is_not_reset(tmp_path, capsys):
-    """The supervisor's own lock decides, by its own liveness rule."""
+    """The supervisor's own lock decides, by its own liveness rule.
+
+    Asserted on the *message*, not merely on the refusal. Since `owned()`
+    started taking the lock for the whole operation there are two ways to be
+    refused, and both print "refusing" -- so checking for that word stopped
+    distinguishing them, and the pre-flight check became unobservable. What it
+    is for is telling the operator which process to stop, which is what the
+    User Guide promises and what the lock contention alone cannot say.
+    """
     state = _organism(tmp_path)
     (state / "supervisor.lock").write_text(
         json.dumps({"pid": os.getpid(), "started": time.time()}))
     assert reset.holder(_Cfg(state)) is not None
 
     code = cli(["reset", "--config", str(_config(tmp_path, state))])
+    out = capsys.readouterr().out
     assert code == 2
-    assert "refusing" in capsys.readouterr().out
+    assert "refusing" in out
+    assert f"pid {os.getpid()}" in out, (
+        "the refusal did not name the process that owns the directory")
     assert (state / "mind.sqlite3").exists(), "a live organism was reset"
 
 

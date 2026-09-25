@@ -598,6 +598,41 @@ point at is worth more than a maze you have to trust.
 Multiple API and MCP clients sharing one Amoeba share a mind. That is a
 deployment decision, and the honest way to make it is knowingly.
 
+### Neuocyte identity is asserted, not authenticated
+
+Raised by an independent audit on 2026-09-24, confirmed, and deliberately not
+fixed yet. It is recorded here because a trust boundary nobody has written
+down is one somebody will later assume is not there.
+
+Every neuocyte loads the **same** scope token. A worker's `neuocyte_id` and
+its authorship therefore arrive as *arguments* to the calls it makes, and the
+server takes them at their word. Completion and failure are checked against
+the work item's fencing token rather than against any authenticated identity;
+`authorise_tool_call` additionally checks that the presenting worker holds the
+current lease, so the claim should not be generalised to every capability.
+
+What this does **not** mean is that model-generated text can impersonate a
+worker. A model emits tool-call blocks that the Harness parses and validates;
+it does not make RPC calls. Reaching this boundary requires a compromised
+worker *process*, which is a different and much larger thing than a model
+behaving badly.
+
+What it does mean is that the protection here is `work_id` being an
+unguessable identifier, not the fencing token. A fencing token is a small
+sequential integer — "you would also need the token" is a weak sentence, and
+saying it out loud is the point of this section.
+
+The fix, when it is worth doing: the supervisor already spawns each neuocyte
+with its id and work id, so it can hand it a per-spawn secret and have the
+Harness check that against the work row. Identity then becomes something the
+server derives rather than something the caller asserts. That changes the
+worker launch protocol and deserves its own tests, which is why it is not
+bundled into an audit sweep.
+
+Until then: **a neuocyte process is trusted code.** Treat a compromise of one
+as a compromise of the work-item surface, and note that this is an
+experimental harness rather than a hostile-tenant environment.
+
 ### External interfaces
 
 Full reference: `INTERFACES.md` (authority classes, the JSON-RPC protocol and endpoints, the MCP adapter, the operator console, and why an I/O client has no route to protected state).
@@ -824,6 +859,25 @@ recorded, not an invisible extension.
 → `test_a_non_terminal_stop_schedules_a_continuation`,
 `test_a_terminal_stop_leaves_the_role_idle`
 
+**I68b. Recovery and progress spend different allowances.** Continuation
+depth counted parent links without asking what caused them, so two
+rejuvenations spent two of a thought's three continuations -- and a turn could
+exhaust its ability to answer by doing housekeeping. They are different
+things: a continuation after the output ceiling means the model has more to
+say, one after context pressure means the turn was rebuilt and has said
+nothing new. `continuation_depths` splits them by the parent's stop reason and
+each is bounded on its own (`max_continuations`, `max_pressure_recoveries`),
+because unbounded recovery is a rejuvenation loop with extra steps. Which
+bound ran out is reported, since "it kept being rebuilt" and "it had more to
+say and ran out of turns" are different things to tell an operator.
+
+Raised by audit as a policy question rather than a defect, and decided this
+way on the mechanism rather than on an observed starvation: no reproduction
+exists, and the cost of being wrong is two counters instead of one.
+→ `test_a_rebuilt_turn_does_not_spend_the_answers_allowance`,
+`test_saying_more_spends_the_allowance_for_saying_more`,
+`test_a_turn_reached_without_continuations_has_spent_nothing`
+
 **I68. The continuation chain is bounded.** Found by running it: with a backend
 that always truncated, every turn scheduled a successor that also truncated,
 and the organism burned its context until inference refused the prompt. An
@@ -945,6 +999,23 @@ old request to "owed nothing" rather than inventing an answer for it.
 → `test_a_database_from_the_previous_release_gains_the_ownership_columns`,
 `test_the_upgrade_does_not_invent_answers_for_old_requests`
 
+**I85b. Causal lineage is bound by the Harness, and a query target is not
+lineage.** The injection above used to *default* `operation_id`: a value the
+caller supplied won. So accountability rested on the role process stripping
+the argument before it arrived -- trusted code doing the right thing, rather
+than the server making the wrong thing impossible, and a faulty role could
+misattribute everything it delegated (audited 2026-09-24). It is bound now,
+and what the caller sent is discarded.
+
+With one carve-out, because the word means two things. In `provenance`,
+`history`, `audit_dossier`, `get_operation`, `update_operation`,
+`cancel_operation` and `ego_status`, `operation_id` names the operation to
+*look at or act on* -- a question, not a claim about who is asking. Binding
+those would leave them permanently self-referential, able to ask only about
+the turn already asking. They are listed explicitly rather than guessed at.
+→ `test_the_harness_binds_lineage_rather_than_defaulting_it`,
+`test_a_verb_that_asks_about_an_operation_still_gets_to_name_it`
+
 **I85. Work delegated during a turn is accountable to that turn.** Scoping
 evidence by lineage only helps if evidence carries the right one. A role's
 tool call cannot supply its own operation -- `operation_id` is stripped from
@@ -956,7 +1027,7 @@ it, which would have made lineage look like a bug rather than a boundary.
 → `test_a_turns_operation_reaches_what_the_role_does`,
 `test_a_continuation_keeps_the_operation_it_continues`,
 `test_a_delegated_result_returns_to_the_thought_that_asked`,
-`test_the_harness_does_not_override_an_operation_the_caller_gave`
+`test_the_harness_binds_lineage_rather_than_defaulting_it`
 
 **I86. A result the model cannot see whole says so.** A tool result was
 serialized and cut at a fixed length with nothing said, so a model that asked
@@ -1851,6 +1922,23 @@ agrees to it, so a real question sharing the turn is never shortened.
 `test_a_claimed_turn_carries_the_ceiling_its_inputs_agreed`,
 `test_a_live_quiet_review_is_cheap`,
 `test_context_telemetry_is_compact_for_a_role_by_default`
+
+**I126b. The pulse carries one labelled classification, with what it was
+derived from.** The pulse's own contract said it made no health verdicts,
+while `thinking` was derived from a failure threshold -- two documented
+policies contradicting each other in writing, which an audit found on
+2026-09-24. I126 wins, because it was paid for: Id was dead for thirty-seven
+hours while answering health probes cheerfully, and a mind that cannot think
+cannot be the one to notice it cannot think. That classification therefore
+cannot live in cognition.
+
+The claim is narrowed rather than left false. `thinking` ships beside
+`consecutive_failed_turns`, `failure_threshold_turns` and
+`last_failed_stop_reason`, so a reader can recompute it and disagree -- which
+is the difference between a verdict and a labelled measurement. Every other
+field remains an observation, still enforced by the field-name test.
+→ `test_the_pulse_reports_a_role_that_cannot_think`,
+`test_the_pulse_reports_observations_not_verdicts`
 
 **I126. Answering is not thinking, and the Harness is the one who knows the
 difference.** Id lost its inference session to a rejuvenation it had

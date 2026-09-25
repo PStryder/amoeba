@@ -686,6 +686,38 @@ def continuation_depth(conn, turn_id: str, *, limit: int = 32) -> int:
     return depth
 
 
+def continuation_depths(conn, turn_id: str, *, limit: int = 32) -> dict[str, int]:
+    """The continuations behind this turn, split by what caused each one.
+
+    A link exists because the *parent* stopped without finishing, so the
+    parent's stop reason says which kind of continuation this was: recovery
+    from context pressure, or more room to say the rest of an answer. Counting
+    them together let two rejuvenations spend two thirds of a thought's
+    allowance without a word of it being written.
+    """
+    counts = {"output": 0, "pressure": 0}
+    current = turn_id
+    seen: set[str] = set()
+    steps = 0
+    while current and steps < limit:
+        if current in seen:
+            break
+        seen.add(current)
+        row = conn.execute(
+            "SELECT parent_turn FROM role_turns WHERE turn_id = ?",
+            (current,)).fetchone()
+        if row is None or not row["parent_turn"]:
+            break
+        parent = conn.execute(
+            "SELECT stop_reason FROM role_turns WHERE turn_id = ?",
+            (row["parent_turn"],)).fetchone()
+        why = (parent["stop_reason"] if parent else None) or ""
+        counts["pressure" if why == "context_pressure" else "output"] += 1
+        steps += 1
+        current = row["parent_turn"]
+    return counts
+
+
 def turn_lineage_of(conn, turn_id: str) -> str | None:
     """Whose interaction a turn serves.
 
@@ -895,7 +927,8 @@ def complete(m: Mutation, mind: "Mind", *, turn_id: str, stop_reason: str,
              status: str = "completed",
              session_handle: str | None = None,
              token_start: int | None = None, token_end: int | None = None,
-             max_continuations: int = 3) -> dict[str, Any]:
+             max_continuations: int = 3,
+             max_pressure_recoveries: int = 2) -> dict[str, Any]:
     """Close a turn, consume its triggers, and decide whether to continue.
 
     Consumption happens here rather than at claim time so a role that dies
@@ -960,7 +993,10 @@ def complete(m: Mutation, mind: "Mind", *, turn_id: str, stop_reason: str,
     answered: list[str] = []
     continuation = None
     depth = continuation_depth(mind.db.conn, turn_id)
-    exhausted = depth >= max(0, int(max_continuations))
+    spent = continuation_depths(mind.db.conn, turn_id)
+    out_of_output = spent["output"] >= max(0, int(max_continuations))
+    out_of_recovery = spent["pressure"] >= max(0, int(max_pressure_recoveries))
+    exhausted = out_of_output or out_of_recovery
     interrupted = status == "completed" and stop_reason in NON_TERMINAL
     continuing = interrupted and not exhausted
 
@@ -971,7 +1007,13 @@ def complete(m: Mutation, mind: "Mind", *, turn_id: str, stop_reason: str,
         # that concluded, and reporting it as "answered" would tell the
         # caller, permanently, that the fragment was the reply.
         finished = stop_reason == "model_stop" and not interrupted
-        ended_because = "continuation_limit" if interrupted else stop_reason
+        # Which bound ran out matters to whoever reads this: "it kept being
+        # rebuilt" is a different thing to tell an operator than "it had more
+        # to say and ran out of turns".
+        ended_because = stop_reason
+        if interrupted:
+            ended_because = ("pressure_recovery_limit" if out_of_recovery
+                             else "continuation_limit")
         outcomes: list[dict[str, Any]] = []
         for req in awaiting:
             text, segments = assemble_answer(

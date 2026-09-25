@@ -2,7 +2,7 @@
 
 Id's first sense. One call, structured facts, no judgements.
 
-## It reports observations, never verdicts
+## It reports observations, and exactly one labelled classification
 
 There is no `ego_unhealthy` field and there will not be one. The pulse says
 what the last heartbeat was, what the context occupancy is, and how many
@@ -11,8 +11,23 @@ adds up to "unhealthy" is Id's job. Putting the conclusion here would move
 cognition into the Harness and leave Id agreeing with a number it cannot
 inspect.
 
-That distinction is enforced by a test, not just a convention: no field name
-in the pulse may read as a verdict.
+The one exception is `thinking`, and it is deliberate. I126 requires the
+Harness itself to notice a role whose turns keep failing -- Id was dead for
+thirty-seven hours while answering health probes cheerfully, and a role asked
+whether it is well is the worst available witness. A mind that cannot think
+cannot be the one to notice it cannot think, so that classification cannot
+live in cognition.
+
+An audit on 2026-09-24 found these two policies contradicting each other in
+writing, and I126 is the one that was paid for. So the claim here is narrowed
+rather than quietly false: the pulse carries *one* operational
+classification, it is named, and it ships with the observation and the
+threshold it was derived from -- `consecutive_failed_turns`,
+`failure_threshold_turns`, `thinking`. A reader can recompute it and disagree.
+That is the difference between a verdict and a labelled measurement.
+
+The rest of the distinction is still enforced by a test rather than
+convention: no *other* field name in the pulse may read as a verdict.
 
 ## It is cheap on purpose
 
@@ -146,9 +161,15 @@ class PulseCollector:
             streak = mailbox.failing_streak(self.sup.mind.db.conn, role)
         except Exception:  # noqa: BLE001
             return {}
+        threshold = int(self.sup.cfg.scheduler.role_failure_threshold_turns)
+        # The observation, the threshold, and the classification drawn from
+        # them. Reporting only the verdict would be asking a reader to trust a
+        # boolean it cannot recompute; reporting only the count would leave
+        # I126's guarantee unstated.
         return {"consecutive_failed_turns": streak["turns"],
-                "thinking": streak["turns"] < int(
-                    self.sup.cfg.scheduler.role_failure_threshold_turns)}
+                "failure_threshold_turns": threshold,
+                "last_failed_stop_reason": streak.get("stop_reason") or None,
+                "thinking": streak["turns"] < threshold}
 
     def failures_last(self, window: str = "last_5m") -> dict[str, int]:
         """Failure counts in one window, for a caller deciding whether to act."""
@@ -420,7 +441,10 @@ class PulseCollector:
                 "open_disagreements": pending["open_disagreements"],
             },
             "contract": {
-                "reports": "observations only; no health verdicts are made here",
+                "reports": ("observations, plus one labelled operational "
+                            "classification: `thinking`, which ships with the "
+                            "count and threshold it was derived from (I126). "
+                            "Every other field is a measurement."),
                 "excluded": ["blackboard contents", "artifact bodies", "logs",
                              "exception text", "memory claims"],
                 "note": ("cheap enough to poll; use id_health, provenance, "

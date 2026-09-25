@@ -65,7 +65,8 @@ class Mutation:
     # scope -- and a harness that could not express that would report SKIP,
     # which proves nothing while looking like success.
     also: list[tuple[str, ...]] = field(default_factory=list)
-    # Trials that are *expected* to survive, by label ("primary", "also[2]"),
+    # Trials that are *expected* to survive, keyed by trial ("primary",
+    # "also[2]" -- without the file name the report appends),
     # each with the reason. A guarantee defended at two layers has mutants
     # that cannot be observed one at a time: removing either leaves the other
     # enforcing it, so the tests rightly pass and WEAK would be the wrong
@@ -120,17 +121,30 @@ MUTATIONS: list[Mutation] = [
     Mutation(
         "I5", "The hash chain detects mutation",
         "src/amoeba/store/events.py",
-        '        if row["prev_hash"] != prev:',
-        '        if False:  # MUTANT: linkage check 1 removed',
+        '        if expect != row["event_hash"]:',
+        '        if False:  # MUTANT: the recomputed hash is not compared',
         ["test_a_broken_chain_link_is_detected_not_just_a_tampered_payload",
          "test_hash_chain_detects_tampering"],
-        layer="events.verify_chain (both linkage checks)",
-        note="this claim is defended twice over. chain_hash folds the "
-             "predecessor into every event hash AND the prev_hash column is "
-             "compared directly, so removing either alone leaves the other "
-             "catching excision. Negating the claim needs both out.",
-        also=[('        if expect != row["event_hash"]:',
-               '        if False:  # MUTANT: linkage check 2 removed')],
+        layer="events.verify_chain (the recomputed hash, which is what detects)",
+        note="Two checks overlap here and only one of them is observable. "
+             "`chain_hash` folds the predecessor into every event hash, so the "
+             "recomputed comparison catches tampering *and* excision on its "
+             "own; that is the one a test can negate. The explicit prev_hash "
+             "comparison is its twin -- see the masked entry. The function's "
+             "own docstring has said so all along, and this is that statement "
+             "made checkable rather than merely written down.",
+        masked={"also[1]": (
+            "The `prev_hash` column comparison cannot be observed while the "
+            "recomputed hash is checked. Excise an event and the next row "
+            "fails both checks, at the same row, returning the same event id; "
+            "tamper with a payload and only the recomputed hash can see it. "
+            "There is no edit that one catches and the other misses, so no "
+            "test can distinguish them. It is kept because it names the "
+            "offending row one comparison earlier and would carry the "
+            "guarantee alone if `chain_hash` ever stopped folding the "
+            "predecessor in. Verified masked on 2026-09-24."), },
+        also=[('        if row["prev_hash"] != prev:',
+               '        if False:  # MUTANT: the linkage column is not compared')],
     ),
     Mutation(
         "I6", "An acknowledged mutation survives restart",
@@ -440,18 +454,27 @@ MUTATIONS: list[Mutation] = [
     Mutation(
         "I23e", "The tool loop is bounded by its turn limit",
         "src/amoeba/neuocyte.py",
-        "        for turn in range(max_turns):",
-        "        for turn in range(10_000):  # MUTANT: turn limit removed",
+        "            if turn == max_turns - 1:",
+        "            if False:  # MUTANT: last-turn guard removed",
         ["test_the_tool_loop_stops_at_the_turn_limit"],
-        layer="Neuocyte._generate_with_tools (both turn bounds)",
-        note="defended twice, for two different reasons that happen to "
-             "overlap: range(max_turns) bounds the loop, and the "
-             "turn == max_turns - 1 check refuses to execute a tool whose "
-             "result the model would never get to read. Removing either alone "
-             "leaves the other stopping the loop, so negating the claim needs "
-             "both -- do not 'simplify' one away.",
-        also=[("            if turn == max_turns - 1:",
-               "            if False:  # MUTANT: last-turn guard removed")],
+        layer="Neuocyte._generate_with_tools (the last-turn guard, which is what stops it)",
+        note="Two bounds overlap here and only one of them is observable. The "
+             "last-turn guard is what the loop actually stops on, and removing "
+             "it lets a tool run on the final turn whose result the model can "
+             "never read -- real work with a side effect nobody sees. The "
+             "range is a second bound behind it; see the masked entry below. "
+             "Do not 'simplify' either away: if the guard is ever changed, the "
+             "range is what remains.",
+        masked={"also[1]": (
+            "`range(max_turns)` cannot be observed while the last-turn guard "
+            "stands. With `range(10_000)` the loop still breaks at "
+            "turn == max_turns - 1, at the same turn, with the same stop "
+            "reason and the same number of generations -- so no test can "
+            "distinguish them. It is kept as the bound that survives a change "
+            "to the guard, and declared here rather than deleted or left "
+            "reported as weak. Verified masked on 2026-09-24.")},
+        also=[("        for turn in range(max_turns):",
+               "        for turn in range(10_000):  # MUTANT: turn limit removed")],
     ),
     Mutation(
         "I23e2", "The tool loop is bounded by the token budget",
@@ -475,7 +498,9 @@ MUTATIONS: list[Mutation] = [
         "        if final != root_path and root_path not in final.parents:",
         "        if False:  # MUTANT: containment check removed",
         ["test_paths_that_leave_the_root_or_name_a_device_are_refused",
-         "test_a_refused_path_is_never_silently_clamped"],
+         "test_a_refused_path_is_never_silently_clamped",
+         "test_a_junction_pointing_out_of_the_root_is_refused",
+         "test_listing_does_not_walk_through_a_junction"],
         layer="Filespace.resolve (the containment check)",
         note="the component checks catch the obvious `..` cases on their own, "
              "so this also removes them -- otherwise the claim looks defended "
@@ -1156,8 +1181,8 @@ MUTATIONS: list[Mutation] = [
     Mutation(
         'I68', 'The continuation chain is bounded',
         'src/amoeba/mailbox.py',
-        '    exhausted = depth >= max(0, int(max_continuations))',
-        '    exhausted = False  # MUTANT: continue forever',
+        '    out_of_output = spent["output"] >= max(0, int(max_continuations))',
+        '    out_of_output = False  # MUTANT: continue forever',
         ['test_the_continuation_chain_is_bounded'],
         layer='mailbox.complete (the bound on repeated continuation)',
         note='Found by running it: every turn truncated, each scheduled a successor, and the organism burned its context until inference refused the prompt.',
@@ -2176,6 +2201,47 @@ MUTATIONS: list[Mutation] = [
                "        attempt = int(item.get(\"attempt\") or 1)\n        if True:  # MUTANT: every attempt looks like the first")],
     ),
     Mutation(
+        "I85b", "Causal lineage is bound by the Harness, and a query target is not lineage",
+        "src/amoeba/turn_api.py",
+        '            args.pop("operation_id", None)',
+        "            pass  # MUTANT: default it, so a supplied lineage wins",
+        ["test_the_harness_binds_lineage_rather_than_defaulting_it",
+         "test_a_turn_with_no_operation_does_not_let_the_caller_invent_one",
+         "test_a_verb_that_asks_about_an_operation_still_gets_to_name_it",
+         "test_a_turns_operation_reaches_what_the_role_does"],
+        layer="role_tool_invoke (who a delegated call is accountable to)",
+        note="The primary mutant restores defaulting, which is what left causal lineage resting on the role process stripping the argument before it arrived. Separately verified to die for binding the query verbs too, which would leave `provenance` and its kin able to ask only about the turn already asking.",
+        also=[("src/amoeba/turn_api.py",
+               "        if name in OPERATION_IS_A_TARGET:",
+               "        if False:  # MUTANT: a question is treated as a claim")],
+    ),
+    Mutation(
+        "I68b", "Recovery and progress spend different allowances",
+        "src/amoeba/mailbox.py",
+        '        counts["pressure" if why == "context_pressure" else "output"] += 1',
+        '        counts["output"] += 1  # MUTANT: rebuilding costs an answer',
+        ["test_a_rebuilt_turn_does_not_spend_the_answers_allowance",
+         "test_saying_more_spends_the_allowance_for_saying_more",
+         "test_a_turn_reached_without_continuations_has_spent_nothing",
+         "test_rebuilding_has_its_own_bound",
+         "test_rebuilding_leaves_the_answers_allowance_alone"],
+        layer="mailbox.continuation_depths (what a continuation was for)",
+        note="The primary mutant charges a rejuvenation to the allowance for saying more, which is the behaviour the audit questioned: two pressure recoveries spent two of three continuations without a word being written. Separately verified to die for a recovery bound that never binds, which would make unbounded rejuvenation possible in the other direction.",
+        also=[("src/amoeba/mailbox.py",
+               '    out_of_recovery = spent["pressure"] >= max(0, int(max_pressure_recoveries))',
+               "    out_of_recovery = False  # MUTANT: rebuild forever")],
+    ),
+    Mutation(
+        "I126b", "The pulse carries one labelled classification, with what it was derived from",
+        "src/amoeba/pulse.py",
+        '                "failure_threshold_turns": threshold,',
+        "                # MUTANT: the verdict arrives without its threshold",
+        ["test_the_pulse_reports_a_role_that_cannot_think",
+         "test_the_pulse_reports_observations_not_verdicts"],
+        layer="PulseCollector._thinking (a measurement a reader can recompute)",
+        note="Without the threshold `thinking` is a bare boolean nobody can check, which is the thing the pulse's contract says it does not do. Reporting it with the count and the threshold is what makes it a labelled measurement rather than a verdict, and what lets I126 and the pulse's contract both be true.",
+    ),
+    Mutation(
         "I111", "A generation is admitted only if its whole allowance fits",
         "src/amoeba/arbiter.py",
         "        if prompt_tokens + capped > ceiling:",
@@ -2291,7 +2357,9 @@ def main() -> int:
                 finally:
                     for rel, orig in originals.items():
                         (ROOT / rel).write_text(orig, encoding="utf-8")
-                excuse = m.masked.get(label)
+                # The label carries the file for readability ("also[1] a.py");
+                # a declaration names the trial ("also[1]").
+                excuse = m.masked.get(label.split(" ", 1)[0])
                 if survived and excuse:
                     results.append((m, label, "MASKED", excuse))
                     print(f"MASK {m.invariant:8s} {label}: survives as declared "

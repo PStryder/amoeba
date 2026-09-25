@@ -346,3 +346,69 @@ def test_the_pulse_can_name_a_role_that_cannot_think():
 
     assert FAILURE_KINDS.get(EventKind.ROLE_NOT_THINKING) == "role_not_thinking"
 
+
+# ---------------------------------------------------------------------------
+# Recovery is not progress (audit item 11)
+# ---------------------------------------------------------------------------
+def _chain(mind, *stop_reasons):
+    """A parent chain whose links were caused by these stop reasons, in order."""
+    previous = None
+    for n, why in enumerate(stop_reasons):
+        turn_id = f"turn_{n}"
+        mind.db.conn.execute(
+            "INSERT INTO role_turns(turn_id, role, incarnation, bundle_id,"
+            " trigger_count, started_at, finished_at, status, stop_reason,"
+            " parent_turn, state_version)"
+            " VALUES (?, 'ego', 1, 'bnd', 0, 1.0, 2.0, 'completed', ?, ?, 1)",
+            (turn_id, why, previous))
+        previous = turn_id
+    # The turn being judged: its parent is the last of the chain.
+    mind.db.conn.execute(
+        "INSERT INTO role_turns(turn_id, role, incarnation, bundle_id,"
+        " trigger_count, started_at, status, parent_turn, state_version)"
+        " VALUES ('turn_now', 'ego', 1, 'bnd', 0, 3.0, 'running', ?, 1)",
+        (previous,))
+    mind.db.conn.commit()
+    return "turn_now"
+
+
+def test_a_rebuilt_turn_does_not_spend_the_answers_allowance(mind):
+    """Two rejuvenations used to eat two thirds of a thought's continuations.
+
+    A continuation after context pressure is the turn being rebuilt; it has
+    said nothing new. Counting it against the allowance for *saying more* let
+    a thought run out of room to answer by doing housekeeping.
+    """
+    from amoeba.mailbox import continuation_depths
+
+    turn = _chain(mind, "context_pressure", "context_pressure")
+    spent = continuation_depths(mind.db.conn, turn)
+
+    assert spent["pressure"] == 2
+    assert spent["output"] == 0, (
+        "recovery was charged to the allowance for saying more")
+
+
+def test_saying_more_spends_the_allowance_for_saying_more(mind):
+    from amoeba.mailbox import continuation_depths
+
+    turn = _chain(mind, "max_output_tokens", "context_pressure",
+                  "max_output_tokens")
+    spent = continuation_depths(mind.db.conn, turn)
+
+    assert spent["output"] == 2
+    assert spent["pressure"] == 1
+
+
+def test_a_turn_reached_without_continuations_has_spent_nothing(mind):
+    from amoeba.mailbox import continuation_depths
+
+    mind.db.conn.execute(
+        "INSERT INTO role_turns(turn_id, role, incarnation, bundle_id,"
+        " trigger_count, started_at, status, state_version)"
+        " VALUES ('turn_alone', 'ego', 1, 'bnd', 0, 1.0, 'running', 1)")
+    mind.db.conn.commit()
+
+    assert continuation_depths(mind.db.conn, "turn_alone") == {
+        "output": 0, "pressure": 0}
+
