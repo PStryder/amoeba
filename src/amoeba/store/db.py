@@ -177,6 +177,16 @@ CREATE TABLE IF NOT EXISTS work_items (
   -- evidence of independent replication rather than an echo.
   board_access      TEXT NOT NULL DEFAULT 'read_write',
   sandbox_allowed   INTEGER NOT NULL DEFAULT 0,
+  -- Does an interaction's final answer need this back before it may settle?
+  --
+  -- Set when a role asks for work while answering a client, because that is
+  -- almost always what asking means: Ego delegated the computation *in order
+  -- to* answer with it. Live on 2026-09-25 it delegated, ran out of turn, and
+  -- the interaction completed 1.1 seconds before the worker posted the right
+  -- number -- so the client got Ego's wrong one and the correct answer
+  -- arrived with nowhere to go. A role that wants work running alongside its
+  -- answer rather than before it says so with `background=True` (I140).
+  blocks_answer     INTEGER NOT NULL DEFAULT 0,
   result_blob       TEXT,
   failure           TEXT,
   created_at        REAL NOT NULL,
@@ -458,8 +468,16 @@ CREATE TABLE IF NOT EXISTS interactions (
   conversation_id TEXT,
   input_sha256    TEXT NOT NULL,
   input_preview   TEXT,
-  status          TEXT NOT NULL,          -- accepted | running | complete
-                                          --   | incomplete | failed
+  -- accepted | running | awaiting_work | complete | incomplete | failed.
+  --
+  -- `awaiting_work` is parked, not finished: the thought asked for work whose
+  -- result its answer needs, and ran out of turn before that work came back.
+  -- Settling it would have been a lie of exactly the shape I139 exists to
+  -- expose -- a confident final answer standing where a pending dependency
+  -- was -- so it waits instead, and the reconciler resumes it when the work
+  -- lands (I140). Parking is bounded because work is: every item reaches
+  -- done, failed or cancelled.
+  status          TEXT NOT NULL,
   operation_id    TEXT,
   -- The trigger this interaction is waiting on. Recorded when it is
   -- enqueued, so an answer can be delivered from the record by anything

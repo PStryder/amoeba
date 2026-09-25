@@ -217,6 +217,12 @@ def build(sup: "Supervisor") -> dict[str, Any]:  # noqa: C901
                          replicas: int = 1, independent: bool = False,
                          board_access: str | None = None,
                          sandbox: bool = False, constraints: str = "",
+                         # Is this needed *before* the current reply, or
+                         # alongside it? Delegating in order to answer is the
+                         # ordinary case, so it blocks unless Ego says
+                         # otherwise, and the classification is fixed at
+                         # admission (I140).
+                         background: bool = False,
                          evidence: Sequence[dict[str, Any]] = (),
                          budget_tokens: int | None = None,
                          # A leaf name, not a namespace: "research" resolves to
@@ -241,6 +247,12 @@ def build(sup: "Supervisor") -> dict[str, Any]:  # noqa: C901
         when, which neuocyte, which promoted prompt version, what budget and
         which capabilities. Ego cannot instantiate a worker, and there is no
         verb here that would let it.
+
+        ``background=True`` says this work is useful but not required for the
+        current reply. Everything else is required: a client's request does
+        not settle while work its answer depends on is still running, so the
+        default is to wait. The classification is fixed when the work is
+        admitted and nothing can change it afterwards.
 
         ``independent=True`` admits each replica board-naive, so no replica can
         read another's post and echo it. That isolates influence, which is not
@@ -292,7 +304,8 @@ def build(sup: "Supervisor") -> dict[str, Any]:  # noqa: C901
                 objective=text, work_class=work_class, origin_actor="ego",
                 operation_id=operation_id, board_access=access,
                 sandbox_allowed=bool(sandbox), budget_tokens=budget_tokens,
-                specialisation=wanted or None)
+                specialisation=wanted or None,
+                blocks_answer=not bool(background))
             (admitted if out.get("admitted") else refused).append(out)
 
         def body(m: Mutation) -> None:

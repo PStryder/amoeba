@@ -2516,6 +2516,90 @@ delegated a worker. It stops the saying from being the only record.
 `test_an_operationless_thought_claims_no_receipts`,
 `test_a_clients_answer_carries_what_the_thought_actually_did`
 
+**I140. An interaction cannot settle while work its answer depends on is
+unfinished.** Live on 2026-09-25, timed from the event chain:
+
+```
+09:14:33.135  ego  work.admitted     the worker is delegated
+09:14:44.770  ego  board_read        last look -- nothing there yet
+09:14:45.871  nc   board.posted      41679167500, the right answer
+09:14:49.759  ego  output.emitted    completed, carrying the wrong one
+```
+
+Ego delegated a computation, exhausted its tool-turn budget, and the
+interaction completed **1.1 seconds after its own worker posted the correct
+number**. The client was told 41,675,000,250; the worker had measured
+41,679,167,500. Ego then read the board twice more, at 09:14:51 and 09:15:00 —
+exactly as it had promised the client it would — and had nowhere to put what
+it found, because `interaction.completed` had already fired.
+
+I139 made the claim visible. This makes it impossible: a thought that asked
+for work its answer needs does not get to call itself finished. It parks.
+
+Delegating *in order to* answer is the ordinary case, so work admitted while a
+role is answering blocks by default, and `ego_request_work(background=True)`
+is the only way out. The classification is written at admission and there is
+no `UPDATE` anywhere that can change it, so a model cannot relabel work it
+already asked for to escape the wait.
+
+The gate is **every** dependency terminal, not any one of them landing: three
+workers means waiting for three. Terminal means `done`, `failed` or
+`cancelled` — all of which work is bounded to reach — so parking cannot
+outlive the work it waits on.
+
+The question is asked **inside the mutation that settles**, which is the
+whole of its correctness. Checked first and committed afterwards, work
+admitted in the gap is settled straight over, and the defect is rebuilt with
+better furniture. For the same reason there is exactly one gate rather than a
+scan-time check as well: a second gate would have to agree with the first, and
+would mask it.
+→ `test_an_interaction_does_not_settle_while_its_work_runs`,
+`test_the_interim_answer_is_kept_not_discarded`,
+`test_one_of_three_finishing_does_not_release_it`,
+`test_background_work_never_blocks_an_answer`,
+`test_work_for_another_operation_does_not_block_this_answer`,
+`test_omitting_background_means_the_answer_waits`,
+`test_background_false_is_the_same_as_omitting_it`,
+`test_background_true_is_the_only_way_out`,
+`test_nothing_can_reclassify_work_after_it_is_admitted`,
+`test_a_retry_keeps_the_classification`,
+`test_the_dependency_check_happens_inside_the_settling_mutation`
+
+**I141. Finished answer-work makes its interaction eligible to resume.**
+Parking without a way out is a nicer hang, so this is the other half of I140
+and not an optimisation. When every blocking item is terminal the role is
+asked once more with the outcome in front of it, and the interaction is bound
+to that request so the answer lands where the client is waiting.
+
+A role is woken whether the work succeeded or not, and is told which items
+ended how: *"the computation failed"* is an answer, and silence is not.
+
+Resumption belongs to the reconciler rather than to a waiting thread, which is
+what makes it survive a restart — no test of it has a thread holding the
+interaction. Queueing the request, binding the interaction to it and unparking
+are one commit; split up, a crash between them leaves either a client bound to
+a request nobody will answer, or a parked interaction that every later pass
+wakes again. `role_enqueue_trigger` already carried that lesson in a comment
+about `answers_interaction`, written the last time this was learned.
+
+The interim text is kept rather than discarded. What the thought had got to is
+real, and a client reading a parked interaction sees it rather than nothing.
+
+While this was being built the enqueue was wrapped in `except Exception:
+continue`. A reference to a constant that did not exist raised `NameError`,
+was swallowed, and every pass reported nothing to resume while parked
+interactions stayed parked — an internal mistake made indistinguishable from
+an empty queue. An operational failure may be survivable; a programming error
+is not one, and there is now no `except` anywhere in that path.
+→ `test_finished_work_resumes_the_interaction`,
+`test_the_resuming_request_expects_an_answer`,
+`test_work_that_failed_still_wakes_the_role`,
+`test_a_parked_interaction_resumes_with_nobody_waiting`,
+`test_resuming_is_recorded`,
+`test_the_final_answer_settles_the_interaction`,
+`test_a_programming_error_in_the_resume_path_is_not_swallowed`,
+`test_nothing_in_the_resume_path_swallows_exceptions`
+
 **I73. A role is never wedged by a turn it did not close.** One open turn per
 role is a database constraint, so a turn left running blocks every future turn
 for that role — the role heartbeats, reports healthy, and never thinks again

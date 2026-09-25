@@ -811,7 +811,8 @@ def build(sup: "Supervisor") -> dict[str, Any]:
                    depends_on: Sequence[str] | None = None,
                    board_access: str = "read_write",
                    sandbox_allowed: bool = False,
-                   specialisation: str | None = None) -> dict[str, Any]:
+                   specialisation: str | None = None,
+                   blocks_answer: bool = False) -> dict[str, Any]:
         _class_belongs_to(origin_actor, work_class)
         decision = sup.arbiter.admit(
             work_class=work_class, snapshot=sup.resource_snapshot(),
@@ -836,10 +837,11 @@ def build(sup: "Supervisor") -> dict[str, Any]:
             model_generation=gen, budget_tokens=decision.granted_budget_tokens,
             deadline=decision.granted_deadline, maintenance_depth=maintenance_depth,
             depends_on=depends_on, board_access=board_access,
-            sandbox_allowed=sandbox_allowed,
+            sandbox_allowed=sandbox_allowed, blocks_answer=blocks_answer,
         )
         return {"admitted": True, "work_id": work_id, "receipt_id": receipt.receipt_id,
                 "board_access": board_access, "sandbox_allowed": sandbox_allowed,
+                "blocks_answer": bool(blocks_answer),
                 "granted_budget_tokens": decision.granted_budget_tokens,
                 "deadline": decision.granted_deadline,
                 "state_version": receipt.result_version}
@@ -1103,7 +1105,8 @@ def build(sup: "Supervisor") -> dict[str, Any]:
         while True:
             row = mind.db.conn.execute(
                 "SELECT status, turn_id, answer_status, answer_sha256,"
-                " answered_by_turn FROM role_triggers WHERE trigger_id = ?",
+                " answered_by_turn, operation_id FROM role_triggers"
+                " WHERE trigger_id = ?",
                 (trigger_id,)).fetchone()
             if row is None:
                 raise NotFound("trigger disappeared", trigger_id=trigger_id)
@@ -1146,6 +1149,10 @@ def build(sup: "Supervisor") -> dict[str, Any]:
                 finished = row["answer_status"] == "answered"
                 return {"status": "completed" if finished else "incomplete",
                         "complete": finished,
+                        # The operation the request belongs to, carried so a
+                        # settling caller can ask what that operation still
+                        # owes before it settles (I140).
+                        "operation_id": row["operation_id"],
                         "ended_because": record.get("ended_because"),
                         "withheld": record.get("withheld") or [],
                         # What the thought did, from the answer of record for
@@ -1206,6 +1213,7 @@ def build(sup: "Supervisor") -> dict[str, Any]:
         result = settled.get("result") or {}
         out = {"trigger_id": trigger_id, "status": settled["status"],
                "answer": result.get("answer", ""),
+               "operation_id": settled.get("operation_id"),
                "is_simulated": bool(result.get("is_simulated"))}
         # What the thought actually did, carried through rather than reshaped
         # away (I139). `effected` is always present, including when it is

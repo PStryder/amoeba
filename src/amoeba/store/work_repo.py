@@ -20,8 +20,10 @@ from .writer import Mutation, Receipt, StateWriter
 
 WORK_CLASSES = ("user", "maintenance")
 BOARD_ACCESS = ("none", "read", "read_write")
-"""'none' produces a board-naive neuocyte. Two naive neuocytes agreeing is
-independent replication; agreement after reading is not."""
+"""'none' produces a board-naive neuocyte, so it cannot have read what another
+posted and cannot be echoing it. That is a fact about influence and not about
+evidence: agreement between two of them is corroboration only if they observed
+different things (I138)."""
 TERMINAL_WORK = ("done", "failed", "cancelled")
 
 # How many attempts a work item gets before it is somebody's problem rather
@@ -58,6 +60,10 @@ class WorkRepo:
         board_access: str = "read_write",
         sandbox_allowed: bool = False,
         specialisation: str | None = None,
+        # Whether an interaction's final answer must wait for this. Written by
+        # the Harness from who asked and why, never claimed by a caller's
+        # model text (I140).
+        blocks_answer: bool = False,
         mutation_id: str | None = None,
     ) -> tuple[str, Receipt]:
         if work_class not in WORK_CLASSES:
@@ -84,18 +90,19 @@ class WorkRepo:
                 " operation_id, priority, depends_on, snapshot_id, model_generation,"
                 " pinned_state_ver, status, attempt, fencing_token, budget_tokens, deadline,"
                 " maintenance_depth, board_access, sandbox_allowed, specialisation,"
-                " created_at, updated_at)"
-                " VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
+                " blocks_answer, created_at, updated_at)"
+                " VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
                 (work_id, objective, work_class, origin_actor, operation_id, priority,
                  json.dumps(list(depends_on or [])), snapshot_id, model_generation,
                  m.prior_version, "queued", 0, 0, budget_tokens, deadline,
                  maintenance_depth, board_access, 1 if sandbox_allowed else 0,
-                 specialisation, now, now),
+                 specialisation, 1 if blocks_answer else 0, now, now),
             )
             m.emit(EventKind.WORK_ADMITTED, {
                 "work_id": work_id, "work_class": work_class, "objective": objective,
                 "priority": priority, "snapshot_id": snapshot_id,
                 "board_access": board_access, "sandbox_allowed": sandbox_allowed,
+                "blocks_answer": bool(blocks_answer),
                 "maintenance_depth": maintenance_depth, "budget_tokens": budget_tokens,
                 "specialisation": specialisation,
             })

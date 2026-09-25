@@ -141,6 +141,11 @@ class EventKind:
     # organism's pace, for the operator; the interaction is still running and
     # its answer still arrives, from the record.
     INTERACTION_WAIT_EXPIRED = "interaction.wait_expired"
+    # Parked: the thought ran out of turn while work its own answer needs was
+    # still running. Neither a failure nor a completion, and resumed when the
+    # work lands (I140).
+    INTERACTION_AWAITING_WORK = "interaction.awaiting_work"
+    INTERACTION_RESUMED = "interaction.resumed"
     INTERACTION_RESULT_SURFACED = "interaction.result_surfaced"
     EXTERNAL_DENIED = "external.denied"
     # Operator governance: human decisions, recorded like any other.

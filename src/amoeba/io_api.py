@@ -44,6 +44,7 @@ import threading
 import time
 from typing import TYPE_CHECKING, Any, Sequence
 
+from . import mailbox
 from .argcheck import signature_of
 from .errors import (InvalidInput, NotFound,
                      ResourceExhausted)
@@ -382,6 +383,24 @@ def build(sup: "Supervisor") -> dict[str, Any]:  # noqa: C901
             with done:
                 done.notify_all()
 
+    def _pending_dependencies(operation_id: str | None) -> list[dict[str, Any]]:
+        """Work this operation's answer needs back, and has not got.
+
+        An answer that depends on work is not finished when the thought
+        producing it runs out of turn; it is waiting. Live on 2026-09-25 Ego
+        delegated a computation, exhausted its tool-turn budget, and the
+        interaction completed 1.1 seconds before the worker posted the right
+        number -- so the client was told the wrong one and the correct answer
+        had nowhere to go (I140).
+        """
+        if not operation_id:
+            return []
+        return [dict(r) for r in mind.db.conn.execute(
+            "SELECT work_id, objective, status FROM work_items"
+            " WHERE operation_id = ? AND blocks_answer = 1"
+            "   AND status NOT IN ('done', 'failed', 'cancelled')"
+            " ORDER BY created_at", (operation_id,))]
+
     def _publish(interaction_id: str, client_id: str, *,
                  result: dict[str, Any] | None,
                  operation_id: str | None) -> str:
@@ -389,30 +408,70 @@ def build(sup: "Supervisor") -> dict[str, Any]:  # noqa: C901
 
         Used by whoever gets there first: the thread waiting on the thought,
         or the reconciler reading the same answer off the record afterwards.
+
+        An answer whose own dependencies are still outstanding is parked
+        rather than settled. The text is kept -- it is real, and a client may
+        read it -- but the interaction stays open, because a final answer
+        standing where a pending dependency was is the lie I139 exists to
+        expose, told one layer up.
         """
         answer = answer_of(result)
         state = result.get("status") if isinstance(result, dict) else None
-        final = "complete" if state == "completed" else "incomplete"
+        intended = "complete" if state == "completed" else "incomplete"
+        # An answer does not always carry the operation that produced it, and
+        # the interaction always knows its own. Without this the dependency
+        # question is asked about `None` and answered "nothing is pending",
+        # which is the defect wearing a clean shirt (I140).
+        if not operation_id:
+            known = mind.db.conn.execute(
+                "SELECT operation_id FROM interactions WHERE interaction_id = ?",
+                (interaction_id,)).fetchone()
+            operation_id = known["operation_id"] if known else None
         payload = {"result": result, "operation_id": operation_id}
         digest = mind.blobs.put_json(payload)
+        outcome = {"final": intended}
 
         def body(m: Mutation) -> None:
             m.register_blob(digest, 0, "application/json", "external_output")
+            # Asked *inside* the mutation that settles, on purpose. Checking
+            # first and committing afterwards leaves a window in which work is
+            # admitted between the two, and the interaction completes over the
+            # top of a dependency that now exists -- the same defect this
+            # invariant is about, rebuilt with better furniture. The writer
+            # serialises mutations, so a question asked here and an update
+            # made here cannot be separated by an admission (I140).
+            waiting: list[str] = []
+            if intended == "complete" and operation_id:
+                waiting = [r["work_id"] for r in m.sql(
+                    "SELECT work_id FROM work_items WHERE operation_id = ?"
+                    "   AND blocks_answer = 1"
+                    "   AND status NOT IN ('done', 'failed', 'cancelled')",
+                    (operation_id,)).fetchall()]
+            final = "awaiting_work" if waiting else intended
+            outcome["final"] = final
             # Only from a status that is still waiting: whoever published
             # first has said it, and saying it twice would move a finished
-            # interaction's completion time for no reason.
+            # interaction's completion time for no reason. A parked
+            # interaction is still waiting, so a later answer may land on it.
             m.sql("UPDATE interactions SET status = ?, output_sha256 = ?,"
                   " output_preview = ?, operation_id = ?, completed_at = ?"
                   " WHERE interaction_id = ?"
-                  "   AND status IN ('accepted', 'running')",
+                  "   AND status IN ('accepted', 'running', 'awaiting_work')",
                   (final, digest, str(answer)[:1000], operation_id,
-                   time.time(), interaction_id))
-            m.emit(EventKind.INTERACTION_COMPLETED, {
-                "interaction_id": interaction_id, "client_id": client_id,
-                "output_sha256": digest, "status": final})
+                   None if waiting else time.time(), interaction_id))
+            if waiting:
+                m.emit(EventKind.INTERACTION_AWAITING_WORK, {
+                    "interaction_id": interaction_id, "client_id": client_id,
+                    "work_ids": waiting,
+                    "note": ("the thought ran out of turn while work its answer "
+                             "needs was still running; parked, not finished")})
+            else:
+                m.emit(EventKind.INTERACTION_COMPLETED, {
+                    "interaction_id": interaction_id, "client_id": client_id,
+                    "output_sha256": digest, "status": final})
 
         mind.writer.apply(body, actor=f"client:{client_id}")
-        return final
+        return outcome["final"]
 
     def io_reconcile(*, limit: int = 50) -> dict[str, Any]:
         """Deliver answers that exist to interactions still waiting for them.
@@ -467,10 +526,96 @@ def build(sup: "Supervisor") -> dict[str, Any]:  # noqa: C901
                       "the request expired before it could be answered")
                 delivered.append({"interaction_id": row["interaction_id"],
                                   "status": "failed", "from": "the record"})
+        resumed = _resume_parked(limit=max(1, int(limit)))
         if delivered:
             sup.log.info("delivered %d answer(s) nobody was left waiting for",
                          len(delivered))
-        return {"delivered": delivered, "count": len(delivered)}
+        return {"delivered": delivered, "count": len(delivered),
+                "resumed": resumed, "resumed_count": len(resumed)}
+
+    def _resume_parked(*, limit: int) -> list[dict[str, Any]]:
+        """Give a parked interaction back to the role once its work has landed.
+
+        Parking without a way out is just a nicer hang, so this is the other
+        half of the rule and not an optimisation. When every blocking item has
+        reached a terminal state -- done, failed or cancelled, all of which
+        work is bounded to reach -- the role is asked once more, with the
+        outcome in front of it, and the interaction is rebound to that request
+        so the answer lands where the client is waiting (I141).
+
+        A role is woken whether the work succeeded or not: "the computation
+        failed" is an answer, and silence is not.
+
+        Queueing the request, binding the interaction to it and unparking are
+        one commit. Split up, a crash between them leaves either a client
+        bound to a request nobody will answer or a parked interaction that
+        every later pass wakes again.
+        """
+        out: list[dict[str, Any]] = []
+        for row in mind.db.conn.execute(
+                "SELECT interaction_id, client_id, operation_id"
+                " FROM interactions WHERE status = 'awaiting_work'"
+                " ORDER BY created_at LIMIT ?", (limit,)):
+            # Not pre-checked here on purpose. A scan-time check would be a
+            # second gate that has to agree with the one inside the mutation,
+            # and the one inside is the only one that cannot be raced -- so
+            # this loop does the cheap gathering and lets the commit decide.
+            done = [dict(r) for r in mind.db.conn.execute(
+                "SELECT work_id, objective, status FROM work_items"
+                " WHERE operation_id = ? AND blocks_answer = 1 ORDER BY created_at",
+                (row["operation_id"],))]
+            summary = "; ".join(f"{w['work_id']} {w['status']}" for w in done)
+            queued: dict[str, Any] = {}
+
+            def body(m: Mutation, iid=row["interaction_id"], cid=row["client_id"],
+                     op=row["operation_id"], work=done, said=summary,
+                     box=queued) -> None:
+                # Re-asked inside the mutation that unparks, for the same
+                # reason `_publish` asks inside the one that settles: a
+                # blocking item admitted between the scan and here would
+                # otherwise be resumed straight past. The gate is *every*
+                # dependency terminal, so three workers means waiting for
+                # three, not for whichever finishes first.
+                still = m.sql(
+                    "SELECT 1 FROM work_items WHERE operation_id = ?"
+                    "   AND blocks_answer = 1"
+                    "   AND status NOT IN ('done', 'failed', 'cancelled')"
+                    " LIMIT 1", (op,)).fetchone()
+                if still is not None:
+                    return
+                trigger = mailbox.enqueue(
+                    m, role="ego", kind="work_completed", source="harness",
+                    source_ref=iid,
+                    summary=("work this answer was waiting on has finished: "
+                             f"{said}")[:mailbox.MAX_SUMMARY],
+                    payload={"interaction_id": iid, "work": work,
+                             "note": ("the client is still waiting on this "
+                                      "request; answer it with what the work "
+                                      "returned")},
+                    expects_answer=True, operation_id=op, lineage=op)
+                box.update(trigger)
+                # Back to running, bound to the new request. The interim text
+                # stays until a better answer replaces it, so a client reading
+                # now sees what the thought had got to rather than nothing.
+                m.sql("UPDATE interactions SET status = 'running', trigger_id = ?"
+                      " WHERE interaction_id = ? AND status = 'awaiting_work'",
+                      (trigger["trigger_id"], iid))
+                m.emit(EventKind.INTERACTION_RESUMED, {
+                    "interaction_id": iid, "client_id": cid,
+                    "trigger_id": trigger["trigger_id"],
+                    "work": [{"work_id": w["work_id"], "status": w["status"]}
+                             for w in work]})
+
+            mind.writer.apply(body, actor="harness", bump_version=False)
+            if not queued:
+                continue                 # a dependency appeared; still parked
+            sup.note_trigger("ego")
+            out.append({"interaction_id": row["interaction_id"],
+                        "trigger_id": queued["trigger_id"],
+                        "work": [w["work_id"] for w in done]})
+        if out:
+            sup.log.info("resumed %d parked interaction(s)", len(out))
+        return out
 
     def _wait_expired(interaction_id: str, client_id: str,
                       patience: float) -> None:
@@ -523,10 +668,15 @@ def build(sup: "Supervisor") -> dict[str, Any]:  # noqa: C901
 
     def io_status(*, interaction_id: str, client_id: str) -> dict[str, Any]:
         row = _own(interaction_id, client_id)
+        # Read live rather than from a snapshot taken when it parked: what a
+        # client wants to know is what is outstanding *now* (I140).
+        waiting = (_pending_dependencies(row["operation_id"])
+                   if row["status"] == "awaiting_work" else [])
         return {"interaction_id": interaction_id, "status": row["status"],
                 "kind": row["kind"], "created_at": row["created_at"],
                 "completed_at": row["completed_at"],
                 "has_output": bool(row["output_sha256"]),
+                "awaiting_work": waiting,
                 "error": row["error"]}
 
     def io_await(*, interaction_id: str, client_id: str,
