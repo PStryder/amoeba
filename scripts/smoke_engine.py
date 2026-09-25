@@ -15,14 +15,39 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "src"))
 
 from amoeba.backends.llama_engine import LlamaEngine  # noqa: E402
 
-RUNTIME = r"F:\hexylab\amoeba-runtime\llama.cpp-b11057-win-cuda12.4"
-MODEL = r"F:\hexylab\amoeba-models\Qwen3-4B-Instruct-2507-Q5_K_M.gguf"
+def _engine_paths() -> tuple[str, str]:
+    """The runtime and model this machine has, from config or the environment.
+
+    These were one machine's absolute paths written into the script, so it ran
+    nowhere else. The operator's `config.toml` is asked first because it
+    already carries them; AMOEBA_RUNTIME_DIR and AMOEBA_MODEL_PATH override,
+    and a missing answer says what to set rather than failing on a path
+    nobody here chose.
+    """
+    import os
+
+    from amoeba.config import load_config
+
+    runtime = os.environ.get("AMOEBA_RUNTIME_DIR", "").strip()
+    model = os.environ.get("AMOEBA_MODEL_PATH", "").strip()
+    cfg_file = Path(__file__).resolve().parents[1] / "config.toml"
+    if (not runtime or not model) and cfg_file.exists():
+        cfg = load_config(cfg_file)
+        runtime = runtime or str(cfg.runtime_dir)
+        model = model or str(cfg.backend.model_path)
+    if not runtime or not model:
+        raise SystemExit(
+            "no runtime or model to load: copy config.example.toml to "
+            "config.toml and set backend.model_path, or set "
+            "AMOEBA_RUNTIME_DIR and AMOEBA_MODEL_PATH")
+    return runtime, model
 
 
 def main() -> int:
     logs: list[str] = []
+    _r, _m = _engine_paths()
     eng = LlamaEngine(
-        runtime_dir=RUNTIME, model_path=MODEL,
+        runtime_dir=_r, model_path=_m,
         n_ctx=8192, n_seq_max=6, n_gpu_layers=-1, n_threads=8,
         kv_unified=True,
         log_sink=lambda lvl, txt: logs.append(txt.strip()),

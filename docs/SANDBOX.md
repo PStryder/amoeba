@@ -138,7 +138,8 @@ Everything above is about what code inside the container can reach. The
 opposite question — what the rest of the machine can do to the sandbox — was
 open until filesystem hardening was added, and it mattered more than it looks.
 
-The sandbox root is created under `F:\hexylab`, which grants
+The sandbox root is created under the install directory, whose parent
+granted
 `Everyone:(OI)(CI)(F)`. Directories inherit their parent's DACL, so *measured,
 not assumed*, every Amoeba directory was world-writable. Three consequences:
 

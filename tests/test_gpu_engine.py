@@ -105,7 +105,15 @@ def test_forked_prefix_does_not_allocate_new_kv_cells(engine):
     forks = [engine.fork_prefix(src_session_id=src.session_id,
                                 prefix_len=prefix_len, role="neuocyte")
              for _ in range(3)]
-    assert engine.vram_free() == vram_before          # necessary, not sufficient
+    # Necessary, not sufficient -- and bounded rather than exact. `vram_free`
+    # is a fact about the whole device, so asserting equality made this a test
+    # of whether anything else on the machine touched the GPU: it failed on
+    # 2026-09-25 with a 24 MiB drift while an organism ran beside the suite,
+    # and the fork was innocent. Copying three 600-token prefixes would cost
+    # hundreds of megabytes, so a bound far below that still catches a fork
+    # that allocates while surviving a neighbour that allocates.
+    COPY_WOULD_COST = 128 * 1024 * 1024
+    assert vram_before - engine.vram_free() < COPY_WOULD_COST
 
     # The logical serialized size reports the full prefix for every fork; this
     # is NOT evidence of physical allocation, and the test records that.

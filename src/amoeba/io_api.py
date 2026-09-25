@@ -49,6 +49,7 @@ from .argcheck import signature_of
 from .errors import (InvalidInput, NotFound,
                      ResourceExhausted)
 from .ids import new_id, sha256_hex
+from .results import substance_of
 from .store.events import EventKind
 from .store.writer import Mutation
 
@@ -533,6 +534,33 @@ def build(sup: "Supervisor") -> dict[str, Any]:  # noqa: C901
         return {"delivered": delivered, "count": len(delivered),
                 "resumed": resumed, "resumed_count": len(resumed)}
 
+    # What a finished work item actually said, in the words it said it in.
+    # Nothing longer: this is carried into a role's context, and the point is
+    # to hand over the outcome rather than a pointer to go and find it.
+    def _work_report(row: Any) -> dict[str, Any]:
+        """A work item as the request that waited on it needs to see it.
+
+        Live on 2026-09-25 the resumed request said only that the work was
+        `done`. Ego was handed a status and told to answer with what the work
+        returned, so it went hunting through the blackboard and the result
+        references, could not reach the value, and reported the system had
+        failed to deliver it. It had -- into a blob nobody handed over. The
+        number was in `finding` the whole time (I141).
+        """
+        out = {"work_id": row["work_id"], "objective": row["objective"],
+               "status": row["status"]}
+        if not row["result_blob"]:
+            return out
+        try:
+            result = mind.blobs.get_json(row["result_blob"])
+        except Exception:  # noqa: BLE001 -- an unreadable result is still a result
+            out["result_unresolved"] = True
+            return out
+        if not isinstance(result, dict):
+            return out
+        out.update(substance_of(result))
+        return out
+
     def _resume_parked(*, limit: int) -> list[dict[str, Any]]:
         """Give a parked interaction back to the role once its work has landed.
 
@@ -560,11 +588,14 @@ def build(sup: "Supervisor") -> dict[str, Any]:  # noqa: C901
             # second gate that has to agree with the one inside the mutation,
             # and the one inside is the only one that cannot be raced -- so
             # this loop does the cheap gathering and lets the commit decide.
-            done = [dict(r) for r in mind.db.conn.execute(
-                "SELECT work_id, objective, status FROM work_items"
+            done = [_work_report(r) for r in mind.db.conn.execute(
+                "SELECT work_id, objective, status, result_blob FROM work_items"
                 " WHERE operation_id = ? AND blocks_answer = 1 ORDER BY created_at",
                 (row["operation_id"],))]
-            summary = "; ".join(f"{w['work_id']} {w['status']}" for w in done)
+            summary = "; ".join(
+                f"{w['work_id']} {w['status']}"
+                + (f": {w['finding']}" if w.get("finding") else "")
+                for w in done)
             queued: dict[str, Any] = {}
 
             def body(m: Mutation, iid=row["interaction_id"], cid=row["client_id"],

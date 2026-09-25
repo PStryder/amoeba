@@ -33,8 +33,32 @@ sys.path.insert(0, str(ROOT / "src"))
 from amoeba.backends.llama_engine import LlamaEngine  # noqa: E402
 from amoeba.errors import BackendUnavailable, ResourceExhausted  # noqa: E402
 
-RUNTIME = r"F:\hexylab\amoeba-runtime\llama.cpp-b11057-win-cuda12.4"
-MODEL = r"F:\hexylab\amoeba-models\Qwen3-4B-Instruct-2507-Q5_K_M.gguf"
+def _engine_paths() -> tuple[str, str]:
+    """The runtime and model this machine has, from config or the environment.
+
+    These were one machine's absolute paths written into the script, so it ran
+    nowhere else. The operator's `config.toml` is asked first because it
+    already carries them; AMOEBA_RUNTIME_DIR and AMOEBA_MODEL_PATH override,
+    and a missing answer says what to set rather than failing on a path
+    nobody here chose.
+    """
+    import os
+
+    from amoeba.config import load_config
+
+    runtime = os.environ.get("AMOEBA_RUNTIME_DIR", "").strip()
+    model = os.environ.get("AMOEBA_MODEL_PATH", "").strip()
+    cfg_file = Path(__file__).resolve().parents[1] / "config.toml"
+    if (not runtime or not model) and cfg_file.exists():
+        cfg = load_config(cfg_file)
+        runtime = runtime or str(cfg.runtime_dir)
+        model = model or str(cfg.backend.model_path)
+    if not runtime or not model:
+        raise SystemExit(
+            "no runtime or model to load: copy config.example.toml to "
+            "config.toml and set backend.model_path, or set "
+            "AMOEBA_RUNTIME_DIR and AMOEBA_MODEL_PATH")
+    return runtime, model
 
 N_CTX = 2048
 N_SEQ_MAX = 4
@@ -44,8 +68,9 @@ STEP = 16
 
 
 def probe(kv_unified: bool) -> dict:
+    _r, _m = _engine_paths()
     eng = LlamaEngine(
-        runtime_dir=RUNTIME, model_path=MODEL,
+        runtime_dir=_r, model_path=_m,
         n_ctx=N_CTX, n_seq_max=N_SEQ_MAX, n_gpu_layers=-1,
         n_batch=512, n_ubatch=512, kv_unified=kv_unified,
     )

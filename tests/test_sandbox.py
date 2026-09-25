@@ -23,7 +23,13 @@ pytestmark = pytest.mark.skipif(sys.platform != "win32",
                                 reason="AppContainer isolation is Windows-only")
 
 HOST_FILE_IN_PROFILE = str(Path.home() / "NTUSER.DAT")
-PROJECT_FILE = str(Path(__file__).resolve().parents[1] / "config.toml")
+# A file that is certainly there. It used to be `config.toml`, which is an
+# operator's own file and is absent from a fresh checkout -- so anywhere but
+# one machine `open()` raised FileNotFoundError, the exit code was non-zero,
+# and a test about the sandbox refusing to read project source passed because
+# there was nothing to read.
+PROJECT_FILE = str(Path(__file__).resolve().parents[1] / "pyproject.toml")
+assert Path(PROJECT_FILE).exists(), "the file this test reads must exist"
 
 
 @pytest.fixture(scope="module")
@@ -149,10 +155,28 @@ def test_cannot_read_project_source(manager, sb):
     assert "PermissionError" in r.stderr or "FileNotFoundError" in r.stderr
 
 
-def test_cannot_read_the_state_database(manager, sb):
-    db = r"F:\hexylab\amoeba-state\mind.sqlite3"
-    r = run(manager, sb, f"print(open({db!r}, 'rb').read(16))\n")
-    assert r.exit_code != 0
+def test_cannot_read_the_state_database(manager, sb, tmp_path):
+    """And the database has to exist, or this passes for the wrong reason.
+
+    It named one machine's database by absolute path. Anywhere else the file
+    is absent, `open()` raises FileNotFoundError, the exit code is non-zero,
+    and a sandbox-escape test goes green because there was nothing to steal.
+    A real database with a sentinel in it is written here first, so a refusal
+    is the only thing that can make this pass.
+    """
+    import sqlite3
+
+    db = tmp_path / "mind.sqlite3"
+    con = sqlite3.connect(db)
+    con.execute("CREATE TABLE secrets(x TEXT)")
+    con.execute("INSERT INTO secrets VALUES ('SENTINEL')")
+    con.commit()
+    con.close()
+    assert db.exists() and db.stat().st_size > 0, "nothing to refuse"
+
+    r = run(manager, sb, f"print(open({str(db)!r}, 'rb').read(64))\n")
+    assert r.exit_code != 0, "the sandbox read the state database"
+    assert "SENTINEL" not in r.stdout
 
 
 def test_cannot_write_outside_the_sandbox(manager, sb):

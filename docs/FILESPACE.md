@@ -14,13 +14,13 @@ filesystem access at all. Roots are added explicitly:
 ```toml
 [[filespace.roots]]
 name = "out"
-path = "F:/hexylab/amoeba-out"
+path = "C:/Users/YOUR_NAME/Amoeba/output"
 mode = "read_write"
 description = "where Amoeba puts things it produces"
 
 [[filespace.roots]]
-name = "pcdc"
-path = "F:/hexylab/pcdc"
+name = "project"
+path = "C:/Users/YOUR_NAME/projects/example"
 mode = "read_only"
 ```
 
@@ -189,7 +189,7 @@ existing one is always reported under the name it actually has.
 ## The input circuit
 
 ```
-you:      mind_file_attach(path="F:/hexylab/pcdc/steering.py", work_id=…)
+you:      mind_file_attach(path="C:/Users/YOUR_NAME/projects/example/module.py", work_id=…)
              │
 Harness:     ├─ resolve inside an allowlisted root      (refuse otherwise)
              ├─ read the bytes

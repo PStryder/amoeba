@@ -213,10 +213,10 @@ Localhost is not a remote deployment.
 {
   "mcpServers": {
     "amoeba": {
-      "command": "F:\\hexylab\\amoeba\\.venv\\Scripts\\python.exe",
+      "command": "C:\\Users\\YOUR_NAME\\Amoeba\\source\\.venv\\Scripts\\python.exe",
       "args": ["-m", "amoeba", "mcp",
-               "--config", "F:\\hexylab\\amoeba\\config.toml"],
-      "cwd": "F:\\hexylab\\amoeba"
+               "--config", "C:\\Users\\YOUR_NAME\\Amoeba\\source\\config.toml"],
+      "cwd": "C:\\Users\\YOUR_NAME\\Amoeba\\source"
     }
   }
 }

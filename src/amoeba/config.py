@@ -316,11 +316,29 @@ class FilespaceConfig:
     allow_multiply_linked: bool = False
 
 
+def _location(variable: str, default: str) -> Path:
+    """Where something lives, as the operator set it or beside the checkout.
+
+    These defaults used to be one machine's absolute paths, written into the
+    package itself, so a fresh clone anywhere else started with locations that
+    could not exist and a config file was not optional but mandatory. An installation now runs from a checkout with nothing set, and
+    an operator who wants these elsewhere says so once, in the environment or
+    in their config.
+    """
+    value = os.environ.get(variable, "").strip()
+    return Path(value) if value else Path(default)
+
+
 @dataclass(slots=True)
 class Config:
-    state_dir: Path = Path("F:/hexylab/amoeba-state")
-    runtime_dir: Path = Path("F:/hexylab/amoeba-runtime")
-    models_dir: Path = Path("F:/hexylab/amoeba-models")
+    # Relative to the working directory, and all three are in `.gitignore`:
+    # running the organism from a checkout must not put runtime state into it.
+    state_dir: Path = field(
+        default_factory=lambda: _location("AMOEBA_STATE_DIR", "state"))
+    runtime_dir: Path = field(
+        default_factory=lambda: _location("AMOEBA_RUNTIME_DIR", "runtime"))
+    models_dir: Path = field(
+        default_factory=lambda: _location("AMOEBA_MODELS_DIR", "models"))
     supervisor_host: str = "127.0.0.1"
     supervisor_port: int = 8711
     inference_port: int = 8712

@@ -1,7 +1,18 @@
+# Amoeba configuration -- copy to `config.toml` and set the three paths.
+#
+#   cp config.example.toml config.toml
+#
+# Nothing here is machine-specific by default. `state_dir` is where the
+# organism keeps its database, blobs and sandbox; `runtime_dir` holds the
+# llama.cpp build; `models_dir` holds the GGUF files. Leave them relative and
+# they sit beside the checkout (and are gitignored), or point them anywhere.
+# The environment variables AMOEBA_STATE_DIR, AMOEBA_RUNTIME_DIR and
+# AMOEBA_MODELS_DIR override these without editing a file.
+
 # Amoeba - real backend (one resident Qwen3-4B on the RTX 4080).
-state_dir   = "F:/hexylab/amoeba-state"
-runtime_dir = "F:/hexylab/amoeba-runtime/llama.cpp-b11057-win-cuda12.4"
-models_dir  = "F:/hexylab/amoeba-models"
+state_dir   = "state"
+runtime_dir = "runtime"
+models_dir  = "models"
 
 supervisor_host = "127.0.0.1"
 supervisor_port = 8711
@@ -12,8 +23,8 @@ log_level       = "INFO"
 
 [backend]
 kind         = "llama_cpp"
-lib_path     = "F:/hexylab/amoeba-runtime/llama.cpp-b11057-win-cuda12.4/llama.dll"
-model_path   = "F:/hexylab/amoeba-models/Qwen3-4B-Instruct-2507-Q5_K_M.gguf"
+lib_path     = "runtime/llama.dll"  # the llama.cpp shared library
+model_path   = "models/your-model.gguf"  # any GGUF the runtime can load
 n_gpu_layers = -1
 # n_ctx is the TOTAL shared KV pool. kv_unified is forced on: it is the only
 # mode in which an Ego prefix can be physically shared with neuocytes.

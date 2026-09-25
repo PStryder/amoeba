@@ -137,3 +137,36 @@ def issued_digest(mind: Any, result_ref: str, *, role: str) -> str | None:
         "SELECT sha256 FROM issued_results WHERE result_ref = ? AND issued_to = ?",
         (str(result_ref).strip()[:16], role)).fetchone()
     return row["sha256"] if row else None
+
+# What a work result actually *said*, as opposed to how it was produced. A
+# neuocyte's result carries its finding beside its telemetry -- raw text, tool
+# calls, tools offered, posts seen, token counts -- and the finding is the
+# short part. Bounded projection treats the whole dict alike, so the substance
+# ends up behind the same reference as the noise.
+#
+# Live on 2026-09-25 a worker computed 41679167500, recorded it in `finding`,
+# and completed. Ego called `get_work`, then `result_read` three times, never
+# reached it, and answered the client with a number of its own. The value was
+# four hops away inside 2118 bytes of provenance (I142).
+SUBSTANCE_KEYS = ("finding", "answer", "claim", "summary", "plan")
+MAX_SUBSTANCE = 600
+
+
+def substance_of(result: Any) -> dict[str, Any]:
+    """The reportable core of a work result: what it concluded, and how sure.
+
+    Returned separately so it survives projection whole. Everything else about
+    the result stays exactly where it was and is reached the same way.
+    """
+    if not isinstance(result, dict):
+        return {}
+    out: dict[str, Any] = {}
+    for key in SUBSTANCE_KEYS:
+        value = result.get(key)
+        if isinstance(value, str) and value.strip():
+            out["finding"] = value.strip()[:MAX_SUBSTANCE]
+            break
+    if result.get("confidence") is not None:
+        out["confidence"] = result["confidence"]
+    return out
+

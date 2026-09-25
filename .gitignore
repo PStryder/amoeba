@@ -1,6 +1,20 @@
 .venv/
 __pycache__/
 *.pyc
-/state/
 *.sqlite3*
 .pytest_cache/
+
+# Runtime locations. The defaults are relative, so an organism run from a
+# checkout keeps its state, its llama.cpp build and its models beside the
+# source without ever putting them in it.
+/state/
+/runtime/
+/models/
+
+# An operator's own configuration. `config.example.toml` is the tracked one;
+# the live file names this machine's paths and is nobody else's business.
+/config.toml
+/config.test.toml
+
+# Benchmark output is a record of one run on one machine.
+/bench/out/

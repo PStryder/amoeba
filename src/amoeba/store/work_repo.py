@@ -536,6 +536,13 @@ class WorkRepo:
             except Exception:
                 item["result"] = None
                 item["result_unresolved"] = True
+            # Lifted out of `result` so it survives a bounded projection
+            # whole. What the work concluded is short; what it carries about
+            # how it concluded is not, and the two used to be behind one
+            # reference together (I142).
+            from ..results import substance_of
+
+            item.update(substance_of(item.get("result")))
         return item
 
     def queue_stats(self) -> dict[str, Any]:

@@ -5,9 +5,10 @@ AppContainer, and it holds (see ``sandbox.py``). This module is about the
 *inward* boundary: what the rest of the machine can do to Amoeba's files.
 
 Those are different problems and the second one was open. A directory created
-under a permissive parent inherits that parent's DACL, and `F:\\hexylab` grants
-``Everyone:(OI)(CI)(F)``. Measured before this module existed, every Amoeba
-directory was world-writable, which meant:
+under a permissive parent inherits that parent's DACL, and the parent this was
+first measured under granted ``Everyone:(OI)(CI)(F)`` -- as many a secondary
+data drive does. Before this module existed every Amoeba directory was
+therefore world-writable, which meant:
 
 * **Injection.** The sandbox runtime is a copied CPython tree. Anyone could
   overwrite a stdlib ``.py`` file or a DLL, and the next neuocyte run would

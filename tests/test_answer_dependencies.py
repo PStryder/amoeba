@@ -440,3 +440,67 @@ def test_nothing_in_the_resume_path_swallows_exceptions(mind):
     assert "except" not in resume, (
         "the resume path catches something; an internal error there would be "
         "reported as nothing to do")
+
+
+def test_the_resumed_request_carries_what_the_work_found(mind):
+    """Not just that it finished. What it returned.
+
+    Live on 2026-09-25, with parking and resumption both working, the client
+    still got no number. The resumed request said `work X done` and nothing
+    else, so Ego went hunting through the blackboard and the result
+    references, could not reach the value, and told the client the system had
+    failed to deliver it. It had -- into a blob nobody handed over. The answer
+    was sitting in the result's `finding` the whole time.
+    """
+    verbs = _sup(mind).methods()
+    interaction_id = _ask(mind)
+    work_id = _work(mind, verbs, blocks=True)
+    _answer(mind, interaction_id, verbs)
+
+    lease = mind.work.lease(neuocyte_id="nc_x", work_id=work_id)
+    mind.work.complete(
+        work_id=work_id, neuocyte_id="nc_x",
+        fencing_token=lease["fencing_token"],
+        result={"finding": "The sum of the squares from 1 to 5000 is 41679167500.",
+                "confidence": 1.0})
+    verbs["io_reconcile"]()
+
+    trigger_id = _row(mind, interaction_id)["trigger_id"]
+    row = dict(mind.db.conn.execute(
+        "SELECT summary, payload_sha256 FROM role_triggers WHERE trigger_id = ?",
+        (trigger_id,)).fetchone())
+    payload = mind.blobs.get_json(row["payload_sha256"])
+    reported = payload["work"][0]
+
+    assert "41679167500" in reported.get("finding", ""), (
+        f"the resumed request did not carry the result: {reported}")
+    assert "41679167500" in row["summary"], (
+        "the summary a role reads first does not contain what the work found")
+
+
+def test_get_work_surfaces_what_the_work_concluded(mind):
+    """The substance is not left behind the telemetry that accompanies it.
+
+    A neuocyte's result carries its finding beside `raw_text`, `tool_calls`,
+    `tools_offered`, `board_posts_seen` and token counts -- 23 keys and 2118
+    bytes on 2026-09-25, of which the answer was one short string. Bounded
+    projection treats the dict alike, so Ego called `get_work`, then
+    `result_read` three times, never reached `finding`, and answered the
+    client with a number of its own (I142).
+    """
+    verbs = _sup(mind).methods()
+    work_id = _work(mind, verbs, blocks=False)
+    lease = mind.work.lease(neuocyte_id="nc_x", work_id=work_id)
+    mind.work.complete(
+        work_id=work_id, neuocyte_id="nc_x",
+        fencing_token=lease["fencing_token"],
+        result={"finding": "the sum is 41679167500", "confidence": 1.0,
+                "raw_text": "x" * 4000, "tool_calls": [{"name": "run_code"}] * 40,
+                "board_posts_seen": ["post_x"] * 50})
+
+    item = verbs["get_work"](work_id=work_id)
+    assert item["finding"] == "the sum is 41679167500", (
+        "what the work concluded is reachable only through its provenance")
+    assert item["confidence"] == 1.0
+    # And the rest is untouched, reached exactly as before.
+    assert item["result"]["raw_text"].startswith("x")

@@ -2600,6 +2600,29 @@ is not one, and there is now no `except` anywhere in that path.
 `test_a_programming_error_in_the_resume_path_is_not_swallowed`,
 `test_nothing_in_the_resume_path_swallows_exceptions`
 
+**I142. A work result's substance is not hidden behind its telemetry.**
+A neuocyte's result carries what it concluded beside how it concluded:
+`raw_text`, `tool_calls`, `tools_offered`, `board_posts_seen`, token counts.
+On 2026-09-25 that was 23 keys and 2118 bytes, of which the answer was one
+short string. Bounded projection treats the dict alike, so the short part ends
+up behind the same reference as the long part.
+
+A worker computed 41,679,167,500, recorded it in `finding`, and completed. Ego
+called `get_work`, then `result_read` three times, never reached the value, and
+told the client *"this is a failure of the system to deliver the result, not a
+failure of the computation itself."* It was right. The number was four hops
+away inside its own provenance.
+
+So `get_work` lifts the substance out -- the finding and its confidence -- and
+returns it beside the result rather than inside it. It is short by
+construction and survives projection whole. Everything else about the result
+stays exactly where it was and is reached exactly as before. The same
+extraction feeds the request that resumes a parked interaction (I141), which
+had the identical defect: it handed a role a status and asked it to answer
+with what the work returned.
+→ `test_get_work_surfaces_what_the_work_concluded`,
+`test_the_resumed_request_carries_what_the_work_found`
+
 **I73. A role is never wedged by a turn it did not close.** One open turn per
 role is a database constraint, so a turn left running blocks every future turn
 for that role — the role heartbeats, reports healthy, and never thinks again

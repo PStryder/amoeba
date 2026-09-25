@@ -899,6 +899,7 @@ class Database:
         ("role_turns", "lineage", "TEXT"),
         ("work_items", "specialisation", "TEXT"),
         ("work_items", "profile_fallback", "TEXT"),
+        ("work_items", "blocks_answer", "INTEGER NOT NULL DEFAULT 0"),
         ("role_turns", "session_handle", "TEXT"),
         ("role_turns", "token_start", "INTEGER"),
         ("role_turns", "token_end", "INTEGER"),

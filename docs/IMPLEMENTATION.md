@@ -140,20 +140,20 @@ saying so.
 Third-party runtime, weights, source and runtime data are separate trees:
 
 ```
-F:\hexylab\amoeba\        application source (this repo)
-F:\hexylab\amoeba-runtime\    llama.cpp b11057 win-cuda-12.4 + vendored llama.h
-F:\hexylab\amoeba-models\     Qwen3-4B-Instruct-2507-Q5_K_M.gguf
-F:\hexylab\amoeba-state\      SQLite WAL, content-addressed blobs, logs
+<install>\amoeba\        application source (this repo)
+<install>\amoeba-runtime\    llama.cpp build + vendored llama.h
+<install>\amoeba-models\     the GGUF weights you are running
+<install>\amoeba-state\      SQLite WAL, content-addressed blobs, logs
 ```
 
-`F:\hexylab\pcdc` and `F:\hexylab\bitnet` are untouched.
+Anything else sharing the same parent directory is untouched.
 
 ---
 
 ## Setup
 
 ```powershell
-Set-Location F:\hexylab\amoeba
+Set-Location <install>\amoeba
 
 # 3.11 only; do not use the global or the cathedral environment
 C:\Python311\python.exe -m venv .venv
@@ -162,7 +162,16 @@ C:\Python311\python.exe -m venv .venv
     mcp==1.26.0 pydantic==2.12.4 anyio==4.12.0 numpy==2.2.6 `
     pytest==8.4.2 pytest-timeout==2.4.0
 .\.venv\Scripts\python.exe -m pip install -e . --no-deps
+
+# Your own configuration. The tracked file is the example; this one names
+# your paths and is ignored by git.
+Copy-Item config.example.toml config.toml
 ```
+
+`config.example.toml` points at `state\`, `runtime\` and `models\` beside the
+checkout, which is where an organism run from here will put things unless you
+say otherwise. `AMOEBA_STATE_DIR`, `AMOEBA_RUNTIME_DIR` and `AMOEBA_MODELS_DIR`
+override those without editing a file.
 
 The llama.cpp runtime and the model are downloaded separately into the trees
 above; `doctor` tells you if either is missing.

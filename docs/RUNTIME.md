@@ -21,8 +21,8 @@ from tag b11057 is vendored beside the DLLs as the ABI reference.
 4,022,468,096 parameters, 151,936 vocab, 262,144 trained context). One model
 was downloaded; nothing was fetched speculatively.
 
-**BitNet was not used.** `F:\hexylab\bitnet` and `F:\hexylab\pcdc` are
-untouched. BitNet's GPU path is Linux/Docker-oriented (`libbitnet.so` via
+**BitNet was not used**, and nothing sharing the install's parent
+directory was touched. BitNet's GPU path is Linux/Docker-oriented (`libbitnet.so` via
 ctypes, a Bash `compile.sh`, `readline`/xformers imports) and its Windows CPU
 build is `GGML_CUDA=OFF`. A conventional small transformer on a current
 llama.cpp reached every milestone target without that port.

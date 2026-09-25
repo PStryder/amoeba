@@ -1,0 +1,34 @@
+# Amoeba configuration -- copy to `config.toml` and set the three paths.
+#
+#   cp config.example.toml config.toml
+#
+# Nothing here is machine-specific by default. `state_dir` is where the
+# organism keeps its database, blobs and sandbox; `runtime_dir` holds the
+# llama.cpp build; `models_dir` holds the GGUF files. Leave them relative and
+# they sit beside the checkout (and are gitignored), or point them anywhere.
+# The environment variables AMOEBA_STATE_DIR, AMOEBA_RUNTIME_DIR and
+# AMOEBA_MODELS_DIR override these without editing a file.
+
+# Amoeba - DETERMINISTIC TEST BACKEND.
+# Output from this configuration is a hash function, NOT model inference.
+state_dir   = "state/test"
+runtime_dir = "runtime"
+models_dir  = "models"
+
+supervisor_port = 8721
+inference_port  = 8722
+ego_port        = 8723
+id_port         = 8724
+log_level       = "INFO"
+
+[backend]
+kind      = "deterministic"
+n_ctx     = 32768
+n_seq_max = 8
+
+[arbiter]
+max_neuocytes            = 2
+neuocyte_wall_seconds    = 30.0
+neuocyte_token_budget    = 128
+lease_seconds          = 10.0
+max_maintenance_per_hour = 50
