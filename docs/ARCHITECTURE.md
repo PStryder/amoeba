@@ -2297,6 +2297,70 @@ that it is one, and what went wrong last time.
 `test_a_board_naive_worker_stays_board_naive`,
 `test_a_retry_is_told_it_is_one`
 
+**I137. A persistent role delegates only into its own neuocyte lineage, and
+the Harness decides which.** Two questions were answered by one field:
+
+| | |
+|---|---|
+| **work class** | what *kind* of work this is -- decides the execution shape: maintenance runs from durable state, user work forks a published context |
+| **worker lineage** | *whose* delegated cognition does it -- decides the profile the worker is born into |
+
+`work_class` decided both, and it is an argument to `ego_request_work`. So the
+model chose not only what kind of work to request but whose mind would perform
+it. Observed live on 2026-09-24: Ego asked for maintenance-shaped work and was
+handed an `id.neuocyte@1.1` worker -- Id's cognition, instantiated by Ego, with
+no Id anywhere in the record and nothing in the provenance saying it had
+happened.
+
+Lineage is now derived from `origin_actor`, which the Harness writes at
+admission and which no caller supplies. `ego` originates only `ego.neuocyte`
+workers and `id` only `id.neuocyte` workers, whatever class the work is. A
+`specialisation` narrows *within* a lineage and cannot cross one, because the
+lineage is always its prefix: the worst a caller naming `id.neuocyte` achieves
+is `ego.neuocyte.id.neuocyte`, a leaf under its own root. What a worker
+physically inherits follows the same rule, so no worker is handed another
+role's prefix.
+
+Because the rule reads the durable work row, everything that re-derives it
+agrees: a retry, an expired lease, a recovered item and a resumed one all bind
+the lineage the work was admitted with. Work no persistent role originated has
+no lineage to inherit and takes the outward one; I92 already says such work
+wakes nobody.
+
+And a role delegates only work of its own *kind*. Ego requests `user` work;
+`maintenance` is Id's to judge and Id's to delegate. Deriving the lineage
+already stopped Ego receiving an `id.neuocyte`, but it left a second odd
+combination reachable -- an `ego.neuocyte` running maintenance-shaped work,
+a worker doing a kind of work its own profile does not describe. Ego asking
+for maintenance is refused at its own door and again at admission, and told
+where the request belongs: `ego_request_id_review`.
+
+So the path when Ego thinks something needs tending is to say so to Id. Id
+decides whether it is warranted and delegates it into its own lineage on its
+own authority. There is no shortcut by which Ego instantiates an Id worker or
+performs Id's work itself, which is the point: the inward mind auditing the
+outward one means nothing if the outward one can spawn it or do its job for
+it.
+
+Work no persistent role originated is left alone by this rule -- it has no
+role whose kind to check against, and I92 already says it wakes nobody.
+→ `test_ego_delegates_only_into_its_own_lineage`,
+`test_id_delegates_only_into_its_own_lineage`,
+`test_the_work_class_does_not_choose_a_mind`,
+`test_ego_asking_for_maintenance_still_gets_an_ego_worker`,
+`test_id_maintenance_work_binds_under_id`,
+`test_a_specialisation_cannot_name_another_lineage`,
+`test_a_worker_never_inherits_another_roles_prefix`,
+`test_a_retry_binds_the_same_lineage`,
+`test_expiry_and_recovery_keep_the_lineage`,
+`test_nothing_rewrites_who_originated_work`,
+`test_the_record_shows_the_origin_and_the_lineage_it_produced`,
+`test_work_nobody_persistent_originated_takes_the_outward_lineage`,
+`test_ego_cannot_ask_for_maintenance_work`,
+`test_the_harness_refuses_the_pairing_too`,
+`test_id_still_delegates_its_own_maintenance`,
+`test_work_nobody_persistent_originated_is_left_alone`
+
 **I73. A role is never wedged by a turn it did not close.** One open turn per
 role is a database constraint, so a turn left running blocks every future turn
 for that role — the role heartbeats, reports healthy, and never thinks again

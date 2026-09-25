@@ -238,6 +238,18 @@ def build(sup: "Supervisor") -> dict[str, Any]:  # noqa: C901
         if work_class not in WORK_CLASSES:
             raise InvalidInput("unknown work class", work_class=work_class,
                                allowed=list(WORK_CLASSES))
+        # Maintenance belongs to Id. Ego asking for it used to be served by an
+        # `id.neuocyte` -- Id's cognition instantiated by Ego, with no Id in
+        # the record (I137). Lineage is derived from the originating role now,
+        # so that cannot happen; this closes the other half, because an
+        # `ego.neuocyte` running maintenance-shaped work would be a worker
+        # doing a kind of work its own profile does not describe.
+        if work_class != "user":
+            raise InvalidInput(
+                "maintenance is Id's work, not Ego's",
+                work_class=work_class,
+                hint="ask Id with ego_request_id_review; Id decides whether "
+                     "maintenance is warranted and delegates it itself")
         if not 1 <= int(replicas) <= 8:
             raise InvalidInput("replicas must be between 1 and 8",
                                replicas=replicas)

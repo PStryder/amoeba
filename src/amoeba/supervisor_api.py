@@ -786,6 +786,23 @@ def build(sup: "Supervisor") -> dict[str, Any]:
             actor="supervisor", bump_version=False)
         return out
 
+    def _class_belongs_to(origin_actor: str, work_class: str) -> None:
+        """A role may only admit work of its own kind.
+
+        Enforced here as well as at `ego_request_work`, because the verb is
+        the model's door and this is the Harness's. Work nobody persistent
+        originated is left alone: it has no role whose kind to check against.
+        """
+        from .neuocyte import WORK_OF_ROLE
+
+        expected = WORK_OF_ROLE.get(origin_actor)
+        if expected is not None and work_class != expected:
+            raise InvalidInput(
+                f"{origin_actor} delegates {expected} work, not {work_class}",
+                origin_actor=origin_actor, work_class=work_class,
+                hint=("maintenance is Id's to decide on and Id's to delegate; "
+                      "Ego asks for it with ego_request_id_review"))
+
     def admit_work(*, objective: str, work_class: str, origin_actor: str,
                    operation_id: str | None = None, priority: int = 0,
                    budget_tokens: int | None = None, wall_seconds: float | None = None,
@@ -794,6 +811,7 @@ def build(sup: "Supervisor") -> dict[str, Any]:
                    board_access: str = "read_write",
                    sandbox_allowed: bool = False,
                    specialisation: str | None = None) -> dict[str, Any]:
+        _class_belongs_to(origin_actor, work_class)
         decision = sup.arbiter.admit(
             work_class=work_class, snapshot=sup.resource_snapshot(),
             requested_budget_tokens=budget_tokens, requested_wall_seconds=wall_seconds,

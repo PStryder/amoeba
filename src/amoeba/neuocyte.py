@@ -39,22 +39,48 @@ from .rpc import RpcClient, read_or_create_token
 from .promptlib.model import fallback_output_ceiling
 from .tools import parse_tool_calls, strip_tool_calls
 
+# The closing format used to read "Reply with exactly three lines", stated
+# after the tool protocol and contradicting it: one instruction says emit a
+# tool call and nothing else, the other says reply in a fixed shape now. Live
+# on 2026-09-24 the workers followed the second one every time -- six
+# delegations, sandbox granted, `run_code` named in the objective, and not one
+# tool call in the organism's entire history. They answered from context and
+# reported that the context did not contain the answer, which was true and
+# was not the task.
+# The persistent roles that may delegate, and therefore the only lineages a
+# worker can be born into. Not a list of who may call `admit_work`: it is the
+# set of minds that *have* delegated cognition to inherit.
+WORK_ORIGINS = ("ego", "id")
+
+# And the kind of work each of them delegates. Maintenance is the inward
+# mind's job: Ego noticing that something needs tending is a reason to ask
+# Id, not a reason to do it itself with a worker of its own. Keeping the
+# pairing here means there is no combination where a lineage runs work of a
+# kind its own prompt does not describe.
+WORK_OF_ROLE = {"ego": "user", "id": "maintenance"}
+
 WORKER_INSTRUCTION = """You are a bounded neuocyte forked from the mind's Ego context.
 You inherited the context above. Do one narrow task and stop.
 
 Task: {objective}
 {board}{tools}
-Reply with exactly three lines:
+If answering needs an action -- running code, reading a file, looking
+something up -- call the tool for it first. The context will not contain a
+result nobody has produced yet, and "the state does not say" is not an answer
+to a task that asked you to find out.
+
+When you have what you need, and only then, close with exactly three lines:
 FINDING: <one sentence, the thing you actually determined>
 CONFIDENCE: <a number between 0 and 1>
-EVIDENCE: <what in the context above supports it, or "none in context">"""
+EVIDENCE: <what supports it -- a tool result you obtained, something in the
+context above, or "none">"""
 
 TOOLS_BLOCK = """
 {prompt_block}
 
 A tool call is a request, not an action: the Harness validates it, decides
 whether you may make it, runs it, and returns the result to you. Call a tool
-only when you need its result to answer; otherwise answer directly.
+when you need its result; otherwise answer from what you already have.
 """
 
 MESSAGE_BLOCK = """A message arrived about this task after it was assigned:
@@ -107,6 +133,25 @@ Reply with exactly three lines:
 FINDING: <one sentence>
 CONFIDENCE: <a number between 0 and 1>
 EVIDENCE: <which state references support it, or "none">"""
+
+
+def worker_lineage(item: dict[str, Any]) -> str:
+    """Whose delegated cognition a work item instantiates.
+
+    Derived from the persistent role that originated the work, and from
+    nothing a caller supplied. `work_class` and `specialisation` are both
+    model-authored, so neither may name a lineage: a specialisation can only
+    ever narrow *within* one, because the lineage is always its prefix.
+
+    Work admitted by anything that is not a persistent role has no lineage to
+    inherit. Admission refuses it (see `WORK_ORIGINS`), so reaching here with
+    one means the row predates that rule; it binds to the outward lineage,
+    which is the narrower of the two -- an `ego.neuocyte` cannot audit Id's
+    conclusions, and inheriting Id's cognition by accident is the failure
+    this function exists to stop.
+    """
+    origin = (item.get("origin_actor") or "").strip()
+    return origin if origin in WORK_ORIGINS else "ego"
 
 
 class Neuocyte:
@@ -207,8 +252,23 @@ class Neuocyte:
         and refusing to do the work because the library was incomplete would
         be a worse failure than doing it on the baseline.
         """
+        # Two separate questions, which used to be answered by one field.
+        #
+        #   work class    -- what KIND of work this is. Decides the execution
+        #                    shape: maintenance runs from durable state,
+        #                    user work forks a published context.
+        #   worker lineage -- WHOSE delegated cognition is doing it. Decides
+        #                    the profile, and belongs to the Harness.
+        #
+        # `work_class` decided both, and it is a model-authored argument to
+        # `ego_request_work`. So Ego asking for maintenance-shaped work was
+        # handed an `id.neuocyte` -- Id's cognition, instantiated by Ego,
+        # with no Id involvement anywhere in the record. Observed live on
+        # 2026-09-24. Lineage now comes from `origin_actor`, which the
+        # Harness writes at admission and no caller can supply.
+        lineage = worker_lineage(item)
         maintenance = item.get("work_class") == "maintenance"
-        base = "id.neuocyte" if maintenance else "ego.neuocyte"
+        base = f"{lineage}.neuocyte"
         # Kept so the built-in path still has the right ceiling: a worker
         # the library could not bind is the same kind of worker.
         self.profile_namespace = base
@@ -228,7 +288,9 @@ class Neuocyte:
                     actor_id=self.neuocyte_id, actor_kind="neuocyte",
                     work_id=work_id, model_generation=self.model_generation,
                     # Only the Ego-derived path inherits a primed context.
-                    inherited_namespace=None if maintenance else "ego")
+                    # What is physically inherited follows the lineage too.
+                    # A worker never inherits another role's prefix.
+                    inherited_namespace=None if maintenance else lineage)
                 break
             except Exception as exc:  # noqa: BLE001
                 if namespace != candidates[-1]:

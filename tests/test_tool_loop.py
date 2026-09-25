@@ -629,12 +629,15 @@ def test_maintenance_work_specialises_under_id(cfg):
 
     Maintenance work forked from Id must not reach into Ego's family tree by
     naming a leaf, which is why Ego names a leaf and never a namespace.
+
+    Which mind spawned it is now said explicitly: the work class used to
+    decide, and a class is something the model chooses (see I137).
     """
     sup = _BindingSup({"id.neuocyte.integrity"})
     nc = _binding_neuocyte(cfg, sup)
 
-    bound = nc._bind_profile({"work_class": "maintenance",
-                                         "specialisation": "integrity"}, work_id="w3")
+    bound = nc._bind_profile({"origin_actor": "id", "work_class": "maintenance",
+                              "specialisation": "integrity"}, work_id="w3")
     assert bound["profile_ref"] == "id.neuocyte.integrity@1"
     assert sup.attempts == ["id.neuocyte.integrity"]
 
