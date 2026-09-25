@@ -1148,6 +1148,14 @@ def build(sup: "Supervisor") -> dict[str, Any]:
                         "complete": finished,
                         "ended_because": record.get("ended_because"),
                         "withheld": record.get("withheld") or [],
+                        # What the thought did, from the answer of record for
+                        # the same reason its conclusions come from there: it
+                        # belongs to the whole answer, not to whichever turn
+                        # happened to finish it (I139). Empty is meaningful --
+                        # it is what an unbacked claim looks like.
+                        "effected": record.get("effected") or [],
+                        "calls_made": record.get("calls_made") or [],
+                        "calls_refused": record.get("calls_refused") or [],
                         "turn_id": row["answered_by_turn"],
                         "stop_reason": turn["stop_reason"] if turn else None,
                         "result": result,
@@ -1199,6 +1207,17 @@ def build(sup: "Supervisor") -> dict[str, Any]:
         out = {"trigger_id": trigger_id, "status": settled["status"],
                "answer": result.get("answer", ""),
                "is_simulated": bool(result.get("is_simulated"))}
+        # What the thought actually did, carried through rather than reshaped
+        # away (I139). `effected` is always present, including when it is
+        # empty: an answer that claims an action and effected nothing is the
+        # case this exists to make visible, so an empty list is the signal and
+        # not something to tidy out of the reply.
+        for key in ("effected", "calls_made", "calls_refused"):
+            value = settled.get(key)
+            if value is None and isinstance(result, dict):
+                value = result.get(key)
+            if value or key == "effected":
+                out[key] = value or []
         if settled["status"] in ("incomplete", "unanswerable"):
             out["ended_because"] = settled.get("ended_because")
         if settled.get("withheld"):

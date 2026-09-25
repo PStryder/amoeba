@@ -557,9 +557,19 @@ def build(sup: "Supervisor") -> dict[str, Any]:  # noqa: C901
         # `answer` is where a client reads the reply, and it is in the same
         # place for every kind: an investigation's `claim` used to be found
         # somewhere a conversation's `answer` never was.
+        # What the thought actually did, beside what it says it did. Lifted to
+        # the top level for the same reason `answer` is: a client should not
+        # have to know the shape of a stored thought to find out whether the
+        # actions in it happened (I139). `effected` is the only one of the
+        # three that is evidence a thing was done -- a call can be made and
+        # refused, and four of Ego's five board_post calls once were.
+        thought = (payload or {}).get("result") or {}
+        thought = thought if isinstance(thought, dict) else {}
         return {"interaction_id": interaction_id, "status": row["status"],
                 "kind": row["kind"], "output": payload, "error": row["error"],
                 "answer": answer_of((payload or {}).get("result")) or None,
+                "effected": thought.get("effected") or [],
+                "calls_refused": thought.get("calls_refused") or [],
                 "results": results, "timed_out": False}
 
     def io_list(*, client_id: str, limit: int = 20) -> dict[str, Any]:

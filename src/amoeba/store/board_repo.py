@@ -482,6 +482,21 @@ class BoardRepo:
                      ev.get("note")),
                 )
             for rel in relations:
+                # The check `relate` already makes, which this path did not.
+                # Without it a `to_post` that does not exist reaches the
+                # FOREIGN KEY constraint, and the model is handed
+                # "IntegrityError: FOREIGN KEY constraint failed" as the
+                # reason its post was refused: an internal failure standing in
+                # for the mistake it made (I127). Live on 2026-09-25 Ego
+                # linked a finding to a worker's post that had not been
+                # written yet and was told exactly that.
+                if m.sql("SELECT 1 FROM board_posts WHERE post_id = ?",
+                         (rel["to_post"],)).fetchone() is None:
+                    raise NotFound(
+                        "unknown board post", post_id=rel["to_post"],
+                        hint="a relation can only point at a post that already "
+                             "exists; post the other one first, or use "
+                             "board_relate afterwards")
                 m.sql(
                     "INSERT OR IGNORE INTO board_relations(from_post, to_post, relation,"
                     " created_at) VALUES (?,?,?,?)",

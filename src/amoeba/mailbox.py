@@ -63,6 +63,7 @@ import json
 import time
 from typing import TYPE_CHECKING, Any, Sequence
 
+from .actions import calls_of, effects_of
 from .errors import InvalidInput, NotFound
 from .ids import new_id, sha256_hex
 from .store.events import EventKind
@@ -1052,18 +1053,37 @@ def complete(m: Mutation, mind: "Mind", *, turn_id: str, stop_reason: str,
                     (req.get("operation_id") or row["operation_id"],))
                     ] if (req.get("operation_id") or row["operation_id"]) else []
                 conclusion_id = conclusion_ids[-1] if conclusion_ids else None
+                # What this answer's operation actually did, beside what it
+                # says it did. The Harness does not read the prose; it makes
+                # the receipts inseparable from the reply, so a claim with
+                # nothing under it is visibly unbacked (I139). An invocation
+                # is not an effect -- `effected` comes from the domain events
+                # that prove a transition, `refused` from the calls that were
+                # turned away, and the two are not the same list.
+                op_id = req.get("operation_id") or row["operation_id"]
+                turn_ids = [s["turn_id"] for s in segments if s.get("turn_id")]
+                if turn_id not in turn_ids:
+                    turn_ids.append(turn_id)
+                effected = effects_of(mind.db.conn, operation_id=op_id,
+                                      actor=row["role"])
+                called, refused = calls_of(mind.db.conn, turn_ids,
+                                           actor=row["role"])
                 sha = m.put_json(
                     {"answer": text, "complete": finished,
                      "ended_because": ended_because, "turn_id": turn_id,
                      "stop_reason": stop_reason, "role": row["role"],
                      "conclusion_id": conclusion_id,
                      "conclusion_ids": conclusion_ids, "withheld": withheld,
+                     # The receipts. `effected` is the only one of these that
+                     # is evidence a thing was done.
+                     "effected": effected,
+                     "calls_made": called, "calls_refused": refused,
                      # Which turns the answer came from, in order. The text
                      # lives in each turn's own result; this is the index,
                      # so provenance points back at the producing turns
                      # without storing any fragment twice.
                      "segments": segments},
-                    schema="amoeba.trigger_answer/2")
+                    schema="amoeba.trigger_answer/3")
             m.sql("UPDATE role_triggers SET answer_sha256 = ?,"
                   " answer_status = ?, answered_at = ?, answered_by_turn = ?"
                   " WHERE trigger_id = ? AND answer_status IS NULL",

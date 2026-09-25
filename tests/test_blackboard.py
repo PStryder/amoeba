@@ -109,6 +109,29 @@ def test_a_relation_with_the_wrong_keys_is_not_called_an_unknown_relation(mind):
     assert ok
 
 
+def test_relating_to_a_post_that_does_not_exist_says_so(mind):
+    """Not "IntegrityError: FOREIGN KEY constraint failed".
+
+    Live on 2026-09-25, one refusal after the keys were fixed, Ego linked its
+    finding to a worker post that had not been written yet and was handed the
+    raw constraint failure as the reason. An internal error standing in for
+    the mistake the model made is the thing I127 exists to prevent, and
+    `board_relate` already checked this -- posting did not.
+    """
+    with pytest.raises(NotFound) as exc:
+        mind.board.post(author="wk_1", author_kind="neuocyte", post_type="finding",
+                        body="linked to something that isn't there",
+                        relations=[{"to_post": "post_does_not_exist",
+                                    "relation": "supports"}])
+
+    said = str(exc.value)
+    assert "FOREIGN KEY" not in said and "IntegrityError" not in said, (
+        "the model was shown a database failure instead of its mistake")
+    assert "unknown board post" in said
+    assert exc.value.details.get("post_id") == "post_does_not_exist", (
+        "the refusal did not name the post that was missing")
+
+
 def test_a_genuinely_unknown_relation_still_says_so(mind):
     """Control: the new branch must not swallow the mistake it replaced."""
     claim = post(mind, "wk_1", "the cache is cold")

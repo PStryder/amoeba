@@ -2016,7 +2016,8 @@ would turn a mind's mistake into the Harness's claim.
 `test_when_nothing_is_waiting_it_says_so_plainly`,
 `test_the_digest_names_the_conclusion_it_is_counting`,
 `test_a_relation_with_the_wrong_keys_is_not_called_an_unknown_relation`,
-`test_a_genuinely_unknown_relation_still_says_so`
+`test_a_genuinely_unknown_relation_still_says_so`,
+`test_relating_to_a_post_that_does_not_exist_says_so`
 
 **I128. The organism is not blind when it is strained.** Id was woken by
 conclusions, messages, work it owns, board posts on that work, and the
@@ -2440,6 +2441,80 @@ reported as `concurring_reasoning`, and it can never move
 `test_one_source_consulted_twice_is_one_observation`,
 `test_an_unclassified_tool_does_not_manufacture_independence`,
 `test_two_reasoners_agreeing_from_the_same_evidence_is_not_corroboration`
+
+**I139. An answer carries what it did, and an invocation is not what it did.**
+Live on 2026-09-25 Ego told a client *"A worker has been delegated to compute
+this sum via code execution in a sandbox."* No `ego_request_work` appears
+anywhere in that turn. It posted to the board, read the board, read three
+results, and answered. The delegation never happened, and nothing in the
+record contradicted the claim anywhere the client could see it.
+
+That is not a wrong belief about the world. It is the model narrating an
+intention in the past tense, and the Harness having no opinion about it. The
+shape reaches far past workers -- *"I saved the file"*, *"I notified Id"*,
+*"I cancelled the operation"*, *"I posted the finding"* -- and each is a claim
+about a state transition that either happened or did not.
+
+The Harness does not read the prose and does not try to. Policing text would
+put a classifier on the critical path of every answer, where a misfire either
+blocks a correct reply or mangles it. Instead an answer carries what its
+operation actually did, so a claim with nothing under it is *visibly*
+unbacked -- to Id, to the operator and to the client. Same move as I138: a
+post may say whatever it likes in its body, and what it cannot do is assert a
+root it did not acquire.
+
+**An invocation is not an effect.** The obvious grounding -- it called the
+tool, so it did the thing -- is wrong, and the same live record shows why:
+
+```
+07:42:43  board_post    refused: 'evidence' must be a list of objects
+07:42:45  board_post    refused: 'relations' must be a list of objects
+07:42:47  board_post    refused: a relation needs 'to_post' and 'relation'
+07:42:49  board_post    refused: FOREIGN KEY constraint failed
+07:42:51  board.posted  post_id=post_01M3C606GS3Y30Q6WX18ABBV8E
+07:42:51  board_post    accepted
+```
+
+Four of those five calls posted nothing. `accepted` is weaker than it looks
+too: it means the handler returned without raising, not that anything was
+committed. What proves a post exists is `board.posted`, a separate durable
+event naming what it created. So three things are kept apart:
+
+| | |
+|---|---|
+| **attempted** | the call was made -- `role.tool_invoked` |
+| **refused** | the call was turned away, with the reason |
+| **effected** | something came into being -- the domain event, with its id |
+
+`work.requested_by_ego` and `work.admitted` are this distinction already
+written down. Ego asking for work is an attempt; the Harness admitting it is
+the effect. Only the second is a delegated worker.
+
+Effects are read from the event chain by `operation_id`, the handle the answer
+already used to find its own conclusions. An effect is any event in the
+operation attributed to that role which is not declared turn bookkeeping, and
+**unlisted counts as an effect** -- the opposite of the default
+`FRESH_ACQUISITION` takes, deliberately. Omitting something a mind really did
+turns a true statement into an apparently unsupported one, which is the one
+failure this must never produce. A new event kind reports itself until
+somebody says it is noise.
+
+`effected` is present even when empty, and especially then: an empty list
+beside a confident claim is the whole point, so it is never tidied out of a
+reply on its way to the client.
+
+This grounds the report, not the mind. Nothing here stops Ego saying it
+delegated a worker. It stops the saying from being the only record.
+→ `test_a_refused_call_is_not_an_effect`,
+`test_an_accepted_call_that_effected_nothing_shows_no_effect`,
+`test_asking_for_work_is_not_being_given_it`,
+`test_the_live_claim_has_nothing_under_it`,
+`test_turn_bookkeeping_is_not_reported_as_something_done`,
+`test_an_unclassified_event_is_reported_rather_than_hidden`,
+`test_another_actors_effects_are_not_credited_to_this_one`,
+`test_effects_outside_the_operation_are_not_borrowed`,
+`test_an_operationless_thought_claims_no_receipts`,
+`test_a_clients_answer_carries_what_the_thought_actually_did`
 
 **I73. A role is never wedged by a turn it did not close.** One open turn per
 role is a database constraint, so a turn left running blocks every future turn
